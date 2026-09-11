@@ -123,6 +123,18 @@ EXPENSIVE_INDEXES = frozenset({'db.actor'})
 # (those are for the counter-based rewrite ALAO emits; the older `p[#p+1]`
 # form is worse still, breaking even at ~100 interpreted rather than ~30.)
 #
+# Independently reproduced by agent-I003's tools/microbench.py at best-of-25 on
+# the same protocol: 0.44/0.47 at K=3, 0.97/1.01 at K=20, 1.47/1.28 at K=30,
+# 3.00/2.77 at K=100 (jit/interp). Same breakeven, same sign everywhere. Their
+# large-K ratios run hotter than mine because their parts are 8 chars rather
+# than ~4, so the O(n^2) memcpy in the original arm bites harder - which is the
+# whole point below.
+#
+# Which is to say: "string_concat_in_loop is 8.69x", as the beam had it, was
+# never a property of the transform. It was a property of the loop length the
+# original measurement happened to use (~100-200). Quoting a single number here
+# is a category error; that is why this comment is a curve.
+#
 # The interpreted column is the one that governs: agent-I013 confirmed BC_CAT
 # is NYI on LuaJIT 2.0.4, so any loop containing `..` runs interpreted no matter
 # how hot it is, and table.concat is NYI too.

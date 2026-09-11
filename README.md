@@ -229,6 +229,12 @@ LuaJIT 2.0.4):
 
 Breakeven is around **30 iterations**. Below that you are making the code slower.
 
+Independently reproduced by a second harness at best-of-25 with the same
+protocol. Note what this means for the number you may have seen quoted
+elsewhere: "this transform is 8.69x" was never a property of the transform, it
+was a property of the loop length that measurement happened to use. There is no
+single speedup figure for this rewrite, only a curve.
+
 **Safety:** Only applied when:
 - Variable is declared `local` and initialized to `""` immediately before the loop
 - The loop is not nested and the init sits in the loop's enclosing scope
