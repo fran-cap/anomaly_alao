@@ -78,7 +78,6 @@ def _is_per_frame_callback_name(name: str) -> bool:
     # e.g. `bas_actor_on_update`, a mod's own prefixed copy of the callback
     return name.endswith('_on_update') and 'first_update' not in name
 
-# Bare globals that benefit from caching
 # I-040: how many time_global() calls in one function body justify
 # `local tg = time_global()`. Two, not `cache_threshold`: every call is an
 # engine C call that aborts the LuaJIT trace, so the body is running in the
@@ -88,6 +87,7 @@ def _is_per_frame_callback_name(name: str) -> bool:
 # latter and probably nearer the former). db.actor & friends stay at 4.
 TIME_GLOBAL_CACHE_THRESHOLD = 2
 
+# Bare globals that benefit from caching
 CACHEABLE_BARE_GLOBALS = frozenset({
     'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber',
     'unpack', 'select', 'rawget', 'rawset',
@@ -3121,8 +3121,6 @@ class ASTAnalyzer:
            stale. Zero live sites in either corpus - the only coroutine code
            there is a commented-out `wait()` in vanilla `_g.script` - but it is
            the one shape that would break the premise rather than the details.
-
-
         1. a `while` or `repeat` anywhere in this body. Those are the only
            loops whose trip count can depend on the clock, and a hoisted read
            turns `while time_global() - t0 < 100 do ... end` into an infinite
@@ -3194,10 +3192,6 @@ class ASTAnalyzer:
                 if self._TG_RETURN_RE.search(code):
                     return False
 
-        # (4) at least one read that runs on every invocation
-        if not any(not c.if_chain_path and not c.in_loop for c in calls):
-            return False
-
         # (3) self-timing: assignment from the clock, subtracted from a later read
         assign_line: Dict[str, int] = {}
         for ln in range(start, end + 1):
@@ -3216,6 +3210,11 @@ class ASTAnalyzer:
                            r'|\b' + re.escape(var) + r'\s*-\s*time_global\s*\(')
                     if re.search(pat, code):
                         return False
+
+        # (4) at least one read that runs on every invocation
+        if not any(not c.if_chain_path and not c.in_loop for c in calls):
+            return False
+
         return True
 
     def _analyze_repeated_calls_in_scope(self):
