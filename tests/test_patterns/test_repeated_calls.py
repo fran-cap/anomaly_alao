@@ -403,6 +403,35 @@ def test_db_actor_cache_does_not_shadow_a_module_local(transform, run_both):
     run_both(DB_ACTOR_MODULE_LOCAL, out, "f")
 
 
+# third shape of the same hole, found by agent-I021 in
+# 463- Tasks QoL Pack - Serious/tasks_fetch.script: the colliding binding is an
+# enclosing function's PARAMETER, not a `local` anywhere, so no grep for
+# `local actor` finds it. The cache lands in a nested closure and captures it.
+DB_ACTOR_ENCLOSING_PARAM = """
+function run(actor)
+    local inner = function()
+        local a = db.actor.health
+        local b = db.actor.health
+        local c = db.actor.health
+        local d = db.actor.health
+        return actor, a == b, c == d
+    end
+    return inner()
+end
+
+function call_it()
+    return run("a string, not the actor")
+end
+"""
+
+
+def test_cache_does_not_capture_an_enclosing_parameter(transform, run_both):
+    out = transform(DB_ACTOR_ENCLOSING_PARAM)
+    assert "local actor = db.actor" not in out
+    assert "local actor_alao = db.actor" in out
+    run_both(DB_ACTOR_ENCLOSING_PARAM, out, "call_it")
+
+
 def test_time_global_cache_name_does_not_shadow(transform, run_both, compiles):
     out = transform(TIME_GLOBAL_NAME_TAKEN)
     assert 'local tg = "not a time at all"' in out
