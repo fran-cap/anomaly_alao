@@ -54,6 +54,18 @@ Options:
     --verbose / -v    Show detailed output
     --quiet / -q      Only show summary
 
+    # EXPERIMENTAL
+    --experimental    Rewrite `s = s .. x` in a loop into a parts table plus one
+                      table.concat. Still opt-in on purpose: table.concat has
+                      setup cost, so the rewrite only pays off past roughly 30
+                      loop iterations and is measurably SLOWER below that (0.53x
+                      at 5 iterations, interpreted). ALAO declines it outright
+                      when the loop is a numeric `for` with a literal bound under
+                      STRING_CONCAT_BREAKEVEN_ITERS, but it cannot know the trip
+                      count of a `pairs()` loop - so you are the one asserting
+                      the loop is long. See the header of
+                      STRING_CONCAT_BREAKEVEN_ITERS in ast_analyzer.py.
+
     # DANGER ZONE
     --list-backups    List all .alao-bak backup files without restoring
     --clean-backups   Remove all .alao-bak backup files

@@ -27,14 +27,20 @@ PERFORMANCE_IMPACT = {
     # CRITICAL - can destroy frame time
     'per_frame_callback': 'critical',
     'expensive_in_hotpath': 'critical',
-    'string_concat_in_loop': 'critical',
-    'append_loop_counter': 'critical',
+    # append_loop_counter: scales with table length (1.06x at 5 iters, ~10x at 2000), rated below
 
     # HIGH - moderate to high impact in tight loops
     # measured 1.3x-2.6x interpreted and ~1.0x compiled on LuaJIT 2.0 - real,
     # but not the 'critical' it used to be rated
     'vector_alloc_in_loop': 'high',
     'distance_to_comparison': 'high',
+    # was 'critical'. It is O(n^2), but only when n is large: agent-I039
+    # measured the table.concat rewrite at 0.53x (i.e. a regression) for a
+    # 5-iteration loop, breaking even around 30. Every one of the rewritable
+    # sites in the enabled GAMMA corpus is a 3-10 element UI string builder,
+    # so flagging all 205 of them 'critical' was misinforming the reader.
+    'string_concat_in_loop': 'medium',
+    'append_loop_counter': 'high',
     'math_pow_simple': 'high',
     'string_format_in_loop': 'high',
     # I-013: a per-frame body that cannot be JIT-compiled pays the

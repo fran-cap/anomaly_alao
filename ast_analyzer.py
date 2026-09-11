@@ -285,6 +285,63 @@ ENGINE_NYI_METHODS = frozenset({
 # the trip count is a literal we can read; anything dynamic is assumed long.
 APPEND_LOOP_MIN_ITERATIONS = 20
 
+# --- string_concat_in_loop: when the table.concat rewrite is actually a win ---
+#
+# `s = s .. x` in a loop is O(n^2) in theory, so "always rewrite it to
+# table.concat" reads like a free win. It isn't. table.concat has setup cost:
+# you allocate a parts table, grow it, then allocate the result buffer. For a
+# short accumulation that costs MORE than just concatenating a handful of small
+# strings, and the rewrite is a measured *regression*.
+#
+# Measured 2026-09-11 (agent-I039) under lupa.luajit20 with the section-2
+# protocol from lab/docs/beam-ideas.md: collectgarbage('collect') before every
+# timed run, jit.off(f, true) applied to the chunk itself for the interpreted
+# mode, __sink to defeat DCE, best of 9, total work held constant across the
+# sweep. Speedup = time(original) / time(rewrite):
+#
+#   iters:      3     5    10    20    30    50   68   100   200   1000
+#   interp   0.45  0.53  0.61  0.82  1.16  1.12 1.31  1.66  5.47  11.99
+#   (JIT)    0.60  0.62  0.85  1.23  1.32  2.49 1.32  2.65  8.79  21.46
+#
+# **The interpreted row is the gate. The JIT row is recorded for completeness
+# and is not used in any decision here.** agent-I013 classified all 205 corpus
+# sites of this pattern (run 20260911-114408-i013-rerun): 0 sit in a compiled
+# body - 120 interpreted, 82 mixed - because BC_CAT is NYI on LuaJIT 2.0.4, so a
+# loop containing `..` never compiles no matter how hot it gets. table.concat is
+# NYI too, so the rewritten loop is interpreted as well. The JIT column
+# describes a machine state that no site of this pattern is ever in.
+#
+# Those are for the counter-based rewrite ALAO emits. Do not carry the number
+# over to the older `p[#p+1]` shape, which ALAO stopped emitting in b4726fe and
+# which breaks even around K=100 interpreted rather than ~30 - if you see "~100"
+# quoted as this pattern's crossover, it is describing that dead shape.
+#
+# 30 is where the interpreted row first clears G2's 1.15x bar on both harnesses
+# (1.16x and 1.28x at K=30; K=20 fails both at 0.82x and 1.01x).
+#
+# Independently reproduced by agent-I003's tools/microbench.py at best-of-25 on
+# the same protocol: 0.44/0.47 at K=3, 0.97/1.01 at K=20, 1.47/1.28 at K=30,
+# 3.00/2.77 at K=100 (jit/interp). Same breakeven, same sign everywhere. Their
+# large-K ratios run hotter than mine because their parts are 8 chars rather
+# than ~4, so the O(n^2) memcpy in the original arm bites harder - which is the
+# whole point below.
+#
+# Which is to say: "string_concat_in_loop is 8.69x", as the beam had it, was
+# never a property of the transform. It was a property of the loop length the
+# original measurement happened to use - somewhere in the low hundreds. The two
+# sweeps bracket that crossing differently (I-003 puts it at K=100-200, I-039 at
+# K=200-500) and on a shared machine neither can place it tighter, so "low
+# hundreds" is the honest statement. Quoting a single number for this transform
+# is a category error whichever bracket is right; that is why this comment is a
+# curve.
+#
+# Hence: only rewrite when the loop plausibly runs at least this many times. We
+# can only *prove* the count for a numeric `for` with literal bounds; for
+# pairs/ipairs/expression-bounded loops the count is unknown and the finding is
+# still emitted (report-only unless the user opts in), because the enabled GAMMA
+# corpus says those are overwhelmingly 3-10 element UI lists.
+STRING_CONCAT_BREAKEVEN_ITERS = 30
+
 # Functions/properties that can return nil - calling methods on these without
 # nil checks can cause CTD (crash to desktop)
 # Format: full_name -> description of when it returns nil
@@ -3166,6 +3223,30 @@ class ASTAnalyzer:
                         source_line=suggestion,
                     ))
 
+    # `for i = <lit>, <lit> [, <lit>] do` - the only loop shape whose trip count
+    # we can read straight off the source. Everything else (pairs, ipairs,
+    # while, expression bounds) returns None = unknown.
+    _LITERAL_FORNUM_RE = re.compile(
+        r'^\s*for\s+\w+\s*=\s*(-?\d+)\s*,\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?do\b'
+    )
+
+    def _literal_loop_iterations(self, loop_start_line) -> Optional[int]:
+        """Trip count of a numeric for with literal bounds, else None."""
+        if not loop_start_line:
+            return None
+        line = self._get_source_line(loop_start_line)
+        if not line:
+            return None
+        m = self._LITERAL_FORNUM_RE.match(line)
+        if not m:
+            return None
+        start, stop = int(m.group(1)), int(m.group(2))
+        step = int(m.group(3)) if m.group(3) else 1
+        if step == 0:
+            return None
+        n = (stop - start) // step + 1
+        return max(0, n)
+
     def _analyze_string_concat_in_loop(self):
         """Find string concatenation patterns in loops."""
         # find self-concatenation: s = s .. x
@@ -3211,7 +3292,18 @@ class ASTAnalyzer:
                             init_line = assign.line
                             is_safe = True
                             break
-                
+
+                # SAFETY/PERF: if the loop is a numeric `for` with literal
+                # bounds we know exactly how many times it runs. Below the
+                # measured breakeven the table.concat rewrite is SLOWER than
+                # the naive concat (see STRING_CONCAT_BREAKEVEN_ITERS), so
+                # don't offer it as a fix.
+                iter_bound = None
+                if loop_scope:
+                    iter_bound = self._literal_loop_iterations(loop_scope.start_line)
+                    if iter_bound is not None and iter_bound < STRING_CONCAT_BREAKEVEN_ITERS:
+                        is_safe = False
+
                 self.findings.append(Finding(
                     pattern_name='string_concat_in_loop',
                     severity='YELLOW',
@@ -3227,6 +3319,7 @@ class ASTAnalyzer:
                         'loop_end': loop_scope.end_line if loop_scope else None,
                         'init_line': init_line,
                         'is_safe': is_safe,
+                        'iter_bound': iter_bound,
                         'concat_lines': [c.line for c in concats],
                     },
                     source_line=self._get_source_line(concat_info.line),

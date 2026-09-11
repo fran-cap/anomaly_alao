@@ -45,7 +45,8 @@ python stalker_lua_lint.py [path_to_mods] [options]
 --exclude "file"   Exclude certain mods from reports/fixes (one mod name per line)
 
 # Experimental
---experimental     Enable experimental fixes (string concat in loops)
+--experimental     Enable experimental fixes (string concat in loops).
+                   Opt-in: only a win past ~30 iterations, see below.
 
 # Reports & Restore
 --report [file]    Generate comprehensive report (.txt, .html, .json)
@@ -115,7 +116,7 @@ Pay attention some of this fixes requires `--experimental` flag.
 
 | Pattern | Description | Impact |
 |---------|-------------|--------|
-| `s = s .. x` in loop | String concatenation builds O(n²) garbage | Critical |
+| `s = s .. x` in loop | String concatenation builds O(n²) garbage. `--experimental` only, and only worth it past ~30 loop iterations (see below) | Critical for long loops, a regression for short ones |
 | `vector():set(...)` in loop | Hoists one `local _v = vector()` above the loop and reuses it. Only when the vector provably can't outlive the iteration (not stored, not returned, not captured, not handed to an unknown callee) | High - 1.3x-2.6x interpreted, ~1.0x compiled |
 | Append-only local table in a loop, value may be nil | Same counter rewrite as the GREEN row. Only YELLOW because appending `nil` stops `#t` growing while a counter keeps going, so the two forms genuinely diverge | Critical |
 
@@ -217,18 +218,51 @@ end
 
 **After:**
 ```lua
-local _result_parts = {}
+local _result_parts, _result_n = {}, 0
 for i = 1, 10 do
-    _result_parts[#_result_parts+1] = get_line(i)
+    _result_n = _result_n + 1; _result_parts[_result_n] = get_line(i)
 end
-local result = table.concat(_result_parts)
+local result = table.concat(_result_parts, "", 1, _result_n)
 ```
 
-This optimization reduces GC pressure from O(n²) to O(n) for string building.
+This turns O(n²) string garbage into O(n). **But it is not free, and that is why
+it is still behind a flag.** Building the parts table and the result buffer costs
+more than a handful of small concats, so for a short accumulation the rewrite is
+a *regression*. Measured on LuaJIT 2.0 (speedup = original / rewrite,
+interpreted -- the only mode that matters here, because `..` is NYI on
+LuaJIT 2.0.4 and so a loop containing it never compiles. All 205 sites of this
+pattern in the enabled GAMMA corpus were classified and **none** sits in a
+compiled body):
+
+| loop iterations | 3 | 5 | 10 | 20 | 30 | 68 | 100 | 200 | 1000 |
+|---|---|---|---|---|---|---|---|---|---|
+| speedup | 0.45x | 0.53x | 0.61x | 0.82x | 1.16x | 1.31x | 1.66x | 5.47x | 11.99x |
+
+Breakeven is around **30 iterations**. Below that you are making the code slower.
+
+Independently reproduced by a second harness at best-of-25 with the same
+protocol. Note what this means for the number you may have seen quoted
+elsewhere: "this transform is 8.69x" was never a property of the transform, it
+was a property of the loop length that measurement happened to use. There is no
+single speedup figure for this rewrite, only a curve.
 
 **Safety:** Only applied when:
-- Variable is initialized to `""` before the loop
-- Pattern is simple `var = var .. expr`
+- Variable is declared `local` and initialized to `""` immediately before the loop
+- The loop is not nested and the init sits in the loop's enclosing scope
+- Pattern is exactly `var = var .. expr` on its own line
+- `var` is never read anywhere inside the loop (including inside `expr`, and
+  including an early `return var`)
+- The loop is not a numeric `for` with a literal trip count below the breakeven
+
+The counter form (`_n = _n + 1` rather than `parts[#parts+1]`) is deliberate: it
+is faster, and the explicit `1, _n` range on `table.concat` means a `nil`
+operand still raises, exactly as `..` would, instead of silently truncating the
+result.
+
+**Known behaviour changes** (why this is not GREEN): a value with a `__concat`
+metamethod concatenates fine with `..` but is rejected by `table.concat`, and a
+non-string non-number operand raises a different error message. ALAO cannot see
+either statically.
 
 ## Nil checks performance impact
 
