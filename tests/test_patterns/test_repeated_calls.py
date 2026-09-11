@@ -275,10 +275,23 @@ end
 """
 
 
+# a yield is the one thing a Lua body can do that reaches the next frame, so
+# the cached stamp could be stale after it
+TIME_GLOBAL_YIELD = """
+function f()
+    local a = time_global()
+    coroutine.yield()
+    local b = time_global()
+    return a, b
+end
+"""
+
+
 @pytest.mark.parametrize("src", [
     TIME_GLOBAL_WHILE,
     TIME_GLOBAL_SELF_TIMING,
     TIME_GLOBAL_EARLY_RETURN,
+    TIME_GLOBAL_YIELD,
 ])
 def test_time_global_unsafe_shapes_are_skipped(analyze, transform, src):
     assert "repeated_time_global" not in pattern_names(analyze(src))

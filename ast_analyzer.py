@@ -3113,7 +3113,15 @@ class ASTAnalyzer:
     def _time_global_cacheable(self, func_scope: Scope, calls: List) -> bool:
         """Is hoisting `local tg = time_global()` to the top of this body safe?
 
-        Three shapes say no:
+        Four shapes say no:
+
+        0. a `coroutine.yield()` in the body. The whole argument rests on "no
+           Lua body can advance the frame", and a yield is the one thing that
+           can: the resume may land in a later frame, where the cached stamp is
+           stale. Zero live sites in either corpus - the only coroutine code
+           there is a commented-out `wait()` in vanilla `_g.script` - but it is
+           the one shape that would break the premise rather than the details.
+
 
         1. a `while` or `repeat` anywhere in this body. Those are the only
            loops whose trip count can depend on the clock, and a hoisted read
@@ -3150,6 +3158,14 @@ class ASTAnalyzer:
         start = func_scope.start_line
         end = func_scope.end_line if func_scope.end_line and func_scope.end_line > 0 else start
         first_call_line = min(c.line for c in calls)
+
+        # (0) a yield anywhere in this body
+        for call in self.calls:
+            if call.full_name not in ('coroutine.yield', 'coroutine.wrap',
+                                      'coroutine.resume'):
+                continue
+            if self._find_function_scope(call.scope) is func_scope:
+                return False
 
         # (1) a while/repeat anywhere in this body (not in a nested closure -
         # that closure gets its own hoist decision)
