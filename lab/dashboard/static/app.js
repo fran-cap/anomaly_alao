@@ -45,8 +45,16 @@ function int(v) {
 function txt(v) { return (v === null || v === undefined || v === "") ? "-" : String(v); }
 
 function shortTime(iso) {
+  // manifests store UTC ISO timestamps; run ids are stamped in local time, so
+  // show local time here too or the two never line up
   if (!iso) return "-";
-  return String(iso).replace("T", " ").replace(/(\.\d+)?(Z|[+-]\d\d:?\d\d)?$/, "");
+  var d = new Date(String(iso));
+  if (isNaN(d.getTime())) {
+    return String(iso).replace("T", " ").replace(/(\.\d+)?(Z|[+-]\d\d:?\d\d)?$/, "");
+  }
+  var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " +
+    pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
 }
 
 function slug(v) {
