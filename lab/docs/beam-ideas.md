@@ -661,3 +661,42 @@ gain comes from the 111 live vanilla scripts, since the mods-only overlay measur
 What generation 2 should chase, given the above: `time_global()`-guarded per-frame bodies (186 abort sites)
 and engine-call hoisting in the 183 interpreted per-frame bodies; `pairs`->`ipairs` (I-005) must be gated by
 the I-013 classifier because it is 0.29x interpreted on 78% of per-frame `pairs` sites.
+
+## 9. Generation-2 results (2026-09-11, six parallel agents)
+
+Six Opus agents, one idea each, own worktree, coordinated through `lab/coord/`. Every in-game request
+was a delta against the locked full-ALAO baseline (5 repeats, 300 s, `gammabaseline` save, standing
+still). Merged on `integrate/gen2`; suite 470 passed / 7 skipped / 4 xfailed (one strict xfail fixed).
+
+| Idea | Verdict | Deciding fact |
+|---|---|---|
+| I-041 vanilla per-frame census | **kept** (closed) | Only 10 of 809 vanilla GREEN findings land inside a per-frame body that is live in GAMMA, so the gen-1 "+2.6% from vanilla" result is not explained by per-frame rewrites; treat it as launch-to-launch noise. The hot live code is one hop out from the name-based per-frame classifier (`axr_main.make_callback`, `xr_logic.pick_section_from_condlist` with 21 abort sites). Spawned I-042 / I-043 / I-044. |
+| I-021 engine-call hoisting | **kept** | The gap was a shape, not a table: 3615 of 6298 `db.actor` reads in GAMMA are method receivers (`db.actor:health()`) and the Invoke visitor suppressed every one (the `tests/test_patterns/test_repeated_calls.py` strict xfail, now fixed). `repeated_db_actor` 78 -> 289 GAMMA / 53 -> 159 vanilla, `db.storage`/`db.offline_objects`/`:name()` added. Also found and fixed a **pre-existing correctness bug**: a receiver rebound mid-body (`obj = b`) shared one cache bucket, so `--fix` answered later `obj:id()` calls with the first object's id (`_receiver_rebound`). In-game delta `20260911-153413-I-021-392bd3`: +0.35% avg / +1.6% 1% low, per-round 203-222 on both arms: **null**. |
+| I-040 `time_global()` cache | **kept as GREEN** | Correct and free (never adds a call on any path), 134 sites, 1.24x (2 reads) to 1.88x (7) interpreted with a Lua stub, 2.46x with a C-function stub; 0 of 97 GAMMA sites compile, so there is no JIT-on column. But only 15 live sites are per-frame and 7 of those are UI panels, so the standing-still save saves ~10-14 engine calls per frame = ~0.4 us of 4770 us. In-game delta `20260911-164718-I-040-ec27c2`: predicted null (result below when the run lands). Score 8.0 -> 6.0. |
+| I-012 `x^0.5` -> `math.sqrt` | **kept as GREEN** | Premise half wrong: zero `math.pow(x,0.5)` sites in either corpus; the 25 counted were `math.pow(x,2)`. The real population is bare `x^0.5` (10 GAMMA + 1 vanilla), which ALAO did not touch. 3x interpreted at every K, 1.00x compiled because LuaJIT already folds `^0.5` to a hardware sqrt, so a hot trace already returns sqrt's bits and the rewrite makes the interpreter agree with the JIT. Divergence only on `-0` / `-inf` bases; literal negatives declined. No FPS run: the one live per-frame site saves 24 ns per frame. |
+| I-031 `global_write` grouping | **kept** (shipped) | Rewritten output byte-identical (overlay hashes equal to `ref-alao-merged-b`). Of 5697 GAMMA findings, 67.7% were module-level state (the Anomaly script-as-module convention) and are now `module_global_write` behind `--show-globals`; the 32.3% forgotten-`local` writes stay RED but grouped per file+name: 1836 raw writes -> 950 groups. GAMMA findings 15060 -> 10313, RED 6069 -> 1322. `corpus_compare` "does not reconcile" note resolved: the data always reconciled, the printed table was truncated. Score 8.0 -> 9.0. |
+| I-005 `pairs` -> `ipairs` | **pruned** | Interpreted it is 0.70x at K=1 falling to 0.28x at K=2000: no crossover K exists. The gate needs "would this body compile with the `pairs` removed", and the intra-procedural classifier answers yes on five GAMMA bodies that are all false positives. With the conservatism that fixes them, eligibility is 0 of 1446 GAMMA and 0 of 1110 vanilla loops; the 24+23 provable sequences are RED census rows in quest/dialogue/loot code. Score 8.2 -> 2.0. Implementation merged as report-only. |
+
+Cross-cutting facts this generation established:
+
+- **Two agents hit the same wall from different sides.** I-041 found the hot live code in callees of the
+  per-frame bodies; I-005 found the intra-procedural classifier cannot gate a rewrite. Both point at
+  call-graph-aware trace classification, registered as **I-042** (8.5), the top of the gen-3 queue.
+- **`axr_main.make_callback` is the highest-frequency Lua function in the game and ALAO does not
+  touch it.** It dispatches through `spairs`, which does `pairs`, `table.sort` and a closure allocation
+  per `SendScriptCallback`, i.e. per online NPC per frame. Registered as **I-043** (8.0); it is not
+  reachable by any table-driven pattern and needs its own transform or a measured hand patch.
+- **Timing under the game lock is invalid.** Microbench ratios are depressed while a frametime
+  capture runs (counter append 9.8x vs 12.4x, vector alloc 2.6x vs 10.5x) and corpus G6 read +12-14%
+  for two agents whose re-runs on a quiet box were within noise. Never quote a number taken while
+  `game` is held; `coord` already serialises `corpus` behind `game` for this reason.
+- **`_apply_edits` tie-break order is load-bearing.** I-012 reordered the finding loop to let sqrt
+  edits see a hoisted local and silently flipped an unrelated overlap in `gamemode_azazel.script`.
+  Do not reorder that loop; defer specific edits instead. `ASTAnalyzer.find_visible_alias()` is the
+  reusable helper it left behind.
+- **The per-frame rewrites ALAO can do today are worth ~0.01% of a frame.** Both in-game deltas
+  this generation (I-021, I-040) were predicted null from site arithmetic before they ran, and I-021
+  measured null. In-game FPS remains the wrong instrument for anything except I-043/I-044-class
+  changes that sit directly in the per-NPC frame chain.
+- **Bench naming hole closed.** `pytest --bench` failed on the base commit because the GREEN
+  `append_loop_counter` pattern's bench file was named `counter_append`; renamed.

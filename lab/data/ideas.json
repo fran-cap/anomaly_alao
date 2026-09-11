@@ -69,11 +69,11 @@
       "measure": "Microbench in both modes, plus differential tests over tables with holes, string keys and embedded nil values.",
       "expected_gain": "high",
       "risk": "high",
-      "status": "queued",
-      "score": 8.2,
+      "status": "pruned",
+      "score": 2.0,
       "parent": null,
       "generation": 1,
-      "notes": "Enabled GAMMA: 2333 pairs() calls, 256 inside loops, 50 inside per-frame callback bodies. Changes iteration order and truncates at the first hole, so the array-like proof must be airtight."
+      "notes": "Enabled GAMMA: 2333 pairs() calls, 256 inside loops, 50 inside per-frame callback bodies. Changes iteration order and truncates at the first hole, so the array-like proof must be airtight.\nGEN-2 PRUNED 2026-09-11 (agent-I005, 97d4907): interpreted 0.70x at K=1 down to 0.28x, no crossover; the intra-procedural classifier cannot gate it (5 false-positive compiled bodies); 0 eligible of 1446 GAMMA / 1110 vanilla pairs loops. Merged report-only. Needs I-042."
     },
     {
       "id": "I-006",
@@ -174,11 +174,11 @@
       "measure": "Microbench both modes; corpus diff limited to the 25 math.pow sites.",
       "expected_gain": "med",
       "risk": "low",
-      "status": "proposed",
-      "score": 7.2,
+      "status": "kept",
+      "score": 7.0,
       "parent": null,
       "generation": 1,
-      "notes": "Enabled GAMMA: 25 math.pow call sites, so this fails corpus gate G1 on volume and is cheap enough to do anyway. The 'backwards' framing in the first draft came from comparing math.sqrt against x^0.5 without also measuring math.pow, which made a small win look like a large regression."
+      "notes": "Enabled GAMMA: 25 math.pow call sites, so this fails corpus gate G1 on volume and is cheap enough to do anyway. The 'backwards' framing in the first draft came from comparing math.sqrt against x^0.5 without also measuring math.pow, which made a small win look like a large regression.\nGEN-2 KEPT as GREEN 2026-09-11 (agent-I012, b737dfd): zero math.pow(x,0.5) sites exist; shipped bare x^0.5 -> math.sqrt instead (10 GAMMA + 1 vanilla). 3x interpreted at every K, 1.00x compiled (JIT already folds to sqrt). No FPS run: 24 ns/frame."
     },
     {
       "id": "I-013",
@@ -309,11 +309,11 @@
       "measure": "Finding-count delta on a full corpus run with gates G4-G7 clean.",
       "expected_gain": "med",
       "risk": "low",
-      "status": "proposed",
-      "score": 7.0,
+      "status": "kept",
+      "score": 8.0,
       "parent": null,
       "generation": 1,
-      "notes": "Extending the constant table is the documented way to add engine knowledge, so this is low-risk by construction."
+      "notes": "Extending the constant table is the documented way to add engine knowledge, so this is low-risk by construction.\nGEN-2 KEPT 2026-09-11 (agent-I021, a4d5f55): 3615 of 6298 GAMMA db.actor reads were method receivers the Invoke visitor suppressed; repeated_db_actor 78->289 / 53->159; found+fixed pre-existing receiver-rebind cache bug. FPS delta 20260911-153413-I-021-392bd3 null (+0.35% avg, per-round 203-222 both arms). Keeps on correctness and coverage."
     },
     {
       "id": "I-022",
@@ -459,11 +459,11 @@
       "measure": "Total finding count on the corpus drops sharply while the number of distinct affected functions is unchanged.",
       "expected_gain": "med",
       "risk": "low",
-      "status": "proposed",
-      "score": 8.0,
+      "status": "kept",
+      "score": 9.0,
       "parent": null,
       "generation": 1,
-      "notes": "Upgraded after the real corpus run showed the 39% share. Pure signal-to-noise work; no semantic risk since nothing is rewritten."
+      "notes": "Upgraded after the real corpus run showed the 39% share. Pure signal-to-noise work; no semantic risk since nothing is rewritten.\nGEN-2 SHIPPED 2026-09-11 (agent-I031, b5626ee): output byte-identical; GAMMA findings 15060->10313, global_write 5697->950 grouped, RED 6069->1322; module-level writes behind --show-globals. corpus_compare reconciliation note was table truncation, fixed."
     },
     {
       "id": "I-032",
@@ -584,6 +584,96 @@
       "parent": null,
       "generation": 1,
       "notes": "Corpus: 205 GAMMA findings, 15 vanilla. It is the most structurally invasive rewrite ALAO has, which is presumably why it was gated, so I-017 should land alongside it. Cheapest large win available because the code already exists.\nPRUNED 2026-09-11 (agent-I039 @c4b5516). The 8.69x/7.89x was a property of loop length: table.concat is 0.43x at K=3, break-even ~30 JIT / ~100 interp, 14.7x at K=2000 (two harnesses agree). 15 of the 18 rewritable corpus sites are K=3-10; the 3 that win are cold injury-message padding loops at K=68. Stays behind --experimental. Analyzer preconditions tightened + differential tests kept (branch)."
+    },
+    {
+      "id": "I-040",
+      "title": "Cache time_global() once per per-frame body (throttle guards)",
+      "category": "analyzer",
+      "generation": 2,
+      "parent": "I-013",
+      "status": "kept",
+      "score": 6.0,
+      "risk": "low",
+      "expected_gain": "med",
+      "hypothesis": "I-013 found time_global() is the top trace killer: 186 abort sites in per-frame bodies, many calling it 2+ times per invocation inside throttle guards. Every call is an engine C call on the interpreted path.",
+      "change": "ast_analyzer.py / ast_transformer.py - repeated_call-style GREEN cache of time_global() per body when called 2+ times with no intervening yield.",
+      "measure": "Interpreted microbench with a stubbed C call, census of shapes on both corpora, gates G4-G8, FPS delta vs full-ALAO overlays if live per-frame code changes.",
+      "notes": "Registered 2026-09-11 for gen-2 by the organizer; agent-I040.\nGEN-2 KEPT as GREEN 2026-09-11 (agent-I040, 7a470ce): 134 sites, 1.24x-1.88x interpreted (Lua stub), 2.46x (C stub), 0 compiled sites. Only 15 live per-frame sites, 7 of them UI: ~0.4 us of a 4770 us frame. FPS delta 20260911-164718-I-040-ec27c2 predicted null."
+    },
+    {
+      "id": "I-041",
+      "title": "Vanilla-first per-frame census (xr_motivator, bind_stalker, xr_logic, sr_*)",
+      "category": "investigation",
+      "generation": 2,
+      "parent": null,
+      "status": "kept",
+      "score": 7.5,
+      "risk": "low",
+      "expected_gain": "med",
+      "hypothesis": "The only measured in-game gain (+2.6%, suggestive) came from 111 live rewritten vanilla scripts, so vanilla per-frame bodies are where rewrites reach the frame budget.",
+      "change": "No transform. lab/reports/vanilla-per-frame-census.md: every per-frame body in extracted/vanilla_db with jit_mode, abort reason, live-after-shadowing, existing rewrites, and a ranked follow-up list.",
+      "measure": "Census table and ranked list; cross-reference with I-040/I-021/I-005/I-012.",
+      "notes": "Registered 2026-09-11 for gen-2 by the organizer; agent-I041. DONE 2026-09-11 (759956b): only 10 of 809 vanilla GREEN findings land inside a live per-frame body; the +2.6% vanilla-overlay result is not explained by per-frame rewrites. Spawned I-042/I-043/I-044."
+    },
+    {
+      "id": "I-042",
+      "title": "Extend the per-frame classifier to one-hop callees",
+      "category": "analyzer",
+      "generation": 2,
+      "parent": "I-013",
+      "status": "proposed",
+      "score": 8.5,
+      "risk": "low",
+      "expected_gain": "high",
+      "hypothesis": "The hot live vanilla code is not in update bodies but in what they call (xr_logic.pick_section_from_condlist 21 abort sites, try_switch_to_another_section 7, determine_section_to_activate 5, trade_manager.update 5, axr_main.make_callback), so every mode-gated decision is gated on the wrong function set.",
+      "change": "ast_analyzer.py - after _analyze_trace_aborts(), propagate per-frame status one hop along same-file and module.func call edges, re-run the classifier over the closure. Report-only first, as I-013 shipped.",
+      "measure": "Count of interpreted functions entering the per-frame set; whether I-040 / I-021 site counts rise inside it.",
+      "notes": "Proposed by agent-I041 (vanilla census, lab/reports/vanilla-per-frame-census.md, commit 759956b). Independently required by I-005 (agent-I005): the intra-procedural classifier cannot gate rewrites. Top of the gen-3 queue."
+    },
+    {
+      "id": "I-043",
+      "title": "Array-backed listener dispatch for axr_main.make_callback",
+      "category": "transform",
+      "generation": 2,
+      "parent": "I-041",
+      "status": "proposed",
+      "score": 8.0,
+      "risk": "med",
+      "expected_gain": "high",
+      "hypothesis": "make_callback does a pairs walk plus a type() test per listener for every SendScriptCallback, i.e. per online NPC per frame via npc_on_update; likely the highest-frequency Lua function in the game, and it aborts its trace on pairs.",
+      "change": "Maintain a parallel listener array next to the keyed table and dispatch with a numeric for. Keys are functions/userdata, so I-005 cannot derive it; own pattern or a measured hand patch.",
+      "measure": "Microbench the dispatcher at 5/20/60 listeners interpreted and compiled, then an FPS delta arm (it is in the standing-still frame chain).",
+      "notes": "Proposed by agent-I041. agent-I005: make_callback goes through spairs, which does pairs + table.sort + a closure per dispatch; not matchable by any table-driven pattern."
+    },
+    {
+      "id": "I-044",
+      "title": "In-game delta arm for --fix-debug (debug statements in live per-frame bodies)",
+      "category": "experiment",
+      "generation": 2,
+      "parent": "I-041",
+      "status": "proposed",
+      "score": 7.0,
+      "risk": "low",
+      "expected_gain": "med",
+      "hypothesis": "34 debug_statement findings sit inside the 103 live vanilla per-frame bodies (mod-side count unknown, likely larger), each a call plus concatenation and sometimes game.translate_string; plain --fix leaves them.",
+      "change": "No code. Build overlays from a --fix --fix-debug run on both corpora and queue a delta vs the full-ALAO baseline.",
+      "measure": "FPS delta with 5 repeats; the 1% low must move with the avg.",
+      "notes": "Proposed by agent-I041; cheapest untested lever in the census."
+    },
+    {
+      "id": "I-045",
+      "title": "Cache obj:position() per body with escape analysis (fresh-vector aliasing)",
+      "category": "analyzer",
+      "generation": 2,
+      "parent": "I-021",
+      "status": "proposed",
+      "score": 6.5,
+      "risk": "med",
+      "expected_gain": "med",
+      "hypothesis": ":position() is the third-ranked repeated engine getter in live per-frame bodies (25 vanilla sites). It returns a fresh vector each call and X-Ray vector methods mutate in place, so caching aliases: obj:position():add(v) twice is two vectors, a cached copy accumulates.",
+      "change": "New pass, not a table widening: reuse the I-009 escape analysis (stored into a table, returned, passed to unknown callee) plus a syntactic mutation check (clears 30 of 36 vanilla buckets) before admitting a :position() bucket to the repeated_* cacher.",
+      "measure": "Bucket count admitted on both corpora, run_both differential on aliasing shapes, gates G4-G8.",
+      "notes": "Proposed by agent-I021 after deliberately excluding :position() from I-021."
     }
   ]
 }
