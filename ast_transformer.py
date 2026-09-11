@@ -22,6 +22,85 @@ _LUA_KEYWORDS = frozenset({
 })
 
 
+# --- LuaJIT 2.0 compile verification (I-004) -------------------------------
+#
+# lupa bundles the exact VM Anomaly runs (LuaJIT 2.0 / Lua 5.1), so we can
+# loadstring() a rewrite before it ever touches the disk. lupa is NOT in
+# requirements.txt, so all of this degrades to "no verification" plus one
+# warning line when it is missing.
+_LUA_RUNTIME = None          # lazily built, one per process
+_LUA_CHECK = None            # the loadstring wrapper
+_LUA_UNAVAILABLE_REASON = None
+_LUA_WARNED = False
+
+
+def luajit_available() -> bool:
+    """Can we compile-check? Builds the runtime on first call."""
+    return _get_lua_check() is not None
+
+
+def _get_lua_check():
+    """The (src, chunkname) -> (ok, err) callable, or None if lupa is absent."""
+    global _LUA_RUNTIME, _LUA_CHECK, _LUA_UNAVAILABLE_REASON
+    if _LUA_CHECK is not None or _LUA_UNAVAILABLE_REASON is not None:
+        return _LUA_CHECK
+
+    runtime_mod = None
+    try:
+        from lupa import luajit20 as runtime_mod  # the VM the game actually runs
+    except Exception:
+        try:
+            import lupa as runtime_mod  # any lupa is better than none
+        except Exception as e:
+            _LUA_UNAVAILABLE_REASON = f'lupa not importable ({type(e).__name__}: {e})'
+            return None
+
+    try:
+        _LUA_RUNTIME = runtime_mod.LuaRuntime(unpack_returned_tuples=True)
+        # loadstring returns 1 value on success and 2 on failure; normalise so
+        # we always get a (bool, message) pair back.
+        _LUA_CHECK = _LUA_RUNTIME.eval(
+            "function(src, name)"
+            "  local f, e = loadstring(src, name)"
+            "  if f then return true, '' end"
+            "  return false, tostring(e)"
+            "end"
+        )
+    except Exception as e:
+        _LUA_UNAVAILABLE_REASON = f'lupa runtime failed to start ({type(e).__name__}: {e})'
+        return None
+    return _LUA_CHECK
+
+
+def compile_check_source(source: str, chunk_name: str = 'alao') -> Optional[str]:
+    """Compile `source` under LuaJIT 2.0. Returns the error text, or None if OK.
+
+    Returns None (i.e. "fine") when lupa is unavailable - callers decide whether
+    to warn; a missing checker must never block a fix.
+    """
+    check = _get_lua_check()
+    if check is None:
+        return None
+    try:
+        ok, err = check(source, '@' + chunk_name)
+    except Exception as e:
+        return f'lupa refused the source: {type(e).__name__}: {e}'
+    return None if ok else str(err)
+
+
+def warn_if_no_luajit(quiet: bool = False) -> bool:
+    """Print the "compile verification is off" line once per process."""
+    global _LUA_WARNED
+    if luajit_available():
+        return True
+    if not _LUA_WARNED and not quiet:
+        _LUA_WARNED = True
+        print(f"[!] --verify-compile is off: {_LUA_UNAVAILABLE_REASON}. "
+              f"Install it with `pip install lupa` to have ALAO compile-check "
+              f"every rewrite before writing it.")
+    return False
+
+
 @dataclass
 class SourceEdit:
     """A source code edit with character positions."""
@@ -52,6 +131,10 @@ class ASTTransformer:
         self._next_group_id: int = 1
         self.analyzer: Optional[ASTAnalyzer] = None
         self._line_offsets: List[int] = []  # cached line start offsets
+        # set per transform_file() call, read by the CLI for the JSON report
+        self.compile_error: Optional[str] = None
+        self.edits_applied: int = 0
+        self.edits_dropped: int = 0   # rejected by _apply_edits for overlap
 
     def _compute_line_offsets(self):
         """Compute and cache line start offsets for efficient lookups."""
@@ -64,18 +147,25 @@ class ASTTransformer:
                        fix_debug: bool = False, fix_yellow: bool = False,
                        experimental: bool = False, fix_nil: bool = False,
                        remove_dead_code: bool = False,
-                       cache_threshold: int = 4) -> Tuple[bool, str, int]:
+                       cache_threshold: int = 4,
+                       verify_compile: Optional[bool] = None) -> Tuple[bool, str, int]:
         """
         Transform a file based on findings.
         Returns (was_modified, new_content, edit_count).
-        
+
         Args:
             fix_nil: If True, auto-fix safe nil access patterns
             remove_dead_code: If True, remove 100% safe dead code (after return, if false, etc.)
             cache_threshold: Minimum call count to trigger caching suggestions (default: 4)
+            verify_compile: LuaJIT-compile the rewrite before writing it and refuse
+                the write if it fails. None (default) means "on when lupa is
+                importable". The failure lands in self.compile_error.
         """
         self.file_path = file_path
         self.edits = []
+        self.compile_error = None
+        self.edits_applied = 0
+        self.edits_dropped = 0
         self._next_group_id = 1
         self.experimental = experimental
         self.fix_nil = fix_nil
@@ -144,6 +234,17 @@ class ASTTransformer:
 
         if new_content == self.source:
             return False, self.source, 0
+
+        # I-004: never write a rewrite that does not compile. The lab harness
+        # has checked this from the outside since day one and always found 0
+        # failures, but an ALAO user got none of that guard.
+        if verify_compile is None:
+            verify_compile = luajit_available()
+        if verify_compile:
+            err = compile_check_source(new_content, file_path.name)
+            if err:
+                self.compile_error = err
+                return False, self.source, 0
 
         if not dry_run:
             if backup:
@@ -2380,6 +2481,12 @@ class ASTTransformer:
         # edits stay in admitted_repl for the group bookkeeping above but are
         # already baked into their container's text, so skip them here.
         admitted = [e for e in admitted_repl if id(e) not in absorbed] + admitted_ins
+        # Bookkeeping for the JSON report (I-029). An absorbed edit still lands
+        # - it is baked into its container's text - so it counts as applied.
+        # Everything else we generated and did not apply was dropped, which is
+        # the counter that would have exposed I-008 on day one.
+        self.edits_applied = len(admitted_repl) + len(admitted_ins)
+        self.edits_dropped = max(0, len(self.edits) - self.edits_applied)
         admitted.sort(key=lambda e: -e.start_char)
         result = self.source
         for edit in admitted:
@@ -2391,8 +2498,10 @@ def transform_file(file_path: Path, backup: bool = True, dry_run: bool = False,
                    fix_debug: bool = False, fix_yellow: bool = False,
                    experimental: bool = False, fix_nil: bool = False,
                    remove_dead_code: bool = False,
-                   cache_threshold: int = 4) -> Tuple[bool, str, int]:
+                   cache_threshold: int = 4,
+                   verify_compile: Optional[bool] = None) -> Tuple[bool, str, int]:
     """Convenience function to transform a file. Returns (modified, content, edit_count)."""
     transformer = ASTTransformer()
-    return transformer.transform_file(file_path, backup, dry_run, fix_debug, fix_yellow, 
-                                       experimental, fix_nil, remove_dead_code, cache_threshold)
+    return transformer.transform_file(file_path, backup, dry_run, fix_debug, fix_yellow,
+                                       experimental, fix_nil, remove_dead_code, cache_threshold,
+                                       verify_compile)
