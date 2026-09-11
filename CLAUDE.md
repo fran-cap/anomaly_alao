@@ -130,7 +130,7 @@ Use `py -3.12` on this machine (it has `luaparser` 4.2.0, `jinja2`, `pytest`, `l
 LuaJIT 2.0 and is the compile-checker / executor for rewritten Lua; import it as `lupa.luajit20`.
 
 ```bash
-py -3.12 -m pytest -q                 # unit + CLI tests: 372 passed, 7 skipped, 6 xfailed (2026-09-11, gen-1 merge)
+py -3.12 -m pytest -q                 # unit + CLI tests: 374 passed, 7 skipped, 5 xfailed (2026-09-11, gen-1 merge + I-019)
 py -3.12 -m pytest -q --corpus        # also analyzes the 66 vanilla scripts in the game install, read-only
 py -3.12 -m pytest -q -rx             # print the xfail reasons: each one names a real, unfixed ALAO bug
 py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
@@ -151,9 +151,6 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   - `ast_analyzer.py:2514` `_walk_for_dead_after_terminator` never descends into `do` blocks, so
     `dead_code_after_return` / `dead_code_after_break` cannot fire on parseable Lua 5.1.
   - Nil-guard detection is line-based: a one-line `if o then ... end` is not seen as a guard.
-  - A `string_find_plain` edit nested inside the value of a `table.insert` that `table_insert_append`
-    also rewrites lands only on the second `--fix` pass (vanilla `xr_logic.script:741`; the append
-    rewrite rebuilds its value from text, I-019, so the inner edit has nothing to fold into).
   - ~~`stalker_lua_lint.py:738` reports timeouts as parse errors; `transform_file_worker`
     applies no timeout; the JSON report has no failure data.~~ Fixed 2026-09-11 (I-035 / I-037 /
     I-029), three strict xfails dropped. Timeouts have their own counter, failure lines print

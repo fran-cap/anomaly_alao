@@ -60,6 +60,4 @@ Overlays to reuse (rebuild them if `--fix` output changes): `lab/coord/overlays/
 ## Housekeeping still open
 
 - `corpus_compare.py` severity totals do not reconcile exactly with per-pattern deltas after I-029.
-- The strict xfail for `xr_logic.script:741` (nested `string_find_plain` under `table_insert_append`)
-  is the I-019 fix waiting to happen.
 - Branch `lab/tests-and-corpus-tooling` is ~50 commits ahead of origin and nothing is pushed.
