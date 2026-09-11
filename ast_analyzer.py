@@ -3280,6 +3280,11 @@ class ASTAnalyzer:
                             'calls': calls,  # list of CallInfo with nodes
                             'scope': func_scope,
                             'original_call': name,  # preserve original like "self.object:id()"
+                            # I-021: the interpreted/compiled split decides how
+                            # much this rewrite is worth (~1.0x on a trace,
+                            # 1.5x-3x interpreted), so carry the I-013 verdict
+                            # into the JSON report instead of re-deriving it.
+                            'jit_mode': self._jit_mode_for_scope(func_scope),
                         },
                         source_line=suggestion,
                     ))
