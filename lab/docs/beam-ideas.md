@@ -650,6 +650,13 @@ failures, 1 parse failure (`lua_help.script`, documentation, not Lua), 1 idempot
 At the bottom of the GAMMA load order 111 of the 176 rewritten files are live; 65 are shipped by a mod.
 This is the README's "Vanilla Anomaly Scripts Optimized" mod, measured in-game as queue item
 `vanilla-db-plus-mods` (stock vs mods-overlay-on-top + vanilla-overlay-at-bottom).
+**Result (queue item `20260911-141814-VANILLA-9dd6ab`, idle box, no capped rounds, A/B/A/B/A/B):**
+stock 210.1 / 212.6 / 206.4 fps avg (1% low 168.6 / 167.7 / 164.4); full ALAO 205.0 / 219.9 / 220.7
+(1% low 164.9 / 173.9 / 173.4). Means: **+2.6% avg, +2.3% 1% low, p99 5.53 -> 5.41 ms.** Suggestive,
+not conclusive: rounds 2 and 3 of the variant beat every stock round by 7-14 fps, but round 1 did not,
+and stock itself spans 206-213 between identical launches. Within-round windows are flat (+-1 fps), so
+the noise is launch-to-launch, not sampling; a 5-6 repeat rerun is what would settle it. If real, the
+gain comes from the 111 live vanilla scripts, since the mods-only overlay measured 0.0%.
 
 What generation 2 should chase, given the above: `time_global()`-guarded per-frame bodies (186 abort sites)
 and engine-call hoisting in the 183 interpreted per-frame bodies; `pairs`->`ipairs` (I-005) must be gated by
