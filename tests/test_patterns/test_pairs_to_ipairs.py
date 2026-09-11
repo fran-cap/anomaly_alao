@@ -408,3 +408,30 @@ def test_tables_where_ipairs_would_differ_are_never_rewritten(hostile, transform
     assert "ipairs" not in out
     # and the untouched program still means what it meant
     assert lua_call(hostile, "build") == lua_call(out, "build")
+
+
+def test_declaration_in_a_narrower_block_is_refused(analyze):
+    """The `t` in the loop is a global; the `local t` died with the if-block.
+    Two different variables, and we have proved nothing about the second."""
+    assert _hits(analyze("""
+        function build(x)
+            if x then
+                local t = {}
+                t[#t+1] = 1
+            end
+            for _, v in pairs(t) do end
+        end
+    """)) == []
+
+
+def test_declaration_in_an_enclosing_block_is_accepted(analyze):
+    f = _one(analyze("""
+        function build(x)
+            local t = {}
+            t[#t+1] = 1
+            if x then
+                for _, v in pairs(t) do end
+            end
+        end
+    """))
+    assert f.severity == "GREEN"

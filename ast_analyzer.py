@@ -4504,6 +4504,13 @@ class ASTAnalyzer:
             return False
         decl_target = decl.targets[0]
 
+        # ...and the loop has to be inside the block that declaration lives in.
+        # `if x then local t = {} end` followed by `for _ in pairs(t)` is two
+        # different variables - the second one is a global - and rewriting that
+        # would be rewriting a table we have proved nothing about.
+        if not self._declaration_covers(decl, forin, parent):
+            return False
+
         # a parameter of this function with the same name would shadow it
         if isinstance(root, self._FUNC_NODES):
             for a in (getattr(root, 'args', None) or []):
@@ -4548,6 +4555,18 @@ class ASTAnalyzer:
             return False               # returned, aliased, stored, compared...
 
         return True
+
+    def _declaration_covers(self, decl, forin, parent) -> bool:
+        """Is `forin` inside the block `decl` is declared in, and after it?"""
+        decl_block = parent.get(id(decl))
+        if decl_block is None:
+            return False
+        node = forin
+        while node is not None:
+            if node is decl_block:
+                return self._get_line(decl) <= self._get_line(forin)
+            node = parent.get(id(node))
+        return False
 
     def _is_literal_sequence_constructor(self, node) -> bool:
         """`{}` or `{1, 'a', true}` - positional fields with non-nil constants.
