@@ -286,3 +286,41 @@ def test_alias_shadowed_by_a_parameter_is_not_used(transform, compiles, run_both
     assert "math.sqrt(x)" in out
     compiles(out)
     run_both(ALIAS_SHADOWED_BY_PARAM, out, "f", 2, 16)
+
+
+# ---------------------------------------------------------------------------
+# I-012 x distance_to_comparison: the two must not both claim the same source
+# ---------------------------------------------------------------------------
+
+DISTANCE_SQRT_COMPARE = """
+function f(pos, t)
+    if pos:distance_to_sqr(t) ^ 0.5 < 10 then return 1 end
+end
+"""
+
+DISTANCE_PLAIN_COMPARE = """
+function f(pos, t)
+    if pos:distance_to(t) < 10 then return 1 end
+end
+"""
+
+
+def test_sqrt_of_a_distance_does_not_double_fire(analyze, transform, compiles):
+    # distance_to_comparison wants a bare :distance_to() as a comparison
+    # operand; wrapped in ^0.5 the operand is an ExpoOp, so only ours matches
+    # and exactly one edit lands.
+    names = pattern_names(analyze(DISTANCE_SQRT_COMPARE))
+    assert "pow_op_sqrt" in names
+    assert "distance_to_comparison" not in names
+    out = transform(DISTANCE_SQRT_COMPARE)
+    assert "math.sqrt(pos:distance_to_sqr(t)) < 10" in out
+    compiles(out)
+
+
+def test_plain_distance_comparison_is_still_only_the_distance_fix(analyze, transform, compiles):
+    names = pattern_names(analyze(DISTANCE_PLAIN_COMPARE))
+    assert "distance_to_comparison" in names
+    assert "pow_op_sqrt" not in names
+    out = transform(DISTANCE_PLAIN_COMPARE)
+    assert "distance_to_sqr(t) < 100" in out
+    compiles(out)
