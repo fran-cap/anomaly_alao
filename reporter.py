@@ -133,6 +133,15 @@ class Reporter:
         self.start_time = datetime.now()
         self._all_findings_cache: Optional[List[Finding]] = None
 
+        # I-029: everything a regression harness needs that is NOT a finding.
+        # failure kind -> list of {file, error}; kinds are 'timeout', 'parse',
+        # 'encoding', 'crash' from the analyze phase and 'fix_*' from the fix
+        # phase. Full paths, always - a corpus has a dozen ui_inventory.script.
+        self.failures: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+        # file path -> {edits_generated, edits_applied, edits_dropped_overlap}
+        self.edits: Dict[str, Dict[str, int]] = {}
+        self.run_info: Dict[str, Any] = {}
+
         # setup jinja2 if available
         self._jinja_env = None
         if JINJA2_AVAILABLE:
@@ -143,6 +152,34 @@ class Reporter:
                     autoescape=select_autoescape(['html', 'xml'])
                 )
                 self._jinja_env.filters['basename'] = lambda p: Path(p).name
+
+    def record_failure(self, kind: str, file_path, message: str):
+        """Record a file that did not make it through a phase."""
+        self.failures[kind].append({'file': str(file_path), 'error': message})
+
+    def record_edits(self, file_path, stats: Dict[str, int]):
+        """Record per-file edit counters from ASTTransformer."""
+        if stats:
+            self.edits[str(file_path)] = dict(stats)
+
+    def set_run_info(self, **info):
+        """ALAO version, flags, corpus size - whatever identifies this run."""
+        self.run_info.update(info)
+
+    def total_edits_dropped(self) -> int:
+        return sum(s.get('edits_dropped_overlap', 0) for s in self.edits.values())
+
+    def counts_by_pattern(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for f in self.all_findings:
+            counts[f.pattern_name] = counts.get(f.pattern_name, 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+    def counts_by_severity(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for f in self.all_findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+        return counts
 
     def add_finding(self, mod_name: str, file_path: Path, finding: Finding):
         """Add a finding to the report."""
@@ -370,6 +407,11 @@ class Reporter:
         if verbose:
             print("  Preparing JSON data...", end="", flush=True)
 
+        # I-029: 'generated', 'summary' and 'findings' are the original keys and
+        # stay exactly as they were - the HTML/txt paths and tools/corpus_run.py
+        # read them. Everything else is new: failures, per-pattern and
+        # per-severity rollups, and the per-file edit accounting that makes
+        # `edits_dropped_overlap` a real number instead of null.
         data = {
             'generated': datetime.now().isoformat(),
             'summary': {
@@ -378,6 +420,28 @@ class Reporter:
                 'yellow': self.count_by_severity('YELLOW'),
                 'red': self.count_by_severity('RED'),
                 'debug': self.count_by_severity('DEBUG'),
+            },
+            'alao_version': self.run_info.get('alao_version'),
+            'flags': self.run_info.get('flags', []),
+            'run': {k: v for k, v in self.run_info.items()
+                    if k not in ('alao_version', 'flags')},
+            'parse_failures': self.failures.get('parse', []) + self.failures.get('encoding', []),
+            'timeouts': [f['file'] for f in self.failures.get('timeout', [])],
+            'crashes': [
+                {'file': f['file'], 'traceback': f['error']}
+                for f in self.failures.get('crash', [])
+            ],
+            'compile_failures': self.failures.get('fix_compile', []),
+            'fix_failures': (self.failures.get('fix_crash', [])
+                             + self.failures.get('fix_timeout', [])),
+            'findings_by_pattern': self.counts_by_pattern(),
+            'findings_by_severity': self.counts_by_severity(),
+            'edits': self.edits,
+            'edits_totals': {
+                'edits_generated': sum(s.get('edits_generated', 0) for s in self.edits.values()),
+                'edits_applied': sum(s.get('edits_applied', 0) for s in self.edits.values()),
+                'edits_dropped_overlap': self.total_edits_dropped(),
+                'files_modified': len(self.edits),
             },
             'findings': {}
         }
