@@ -1871,6 +1871,15 @@ class ASTAnalyzer:
         rewrite the last surviving use of an alias instead.
 
         Returns the set of id(LocalVarInfo) that the rewrite would orphan.
+
+        MERGE CONTRACT: pass the *union* of every pass that rewrites the call
+        away, not just one pass's candidates. The count is per alias, so two
+        passes that each decline in isolation can still orphan an alias between
+        them. Concretely, if an `append_loop_counter`-style pass claims the
+        in-loop appends and this one declines the flat ones, an alias whose uses
+        are *all* in loops dies anyway - on the enabled GAMMA corpus that is
+        `350- Ledge Grabbing - Demonized/.../demonized_ledge_grabbing.script:919`,
+        the one alias of four whose only use is inside a loop.
         """
         per_alias: Dict[int, Tuple[LocalVarInfo, int]] = {}
         for call in calls:
