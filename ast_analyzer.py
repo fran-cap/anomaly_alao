@@ -2245,6 +2245,45 @@ class ASTAnalyzer:
             scope = scope.parent
         return None
 
+    def innermost_scope_at(self, line: int) -> Optional[Scope]:
+        """Deepest scope whose line range contains `line`."""
+        best = None
+        for scope in self.scopes:
+            start = getattr(scope, 'start_line', 0) or 0
+            end = getattr(scope, 'end_line', 0) or 0
+            if start <= line <= end:
+                if best is None or start > (getattr(best, 'start_line', 0) or 0):
+                    best = scope
+        return best
+
+    def find_visible_alias(self, full_name: str, line: int) -> Optional[str]:
+        """A local already bound to `full_name` and usable at `line`, if any.
+
+        I-012 uses this so a synthesized `math.sqrt(x)` reuses a `local sqrt =
+        math.sqrt` the mod author already wrote (drx_da_main.script does), the
+        same way it reuses one the uncached-globals cacher is about to write.
+        Adding a read of an alias can never orphan it, so this is safe w.r.t.
+        I-038.
+
+        Scopes inherit a copy of their parent's alias map at creation, so the
+        innermost scope's map is the lexically correct one - no parent walk,
+        which would step around a nearer shadowing local.
+        """
+        scope = self.innermost_scope_at(line)
+        if scope is None:
+            return None
+        for alias, canonical in scope.func_aliases.items():
+            if canonical != full_name:
+                continue
+            info = self._find_local_var_info(scope, alias)
+            if info is None:
+                continue
+            # must be the alias binding itself, declared before this use
+            if info.is_param or info.is_loop_var or info.assign_line >= line:
+                continue
+            return alias
+        return None
+
     def _aliases_that_would_be_orphaned(self, calls: List[CallInfo]) -> Set[int]:
         """Which alias locals would end up unused if every call in `calls` was rewritten?
 

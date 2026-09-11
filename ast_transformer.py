@@ -177,6 +177,8 @@ class ASTTransformer:
         self._next_group_id = 1
         # (scope start_line, end_line) -> (local name for math.sqrt, edit group id)
         self._sqrt_cache_scopes = {}
+        # sqrt rewrites, emitted after every other finding (see transform())
+        self._deferred_sqrt = []
         self.experimental = experimental
         self.fix_nil = fix_nil
         self.remove_dead_code = remove_dead_code
@@ -252,15 +254,20 @@ class ASTTransformer:
         if not fixable:
             return False, self.source, 0
 
-        # generate edits for each finding. The uncached-globals cacher goes
-        # first so a hoisted `local msqrt = math.sqrt` is already known by the
-        # time the sqrt rewrites (I-012) pick a name to call. Stable partition:
-        # everything else keeps its relative order.
+        # generate edits for each finding
         self._sqrt_cache_scopes = {}
-        ordered = ([f for f in fixable if f.pattern_name == 'uncached_globals_summary']
-                   + [f for f in fixable if f.pattern_name != 'uncached_globals_summary'])
-        for finding in ordered:
+        self._deferred_sqrt = []
+        for finding in fixable:
             self._generate_edits(finding)
+
+        # I-012: the sqrt rewrites go last, because they need to know whether
+        # the uncached-globals cacher is hoisting `math.sqrt` in their scope,
+        # and that is only settled once every finding has been through the loop
+        # above. Deferring these instead of reordering the loop matters: edits
+        # generated earlier win ties in _apply_edits, so reordering the loop
+        # silently changed which of two overlapping fixes survived elsewhere.
+        for finding in self._deferred_sqrt:
+            self._emit_sqrt_edit(finding)
 
         if not self.edits:
             return False, self.source, 0
@@ -346,7 +353,7 @@ class ASTTransformer:
         elif pattern == 'pow_op_simple':
             self._edit_pow_op_simple(finding)
         elif pattern == 'pow_op_sqrt':
-            self._edit_pow_op_sqrt(finding)
+            self._deferred_sqrt.append(finding)
         elif pattern == 'string_literal_concat':
             self._edit_string_literal_concat(finding)
         elif pattern == 'string_find_plain':
@@ -651,14 +658,8 @@ class ASTTransformer:
         if pow_type == 'sqrt':
             # I-012: math.sqrt, not x^0.5 - both forms go through the same C
             # pow() in the interpreter, and only sqrt is ~3x cheaper there.
-            base_src = self._source_text(finding.details.get('base_node'), base)
-            sqrt_name, gid = self._sqrt_name_for(finding.line_num)
-            self.edits.append(SourceEdit(
-                start_char=start,
-                end_char=end,
-                replacement=f'{sqrt_name}({base_src})',
-                group_id=gid,
-            ))
+            # Deferred so it can see a hoisted `local msqrt = math.sqrt`.
+            self._deferred_sqrt.append(finding)
             return
         elif pow_type == 'power' and isinstance(exp, int):
             # Wrap multi-MUL replacement in parens: the original `math.pow(x,2)`
@@ -802,12 +803,12 @@ class ASTTransformer:
             replacement=f'({replacement})',
         ))
 
-    def _edit_pow_op_sqrt(self, finding: Finding):
-        """Convert `x ^ 0.5` to `math.sqrt(x)` (I-012).
+    def _emit_sqrt_edit(self, finding: Finding):
+        """Replace `x ^ 0.5` / `math.pow(x, 0.5)` with a sqrt call (I-012).
 
         No parens needed around the replacement: a call is a primary
-        expression, exactly like the `x^0.5` it replaces, so every surrounding
-        operator keeps its meaning.
+        expression, exactly like the `x^0.5` or `math.pow(...)` it replaces, so
+        every surrounding operator keeps its meaning.
         """
         node = finding.details.get('node')
         if not node:
@@ -882,9 +883,17 @@ class ASTTransformer:
                 # innermost wins
                 if best is None or start_line > best[0]:
                     best = (start_line, name, gid)
-        if best is None:
-            return 'math.sqrt', None
-        return best[1], best[2]
+        if best is not None:
+            return best[1], best[2]
+
+        # nobody is hoisting one for us, but the file may already have its own
+        # (`local sqrt = math.sqrt` at the top of drx_da_main.script, say)
+        an = self.analyzer
+        if an is not None and hasattr(an, 'find_visible_alias'):
+            alias = an.find_visible_alias('math.sqrt', line_num)
+            if alias:
+                return alias, None
+        return 'math.sqrt', None
 
     def _edit_distance_to_comparison(self, finding: Finding):
         """

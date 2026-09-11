@@ -241,3 +241,48 @@ def test_synthesized_sqrt_uses_the_hoisted_local(transform, compiles):
     assert "msqrt(o.e)" in out
     assert "math.sqrt(" not in out.split("local msqrt = math.sqrt", 1)[1]
     compiles(out)
+
+
+FILE_LEVEL_ALIAS = """
+local sqrt = math.sqrt
+
+function f(x)
+    return x ^ 0.5 + sqrt(x + 1)
+end
+"""
+
+ALIAS_DECLARED_AFTER_USE = """
+function f(x)
+    return x ^ 0.5
+end
+
+local sqrt = math.sqrt
+"""
+
+ALIAS_SHADOWED_BY_PARAM = """
+local sqrt = math.sqrt
+
+function f(sqrt, x)
+    return x ^ 0.5
+end
+"""
+
+
+def test_existing_file_level_alias_is_reused(transform, compiles):
+    out = transform(FILE_LEVEL_ALIAS)
+    assert "sqrt(x)" in out
+    assert "math.sqrt(x)" not in out
+    compiles(out)
+
+
+def test_alias_declared_after_the_use_is_not_used(transform, compiles):
+    out = transform(ALIAS_DECLARED_AFTER_USE)
+    assert "math.sqrt(x)" in out
+    compiles(out)
+
+
+def test_alias_shadowed_by_a_parameter_is_not_used(transform, compiles, run_both):
+    out = transform(ALIAS_SHADOWED_BY_PARAM)
+    assert "math.sqrt(x)" in out
+    compiles(out)
+    run_both(ALIAS_SHADOWED_BY_PARAM, out, "f", 2, 16)
