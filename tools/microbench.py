@@ -39,6 +39,14 @@ table.concat rewrite is 0.57x at 3 iterations and 8x at thousands - so a single
 huge-N number is not a G2 verdict. The per-pattern summary then reads
 "passes for K >= 100" instead of a bare pass/fail.
 
+A snippet can also declare `-- @corpus_k 3 10`: the loop lengths the pattern
+actually has in the corpus. The sweep must then contain a point inside that
+range (the file is rejected at parse time otherwise), and the G2 verdict leads
+with that range rather than with the best row - because a transform that wins
+only at K=2000 while every real site is K=3 has been scored on a part of its own
+curve the code never reaches. A speedup is a function; a scalar is a claim that
+the function is constant, and that claim has to hold where the code runs.
+
 Usage:
 
     py -3.12 tools/microbench.py                          # every case in bench/
@@ -100,7 +108,8 @@ JITTER_WARN = 1.25
 
 DIRECTIVE_RE = re.compile(r"^\s*--\s*@(\w+)\s*(.*)$")
 SECTIONS = ("setup", "original", "rewrite", "sink")
-META_KEYS = ("pattern", "title", "status", "n", "doc", "notes", "iters", "doc_at")
+META_KEYS = ("pattern", "title", "status", "n", "doc", "notes", "iters", "doc_at",
+             "corpus_k")
 
 # The VM we must be on. Anomaly ships LuaJIT 2.0.4; lupa.luajit20 is a 2.0-branch
 # build (version_num 20099) with the same optimization flag set, which is what
@@ -130,6 +139,11 @@ class BenchCase:
     notes: str = ""
     iters: List[int] = field(default_factory=list)   # inner loop lengths to sweep
     doc_at: Optional[int] = None                     # which K the @doc figure refers to
+    # The inner loop lengths this pattern actually has in the corpus, as [lo, hi].
+    # A speedup is a function of K; a scalar is a claim the function is constant.
+    # This is where the claim has to hold, and it is usually not where it is easiest
+    # to measure a big number.
+    corpus_k: Optional[List[int]] = None
 
     def n_for(self, mode: str) -> int:
         """Total inner-iteration budget for this mode."""
@@ -227,6 +241,21 @@ def parse_bench_file(path: Path) -> BenchCase:
     if iters and doc_at not in iters:
         raise ValueError(f"{path.name}: @doc_at {doc_at} is not one of @iters {iters}")
 
+    corpus_k = None
+    if meta.get("corpus_k"):
+        parts = [int(x) for x in meta["corpus_k"].replace("-", " ").replace(",", " ").split()]
+        if len(parts) != 2 or parts[0] > parts[1] or parts[0] < 1:
+            raise ValueError(f"{path.name}: @corpus_k takes a range: <lo> <hi>, lo <= hi")
+        corpus_k = parts
+        if iters and not any(parts[0] <= k <= parts[1] for k in iters):
+            # The whole point of declaring the range is that you measured in it.
+            raise ValueError(
+                f"{path.name}: @corpus_k {parts[0]}-{parts[1]} contains none of "
+                f"@iters {iters}. The sweep never measures the loop lengths this "
+                "pattern actually has, so its G2 number would describe a region "
+                "where the transform never runs. Add a K inside the range."
+            )
+
     return BenchCase(
         pattern=meta["pattern"],
         title=meta["title"],
@@ -242,6 +271,7 @@ def parse_bench_file(path: Path) -> BenchCase:
         notes=meta.get("notes", ""),
         iters=iters,
         doc_at=doc_at,
+        corpus_k=corpus_k,
     )
 
 
@@ -479,6 +509,24 @@ def g2_summary(results: Sequence[CaseResult]) -> Dict[str, str]:
             continue
         rows.sort(key=lambda r: r.k or 0)
         flags = [(r.k, bool(r.g2)) for r in rows]
+
+        # If the snippet declared where this pattern actually runs, that verdict
+        # leads. A transform scored on a region it never reaches is the failure
+        # I-039 hit: 18 corpus sites at K=3-10, a beam figure measured in the low
+        # hundreds, and a correct number that was simply about the wrong place.
+        case = rows[0].case
+        if case.corpus_k:
+            lo, hi = case.corpus_k
+            inside = [(k, ok) for k, ok in flags if lo <= k <= hi]
+            if inside:
+                verdict = ("pass" if all(ok for _, ok in inside)
+                           else "FAIL" if not any(ok for _, ok in inside) else "mixed")
+                detail = ", ".join(f"K={k}:{'pass' if ok else 'fail'}" for k, ok in inside)
+                elsewhere = [k for k, ok in flags if ok and not (lo <= k <= hi)]
+                tail = (f" (passes only at K in {elsewhere}, which this pattern "
+                        "does not reach in the corpus)") if elsewhere and verdict == "FAIL" else ""
+                out[pattern] = f"at corpus K {lo}-{hi}: {verdict} [{detail}]{tail}"
+                continue
         if all(f for _, f in flags):
             out[pattern] = "pass at every K measured"
         elif not any(f for _, f in flags):

@@ -193,6 +193,55 @@ def test_json_shape():
     json.dumps(blob)  # must be serialisable
 
 
+def test_corpus_k_must_be_inside_the_sweep(tmp_path):
+    """Declaring where a pattern runs and not measuring there is the defect."""
+    p = tmp_path / "x.lua"
+    p.write_text(
+        "-- @pattern x\n-- @title x\n-- @iters 100 2000\n-- @corpus_k 3 10\n"
+        "-- @original\nlocal a = 1\n-- @rewrite\nlocal a = 2\n-- @sink\n1\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="never measures the loop lengths"):
+        microbench.parse_bench_file(p)
+
+
+def _fake_rows(case, flags):
+    class FakeMode:
+        def __init__(self, up):
+            self.speedup = up
+
+    return [microbench.CaseResult(
+        case=case, k=k, modes={m: FakeMode(2.0 if ok else 1.0) for m in microbench.MODES},
+    ) for k, ok in flags]
+
+
+def test_corpus_k_verdict_leads_and_names_the_useless_wins():
+    """A transform that only wins where it never runs must read as FAIL.
+
+    This is the failure I-039 hit on string_concat_in_loop: 18 corpus sites at
+    K=3-10, a headline figure measured in the low hundreds. Not a wrong number -
+    a correct number about the wrong part of the curve.
+    """
+    case = microbench.BenchCase(
+        pattern="fake", title="t", status="shipped", path=Path("fake.lua"),
+        setup="", original="", rewrite="", sink="1",
+        iters=[5, 100], corpus_k=[3, 10],
+    )
+    summary = microbench.g2_summary(_fake_rows(case, [(5, False), (100, True)]))
+    assert summary["fake"].startswith("at corpus K 3-10: FAIL")
+    assert "does not reach in the corpus" in summary["fake"]
+
+
+def test_corpus_k_verdict_passes_when_the_win_is_where_the_code_is():
+    case = microbench.BenchCase(
+        pattern="fake", title="t", status="shipped", path=Path("fake.lua"),
+        setup="", original="", rewrite="", sink="1",
+        iters=[5, 100], corpus_k=[3, 10],
+    )
+    summary = microbench.g2_summary(_fake_rows(case, [(5, True), (100, False)]))
+    assert summary["fake"].startswith("at corpus K 3-10: pass")
+
+
 def test_g2_summary_reports_a_threshold():
     """A sweep that fails small and passes big must read as 'passes for K >= ...'."""
     case = microbench.BenchCase(

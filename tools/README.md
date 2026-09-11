@@ -184,6 +184,7 @@ everything after a `-- @section` line until the next directive is Lua.
 -- @n 200000 60000                  -- optional: total inner-iteration budget, jit_on jit_off
 -- @iters 5 20 100 2000             -- optional: sweep inner loop length K
 -- @doc_at 2000                     -- optional: which K the @doc figure refers to (default the largest)
+-- @corpus_k 3 10                   -- optional: the loop lengths this pattern actually has in the corpus
 -- @notes anything; repeat the directive for more lines, they accumulate
 -- @setup
 local acc = 0                       -- runs per timed rep, UNTIMED. N, D, K are in scope.
@@ -211,6 +212,37 @@ pass/fail.
 
 The `@doc` comparison only applies to the `@doc_at` row, since the doc has one
 number per transform rather than a curve.
+
+### `@corpus_k`: measure where the pattern actually runs
+
+A speedup is a **function** of loop length. A scalar in a table is a claim that
+the function is constant, and three of the four big rows in the beam's section-2
+table turned out not to be. So the default assumption is inverted here: a row
+earns a scalar by being shown flat over the range that matters, rather than
+getting one by default and being caught later.
+
+`@corpus_k <lo> <hi>` declares the loop lengths the pattern has **in the corpus**.
+Two things follow:
+
+* The snippet is **rejected at parse time** if no `@iters` point falls inside
+  that range. Declaring where a pattern runs and then never measuring there is
+  the whole defect; the harness will not let you do it quietly.
+* The G2 verdict leads with that range instead of with the best row, and says so
+  when a transform only wins somewhere it never reaches:
+
+  ```
+  string_concat_in_loop: at corpus K 3-10: FAIL [K=3:fail, K=5:fail, K=10:fail]
+    (passes only at K in [30, 50, 68, 100, 200, 1000, 2000], which this pattern
+     does not reach in the corpus)
+  ```
+
+That line is what pruned the `string_concat_in_loop` promotion (I-039): all 18
+rewritable sites in the enabled GAMMA corpus are 3-10 element UI string builders,
+while the beam's 8.69x was measured in the low hundreds. Nothing about the 8.69x
+was *wrong* - it was simply about a part of the curve the code never visits.
+That is a different failure from the missing `collectgarbage`, which made a
+number incorrect: this one makes a correct number irrelevant, and it is the
+harder of the two to notice by eye.
 
 ---
 
