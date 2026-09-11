@@ -381,6 +381,8 @@ class ASTTransformer:
             self._edit_distance_to_comparison(finding)
         elif pattern == 'vector_alloc_in_loop':
             self._edit_vector_alloc_in_loop(finding)
+        elif pattern == 'pairs_to_ipairs':
+            self._edit_pairs_to_ipairs(finding)
 
 
     # Edit methods using AST positions
@@ -599,6 +601,33 @@ class ASTTransformer:
 
         value = call_text[value_start:i - 1].strip()
         return value
+
+    def _edit_pairs_to_ipairs(self, finding: Finding):
+        """Swap the iterator of `for ... in pairs(t)` for ipairs (I-005).
+
+        The analyzer has already proved `t` is a hole-free sequence and that
+        the body compiles once every pairs call in it is gone; all that is
+        left here is the four-character edit on the call's function name.
+        Only the name is touched, so the loop variables, the argument and the
+        body keep their exact source text.
+        """
+        node = finding.details.get('node')
+        if not node:
+            return
+        if not finding.details.get('is_safe_to_fix', False):
+            return
+
+        start, end = self._get_call_func_span(node, 'pairs')
+        if start is None or end is None:
+            return
+        if self.source[start:end] != 'pairs':
+            return          # token positions drifted; leave it alone
+
+        self.edits.append(SourceEdit(
+            start_char=start,
+            end_char=end,
+            replacement='ipairs',
+        ))
 
     def _edit_table_getn(self, finding: Finding):
         """Convert table.getn(t) to #t."""

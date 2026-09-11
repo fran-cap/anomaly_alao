@@ -124,6 +124,7 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 | Repeated `:id()` | `local obj_id = obj:id()` | Medium - immutable property |
 | Repeated `:clsid()`, `:story_id()` | `local obj_cls = obj:clsid()` | Medium - immutable property |
 | Repeated `:name()`, `:section_name()` | `local obj_name = obj:name()` | Medium - set at spawn, never reassigned. 1.5x-1.9x interpreted at 3 repeats, 2.4x-3.1x at 6, ~1.0x compiled (I-021) |
+| `pairs(t)` over a provable sequence | `ipairs(t)` | High - 3.3x-6.0x on a compiled trace, but 0.28x-0.70x interpreted, so it only fires when the body provably compiles once its `pairs` calls are gone. On the GAMMA and vanilla corpora that is zero sites; see below |
 
 
 ### YELLOW (may cause CTDs, fix with `--fix-yellow`)
@@ -146,6 +147,7 @@ Pay attention some of this fixes requires `--experimental` flag.
 | `module_global_write` | Module-level globals (`foo = {}` at the top of a script, and mutation of those names from the file's own functions). **Off by default** - an Anomaly `.script` IS a module and its top-level names are meant to be global. Pass `--show-globals` to see them, `--no-global-writes` to drop both patterns |
 | Per-frame callback warnings | Performance issues in `actor_on_update`, `CFoo:update`, etc. |
 | `jit_mode` | A per-frame body LuaJIT 2.0 cannot compile into a trace, with the constructs that abort it (`..`, `pairs`, `string.format`, engine calls, closures). See `lab/reports/luajit20-nyi.md` |
+| `pairs_to_ipairs` (RED half) | A `for ... in pairs(t)` whose table IS a provable sequence, reported but never fixed because the body does not compile: `interpreted` / `mixed` (something else aborts the trace, where `ipairs` is ~3x slower) or `undecidable` (the intra-procedural classifier cannot see through a call in the body) |
 | `vector()` in hot loop | Allocates new vector each iteration. The `vector():set(...)` subset that provably can't escape its iteration is YELLOW and fixable with `--fix-yellow`; everything else stays here |
 | Constant conditions | `if true then` / `if false then` |
 | Unnecessary else | `if x then return end else ...` |

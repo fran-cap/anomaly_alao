@@ -41,6 +41,10 @@ PERFORMANCE_IMPACT = {
     # so flagging all 205 of them 'critical' was misinforming the reader.
     'string_concat_in_loop': 'medium',
     'append_loop_counter': 'high',
+    # I-005: 3.3x-6x on a compiled trace, and only emitted GREEN when the
+    # body actually compiles once the pairs calls are gone. The RED variant
+    # of the same pattern is a census row, not a fix.
+    'pairs_to_ipairs': 'high',
     'math_pow_simple': 'high',
     # I-012: measured 2.96-3.41x interpreted, 1.00x compiled. The `^` form was
     # not in this table at all before, so it fell to the 'low' default.

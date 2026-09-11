@@ -338,6 +338,32 @@ ENGINE_NYI_METHODS = frozenset({
     'story_object', 'story_id', 'clear_abuse', 'accessible',
 })
 
+# I-005: calls the classifier can actually see through.
+#
+# ENGINE_NYI_METHODS is documented as deliberately conservative in the
+# *reporting* direction - an unknown method is assumed to be Lua, so a body
+# gets called `compiled` when it might not be. That bias is fine for a report
+# and fatal for a gate: I-005 only pays off if the body really compiles, and
+# it costs ~3x if it does not. The classifier is also intra-procedural, so a
+# call into another Lua function hides whatever that function aborts on
+# (`utils_obj.npc_in_zone` -> engine calls, to take the real corpus case).
+#
+# So for gating purposes a function body counts as decidable only when every
+# call in it is one of these fastfuncs that LuaJIT 2.0 compiles, or a call the
+# NYI tables above already recognise (those make the body `interpreted`, which
+# is the safe answer). Anything else - any user Lua function, any method on a
+# receiver we do not know - makes the body undecidable and ineligible.
+JIT_TRANSPARENT_CALLS = frozenset({
+    'tonumber', 'type', 'rawget', 'rawset', 'rawequal', 'select', 'assert',
+    'ipairs', 'setmetatable', 'getmetatable',
+    'math.abs', 'math.ceil', 'math.floor', 'math.max', 'math.min',
+    'math.sqrt', 'math.random', 'math.sin', 'math.cos', 'math.tan',
+    'math.asin', 'math.acos', 'math.atan', 'math.exp', 'math.log',
+    'math.log10', 'math.pow', 'math.modf',
+    'string.sub', 'string.byte', 'string.len',
+    'table.insert', 'table.remove',
+})
+
 # Abort codes 6 (LINNER, inner loop in root trace) and 7 (LUNROLL) are trace
 # shaping, not NYI, and are deliberately absent from all of the above.
 
@@ -2343,6 +2369,7 @@ class ASTAnalyzer:
         self._analyze_per_frame_callbacks()
         self._analyze_distance_to_comparisons()
         self._analyze_vector_allocations_in_loops()
+        self._analyze_pairs_to_ipairs()
 
     def _find_local_var_info(self, scope: Optional[Scope], name: str) -> Optional[LocalVarInfo]:
         """Walk up the scope chain for the LocalVarInfo a name resolves to."""
@@ -4725,6 +4752,399 @@ class ASTAnalyzer:
             return all(scan(child, node, nested) for child in self._child_nodes(node))
 
         return all(scan(root, loop_node, False) for root in roots)
+
+    # ------------------------------------------------------------------
+    # I-005: pairs(t) -> ipairs(t) on provably array-like tables
+    # ------------------------------------------------------------------
+    #
+    # Two independent things have to be true before this is allowed, and both
+    # are measured, not assumed (bench/pairs_to_ipairs.lua):
+    #
+    #   1. `t` really is a hole-free sequence. ipairs stops at the first nil;
+    #      pairs does not. The proof below only accepts a table that is born
+    #      empty (or as a literal of non-nil constants) inside this very
+    #      function and only ever grows by `t[#t+1] = v` / `table.insert(t, v)`,
+    #      and that never escapes the function in any way that would let some
+    #      other code put a string key or a nil in it.
+    #
+    #   2. The loop can actually be compiled afterwards. ipairs is 3.3x-6x
+    #      FASTER than pairs on a trace and 2.6x-3.5x SLOWER in the interpreter
+    #      (measured at K = 1..2000; the interpreted arm never crosses 1.0x at
+    #      any K). `pairs` is itself NYIFF, so a body holding one is always
+    #      classified `interpreted` by I-013 - the question is what the mode
+    #      would be with the pairs calls we are about to remove taken out. If
+    #      something else in the body still aborts, the loop stays interpreted
+    #      and the rewrite is a 3x loss, so only a body that becomes fully
+    #      compiled is GREEN. Everything else is reported and never fixed.
+
+    _FUNC_NODES = (Function, LocalFunction, Method, AnonymousFunction)
+
+    def _analyze_pairs_to_ipairs(self):
+        """Find `for k, v in pairs(t)` where t is a provable sequence."""
+        tree = getattr(self, '_ast_tree', None)
+        if tree is None:
+            return
+
+        func_scope_by_node = {
+            id(s.node): s for s in self.scopes
+            if s.scope_type == 'function' and s.node is not None
+        }
+        per_frame_scopes = {id(cb.scope) for cb in self.per_frame_callbacks}
+
+        # (root node, function Scope or None for the module chunk)
+        roots = [(tree, None)]
+        for fnode in self._collect_function_nodes(tree):
+            roots.append((fnode, func_scope_by_node.get(id(fnode))))
+
+        for root, fscope in roots:
+            own = list(self._iter_own_nodes(root))
+            raw = []
+            for node in own:
+                if not isinstance(node, Forin):
+                    continue
+                hit = self._pairs_loop_target(node)
+                if hit is not None:
+                    raw.append((node,) + hit)
+            if not raw:
+                continue
+
+            # one walk of this body's shape, shared by every candidate in it
+            ctx = self._sequence_proof_context(root, own)
+            candidates = [
+                (node, call_node, tname) for node, call_node, tname in raw
+                if self._prove_array_like(root, tname, node, ctx)
+            ]
+            if not candidates:
+                continue
+
+            rewrite_lines = {self._get_line(c) for _, c, _ in candidates}
+            mode = self._mode_without_pairs(fscope, rewrite_lines)
+            # only asked when it can change the answer
+            decidable = mode != 'compiled' or self._calls_are_decidable(own)
+            if mode == 'compiled' and not decidable:
+                mode = 'undecidable'
+            is_per_frame = fscope is not None and id(fscope) in per_frame_scopes
+
+            for forin, call_node, tname in candidates:
+                line = self._get_line(call_node)
+                green = mode == 'compiled'
+                self.findings.append(Finding(
+                    pattern_name='pairs_to_ipairs',
+                    severity='GREEN' if green else 'RED',
+                    line_num=line,
+                    message=(
+                        'pairs({0}) over a provable sequence -> ipairs({0}) '.format(tname)
+                        + ('(body compiles once the pairs calls are gone: '
+                           '3.3x-6x on a trace)' if green else
+                           "but the body is '{0}' under LuaJIT 2.0, ".format(mode)
+                           + 'where ipairs is ~3x slower - reported only')
+                    ),
+                    details={
+                        'table': tname,
+                        'node': call_node,
+                        'forin_node': forin,
+                        'jit_mode': mode,
+                        'calls_decidable': decidable,
+                        'is_per_frame': is_per_frame,
+                        'function': fscope.name if fscope is not None else '<module>',
+                        'is_safe_to_fix': green,
+                    },
+                    source_line=self._get_source_line(line),
+                ))
+
+    def _collect_function_nodes(self, root) -> List[Any]:
+        """Every function node anywhere under `root`."""
+        out = []
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, list):
+                stack.extend(n)
+                continue
+            if not isinstance(n, Node):
+                continue
+            if isinstance(n, self._FUNC_NODES):
+                out.append(n)
+            stack.extend(list(self._iter_children(n)))
+        return out
+
+    def _iter_own_nodes(self, root):
+        """Nodes under `root` that belong to it - nested functions are not entered."""
+        stack = list(self._iter_children(root))
+        while stack:
+            n = stack.pop()
+            if isinstance(n, list):
+                stack.extend(n)
+                continue
+            if not isinstance(n, Node):
+                continue
+            yield n
+            if isinstance(n, self._FUNC_NODES):
+                continue
+            stack.extend(list(self._iter_children(n)))
+
+    def _pairs_loop_target(self, forin: Forin):
+        """`for ... in pairs(t) do` -> (the Call node, 't'), else None."""
+        it = forin.iter
+        if not isinstance(it, list) or len(it) != 1:
+            return None
+        call = it[0]
+        if not isinstance(call, Call):
+            return None
+        if not (isinstance(call.func, Name) and call.func.id == 'pairs'):
+            return None
+        if len(call.args) != 1 or not isinstance(call.args[0], Name):
+            return None
+        return call, call.args[0].id
+
+    # --- the sequence proof ------------------------------------------------
+
+    def _sequence_proof_context(self, root, own):
+        """The per-body facts `_prove_array_like` needs, computed once.
+
+        `nested_names` are the names any closure inside this body can see and
+        therefore mutate behind our back; `assign_target_ids` are the nodes
+        that appear on the left of an `=`.
+        """
+        nested_names = set()
+        for fnode in self._collect_function_nodes(root):
+            if fnode is root:
+                continue
+            for n in self._iter_own_nodes(fnode):
+                if isinstance(n, Name):
+                    nested_names.add(n.id)
+
+        assign_target_ids = set()
+        for n in own:
+            if isinstance(n, Assign):
+                for t in (n.targets or []):
+                    assign_target_ids.add(id(t))
+
+        return {
+            'own': own,
+            'parent': self._parent_map(root),
+            'nested_names': nested_names,
+            'assign_target_ids': assign_target_ids,
+        }
+
+    def _prove_array_like(self, root, tname: str, forin: Forin, ctx) -> bool:
+        """Is `tname` provably a hole-free sequence for the whole of `root`?
+
+        Conservative to the point of rudeness: one local declaration in this
+        function, an empty or all-literal array constructor, every other
+        mention either an append, an index read, a `#t`, or the `pairs(t)` of
+        a candidate loop. Anything that hands the table to someone else -
+        a call argument, a return, a method call, storing it in another table -
+        kills the proof, because the callee could add a string key or punch a
+        hole and we would never see it.
+        """
+        # 1. it must not be visible to any nested closure at all
+        if tname in ctx['nested_names']:
+            return False
+
+        own = ctx['own']
+        parent = ctx['parent']
+        assign_target_ids = ctx['assign_target_ids']
+
+        # 2. exactly one `local t = <empty or literal array>` in this function
+        decls = [
+            n for n in own
+            if isinstance(n, LocalAssign)
+            and any(isinstance(t, Name) and t.id == tname for t in (n.targets or []))
+        ]
+        if len(decls) != 1:
+            return False
+        decl = decls[0]
+        if len(decl.targets) != 1 or len(decl.values or []) != 1:
+            return False
+        if not self._is_literal_sequence_constructor(decl.values[0]):
+            return False
+        decl_target = decl.targets[0]
+
+        # ...and the loop has to be inside the block that declaration lives in.
+        # `if x then local t = {} end` followed by `for _ in pairs(t)` is two
+        # different variables - the second one is a global - and rewriting that
+        # would be rewriting a table we have proved nothing about.
+        if not self._declaration_covers(decl, forin, parent):
+            return False
+
+        # a parameter of this function with the same name would shadow it
+        if isinstance(root, self._FUNC_NODES):
+            for a in (getattr(root, 'args', None) or []):
+                if isinstance(a, Name) and a.id == tname:
+                    return False
+
+        for n in own:
+            if not (isinstance(n, Name) and n.id == tname):
+                continue
+            if n is decl_target:
+                continue
+            p = parent.get(id(n))
+            if p is None:
+                return False
+
+            if isinstance(p, Index) and p.value is n:
+                # t[...] or t.f - a read is fine, a write must be the append
+                if id(p) in assign_target_ids:
+                    if not self._is_append_index(p, tname):
+                        return False
+                    # growing the table while iterating it changes what ipairs
+                    # sees versus pairs; refuse if the append is inside the
+                    # candidate loop's own body
+                    if self._node_within(p, forin, parent):
+                        return False
+                continue
+
+            if isinstance(p, ULengthOP) and p.operand is n:
+                continue
+
+            if isinstance(p, Call):
+                if p.func is n:
+                    return False       # t(...) - not a table we understand
+                if self._is_pairs_call_over(p, tname):
+                    continue
+                if self._is_two_arg_table_insert(p, n):
+                    if self._node_within(p, forin, parent):
+                        return False   # appending during the iteration
+                    continue
+                return False           # any other call could add keys
+
+            return False               # returned, aliased, stored, compared...
+
+        return True
+
+    def _declaration_covers(self, decl, forin, parent) -> bool:
+        """Is `forin` inside the block `decl` is declared in, and after it?"""
+        decl_block = parent.get(id(decl))
+        if decl_block is None:
+            return False
+        node = forin
+        while node is not None:
+            if node is decl_block:
+                return self._get_line(decl) <= self._get_line(forin)
+            node = parent.get(id(node))
+        return False
+
+    def _is_literal_sequence_constructor(self, node) -> bool:
+        """`{}` or `{1, 'a', true}` - positional fields with non-nil constants.
+
+        A keyed field (`{x = 1}`, `{[2] = v}`) means a hash part. A non-constant
+        element (`{f()}`, `{v}`) could be nil, and a nil inside a constructor is
+        a real hole that ipairs would stop at, so those are refused too.
+        """
+        if not isinstance(node, Table):
+            return False
+        for f in (node.fields or []):
+            if getattr(f, 'key', None) is not None or getattr(f, 'between_brackets', False):
+                return False
+            if not isinstance(f.value, (Number, String, TrueExpr, FalseExpr)):
+                return False
+        return True
+
+    def _is_append_index(self, index_node: Index, tname: str) -> bool:
+        """Is this exactly `t[#t + 1]`?"""
+        idx = index_node.idx
+        if not isinstance(idx, AddOp):
+            return False
+        left, right = idx.left, idx.right
+        if not (isinstance(right, Number) and right.n == 1):
+            return False
+        return (isinstance(left, ULengthOP)
+                and isinstance(left.operand, Name)
+                and left.operand.id == tname)
+
+    def _is_pairs_call_over(self, call: Call, tname: str) -> bool:
+        if not (isinstance(call.func, Name) and call.func.id in ('pairs', 'ipairs')):
+            return False
+        return (len(call.args) == 1 and isinstance(call.args[0], Name)
+                and call.args[0].id == tname)
+
+    def _is_two_arg_table_insert(self, call: Call, name_node: Name) -> bool:
+        """`table.insert(t, v)` written out in full, with t as the first arg."""
+        if len(call.args) != 2 or call.args[0] is not name_node:
+            return False
+        f = call.func
+        return (isinstance(f, Index) and isinstance(f.value, Name)
+                and f.value.id == 'table' and isinstance(f.idx, Name)
+                and f.idx.id == 'insert')
+
+    def _parent_map(self, root) -> Dict[int, Any]:
+        """id(child) -> parent, for the part of the tree `root` owns."""
+        parents: Dict[int, Any] = {}
+        stack = [(root, root)]
+        while stack:
+            node, owner = stack.pop()
+            for child in self._iter_children(node):
+                if isinstance(child, list):
+                    stack.append((child, owner))
+                    continue
+                if not isinstance(child, Node):
+                    continue
+                parents[id(child)] = owner if isinstance(owner, Node) else None
+                if isinstance(child, self._FUNC_NODES):
+                    continue
+                stack.append((child, child))
+        return parents
+
+    def _node_within(self, node, ancestor, parent: Dict[int, Any]) -> bool:
+        cur = parent.get(id(node))
+        while cur is not None:
+            if cur is ancestor:
+                return True
+            cur = parent.get(id(cur))
+        return False
+
+    def _calls_are_decidable(self, own) -> bool:
+        """Can the intra-procedural classifier be trusted about this body?
+
+        Only if every call in it is a fastfunc we know compiles, or one the
+        NYI tables already recognise. One call into another Lua function and
+        the `compiled` verdict is a guess - see JIT_TRANSPARENT_CALLS.
+        """
+        for n in own:
+            if isinstance(n, Invoke):
+                method = n.func.id if isinstance(n.func, Name) else None
+                if method not in ENGINE_NYI_METHODS:
+                    return False
+                continue
+            if not isinstance(n, Call):
+                continue
+            f = n.func
+            if isinstance(f, Name):
+                name = f.id
+            elif isinstance(f, Index) and isinstance(f.value, Name) and isinstance(f.idx, Name):
+                name = '{0}.{1}'.format(f.value.id, f.idx.id)
+            else:
+                return False
+            if name in JIT_TRANSPARENT_CALLS:
+                continue
+            if name in LUAJIT20_NYI_FUNCS or name in LUAJIT20_NYI_VARIANTS:
+                continue
+            if name in ENGINE_NYI_GLOBALS:
+                continue
+            if '.' in name and name.split('.', 1)[0] in ENGINE_NYI_NAMESPACES:
+                continue
+            return False
+        return True
+
+    def _mode_without_pairs(self, fscope, rewrite_lines) -> str:
+        """I-013 classification of `fscope` with our pairs sites deleted.
+
+        Module level has no trace of its own worth talking about, so it is
+        never GREEN - it reports as 'unknown'.
+        """
+        if fscope is None:
+            return 'unknown'
+        sites = [
+            s for s in self.nyi_sites
+            if self._find_function_scope(s.scope) is fscope
+            and not (s.name in ('pairs', 'next') and s.line in rewrite_lines)
+        ]
+        if not sites:
+            return 'compiled'
+        if any(not s.if_chain_path for s in sites):
+            return 'interpreted'
+        return 'mixed'
 
     def _get_source_line(self, line_num: int) -> str:
         """Get source line by number."""
