@@ -175,10 +175,10 @@
       "expected_gain": "med",
       "risk": "low",
       "status": "kept",
-      "score": 7.0,
+      "score": 6.0,
       "parent": null,
       "generation": 1,
-      "notes": "Enabled GAMMA: 25 math.pow call sites, so this fails corpus gate G1 on volume and is cheap enough to do anyway. The 'backwards' framing in the first draft came from comparing math.sqrt against x^0.5 without also measuring math.pow, which made a small win look like a large regression.\nGEN-2 KEPT as GREEN 2026-09-11 (agent-I012, b737dfd): zero math.pow(x,0.5) sites exist; shipped bare x^0.5 -> math.sqrt instead (10 GAMMA + 1 vanilla). 3x interpreted at every K, 1.00x compiled (JIT already folds to sqrt). No FPS run: 24 ns/frame."
+      "notes": "Enabled GAMMA: 25 math.pow call sites, so this fails corpus gate G1 on volume and is cheap enough to do anyway. The 'backwards' framing in the first draft came from comparing math.sqrt against x^0.5 without also measuring math.pow, which made a small win look like a large regression.\nGEN-2 KEPT as GREEN 2026-09-11 (agent-I012, b737dfd): zero math.pow(x,0.5) sites exist; shipped bare x^0.5 -> math.sqrt instead (10 GAMMA + 1 vanilla). 3x interpreted at every K, 1.00x compiled (JIT already folds to sqrt). No FPS run: 24 ns/frame. Correction: at -0 / -inf bases the compiled path returns +0 / +inf like the interpreter, so there the rewrite is a genuine behaviour change; only literal negatives are declined. GREEN because all 11 sites take squared distances or luminance. Demotion to YELLOW is one word in _emit_pow_op_sqrt if that risk is weighed differently."
     },
     {
       "id": "I-013",
@@ -325,10 +325,10 @@
       "expected_gain": "med",
       "risk": "high",
       "status": "proposed",
-      "score": 6.6,
+      "score": 3.0,
       "parent": null,
       "generation": 1,
-      "notes": "Enabled GAMMA: 496 level.object_by_id call sites, 209 inside loops, 11 inside per-frame bodies, plus 47 alife():object calls with the same shape."
+      "notes": "Enabled GAMMA: 496 level.object_by_id call sites, 209 inside loops, 11 inside per-frame bodies, plus 47 alife():object calls with the same shape. 2026-09-11 (agent-I021): level.object_by_id(<same local>) repeats in only 15 GAMMA / 10 vanilla bodies, 2 per-frame each; not worth its risk."
     },
     {
       "id": "I-023",
@@ -628,7 +628,7 @@
       "hypothesis": "The hot live vanilla code is not in update bodies but in what they call (xr_logic.pick_section_from_condlist 21 abort sites, try_switch_to_another_section 7, determine_section_to_activate 5, trade_manager.update 5, axr_main.make_callback), so every mode-gated decision is gated on the wrong function set.",
       "change": "ast_analyzer.py - after _analyze_trace_aborts(), propagate per-frame status one hop along same-file and module.func call edges, re-run the classifier over the closure. Report-only first, as I-013 shipped.",
       "measure": "Count of interpreted functions entering the per-frame set; whether I-040 / I-021 site counts rise inside it.",
-      "notes": "Proposed by agent-I041 (vanilla census, lab/reports/vanilla-per-frame-census.md, commit 759956b). Independently required by I-005 (agent-I005): the intra-procedural classifier cannot gate rewrites. Top of the gen-3 queue."
+      "notes": "Proposed by agent-I041 (vanilla census, lab/reports/vanilla-per-frame-census.md, commit 759956b). Independently required by I-005 (agent-I005): the intra-procedural classifier cannot gate rewrites. Top of the gen-3 queue. Also: ENGINE_NYI_METHODS lacks section_name and profile_name, so bodies using them classify as compiled (agent-I021); one-line fix to do alongside."
     },
     {
       "id": "I-043",
