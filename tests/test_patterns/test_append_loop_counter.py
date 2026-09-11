@@ -106,6 +106,19 @@ def test_value_that_may_be_nil_is_yellow_not_green(analyze):
     assert f.severity == "YELLOW", "a variable can be nil; nil appends diverge"
 
 
+def test_long_literal_loop_still_fires(analyze):
+    findings = analyze("""
+        function build()
+            local out = {}
+            for i = 1, 500 do
+                out[#out+1] = i * 2
+            end
+            return out
+        end
+    """)
+    assert find_one(findings, PATTERN).severity == "GREEN"
+
+
 def test_two_append_sites_in_one_loop(analyze):
     findings = analyze("""
         function build(n)
@@ -281,6 +294,26 @@ REJECTED = {
             consume(out)
             for i = 1, n do
                 out[#out+1] = i
+            end
+            return out
+        end
+    """,
+    # the win is O(log n) in the table length: 1.06x at 5 iterations, 1.6x at
+    # 20. A loop whose literal bound is short has nothing to win.
+    "literal_short_loop": """
+        function build()
+            local out = {}
+            for i = 1, 5 do
+                out[#out+1] = i * 2
+            end
+            return out
+        end
+    """,
+    "literal_short_loop_with_step": """
+        function build()
+            local out = {}
+            for i = 1, 40, 4 do
+                out[#out+1] = i * 2
             end
             return out
         end

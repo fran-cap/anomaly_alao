@@ -103,6 +103,12 @@ DIRECT_REPLACEMENT_FUNCS = frozenset({
 # entries here equivalently to function calls in expensive_calls
 EXPENSIVE_INDEXES = frozenset({'db.actor'})
 
+# I-001: below this many iterations the hoisted counter is not worth it - the
+# `#t` boundary search is O(log n), so at 5 iterations the rewrite measures
+# 1.06x (G2 wants 1.15x) and only clears the bar from ~20 on. Only applied when
+# the trip count is a literal we can read; anything dynamic is assumed long.
+APPEND_LOOP_MIN_ITERATIONS = 20
+
 # Functions/properties that can return nil - calling methods on these without
 # nil checks can cause CTD (crash to desktop)
 # Format: full_name -> description of when it returns nil
@@ -1931,6 +1937,15 @@ class ASTAnalyzer:
         if not decls:
             return
 
+        # `#t` is an O(log n) boundary search, so the counter only pays off once
+        # the table gets long: measured 1.06x at 5 iterations (below G2's 1.15x
+        # bar) but 1.6x at 20, 3.7x at 100 and ~10x at 2000. If the loop bound
+        # is a literal we can read, and it's short, there is nothing to win and
+        # we leave the code alone. Everything else (for-in, dynamic bounds,
+        # while/repeat) could run long, so it stays in.
+        if self._literal_trip_count_below(loop, APPEND_LOOP_MIN_ITERATIONS):
+            return
+
         # the loop header is evaluated outside the body; if it reads the table
         # (e.g. `while #t < 10 do`) the count is load-bearing and we bail
         header = [getattr(loop, a, None) for a in ('start', 'stop', 'step', 'test', 'iter')]
@@ -1980,6 +1995,29 @@ class ASTAnalyzer:
                 },
                 source_line=self._get_source_line(self._get_line(loop)),
             ))
+
+    @staticmethod
+    def _literal_trip_count_below(loop, minimum):
+        """True when `loop` is a numeric for whose trip count we can read off
+        the source and it is under `minimum`. Anything we can't read returns
+        False - we only skip loops we can prove are short."""
+        if not isinstance(loop, Fornum):
+            return False
+        start, stop, step = loop.start, loop.stop, getattr(loop, 'step', None)
+        if not (isinstance(start, Number) and isinstance(stop, Number)):
+            return False
+        s_val = 1
+        if isinstance(step, Number):
+            s_val = step.n
+        elif step is not None and not isinstance(step, int):
+            return False
+        try:
+            if s_val == 0:
+                return False
+            trips = int((stop.n - start.n) / s_val) + 1
+        except Exception:
+            return False
+        return 0 <= trips < minimum
 
     def _all_identifiers(self):
         """Every identifier used anywhere in the file - the set a new counter

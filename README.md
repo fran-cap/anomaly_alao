@@ -85,7 +85,7 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 
 | Pattern | Replacement | Impact |
 |---------|-------------|--------|
-| Append-only local table in a loop | hoisted counter: `local t_n = 0` + `t_n = t_n + 1; t[t_n] = v` | Critical - 13x with the JIT on, 3-4x interpreted; `#t` is an array-boundary search on every append |
+| Append-only local table in a loop | hoisted counter: `local t_n = 0` + `t_n = t_n + 1; t[t_n] = v` | Scales with table length - `#t` is an O(log n) boundary search, so 1.06x at 5 iterations, 1.6x at 20, 3.7x at 100, ~10x at 2000. Loops with a literal bound under 20 are skipped |
 | `table.insert(t, v)` | `t[#t+1] = v` | High - avoids function call overhead |
 | `table.getn(t)` | `#t` | Low - deprecated function |
 | `string.len(s)` | `#s` | Low - unnecessary function call |
