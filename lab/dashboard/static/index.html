@@ -13,7 +13,6 @@
     <button type="button" data-view="corpus" class="tab active">Corpus</button>
     <button type="button" data-view="ideas" class="tab">Ideas</button>
     <button type="button" data-view="runs" class="tab">FPS runs</button>
-    <button type="button" data-view="archive" class="tab">Archived knobs</button>
   </nav>
   <div class="status">
     <span id="refresh-state" class="dot" title="auto-refresh"></span>
@@ -136,26 +135,6 @@
       <button id="detail-close" type="button" class="close">close</button>
     </h2>
     <div id="detail-body"></div>
-  </section>
-</div>
-
-<!-- ----------------------------------------------------------- archive -->
-<div class="view" id="view-archive" hidden>
-  <section class="panel">
-    <h2>Archived game-knob ideas <span id="archive-count" class="badge"></span></h2>
-    <p class="empty">Read-only. Superseded by CONTRACT v2: the beam now targets ALAO itself.</p>
-    <div class="tablewrap">
-      <table id="archive-table">
-        <thead>
-          <tr>
-            <th>ID</th><th>Title</th><th>Category</th><th>Gain</th>
-            <th>Risk</th><th>Status</th><th class="num">Score</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <p id="archive-empty" class="empty" hidden>No archived ideas file.</p>
   </section>
 </div>
 

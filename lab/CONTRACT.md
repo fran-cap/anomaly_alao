@@ -36,7 +36,6 @@ Data schema (JSON, UTF-8):
       "idempotence_violations": [file]  (second --fix pass still changed the file),
       "differential_failures": [{file, detail}] (optional), "extra": {} }
   data/runs/<run_id>/ (existing end-to-end FPS schema, unchanged; see framework/README.md)
-  data/ideas-game-knobs.json -> the previous 30 game-knob ideas, archived; not the beam.
 
 Rules: never write inside the game install; never git commit; tests must pass with
 `py -3.12 -m pytest` run from the repo root; keep Priler's casual comment tone in repo code.

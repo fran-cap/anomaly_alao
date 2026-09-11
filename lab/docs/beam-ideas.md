@@ -2,7 +2,7 @@
 
 Scope: make ALAO (`C:\code\GIT\anomaly_alao`) better at optimizing Anomaly/GAMMA Lua. Four axes:
 correctness of transforms, coverage of new patterns, safety, and ALAO's own speed. Game knobs are
-out of scope (the previous beam is archived in `data/ideas-game-knobs.json`).
+out of scope.
 
 Everything below is measured. Two independent measurement sources feed it:
 

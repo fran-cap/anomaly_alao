@@ -131,18 +131,6 @@ class Store:
                     return item
             return None
 
-    @property
-    def ideas_archive_path(self) -> Path:
-        return self.root / "ideas-game-knobs.json"
-
-    def load_ideas_archive(self) -> list:
-        raw = read_json(self.ideas_archive_path)
-        if isinstance(raw, dict):
-            raw = raw.get("ideas")
-        if not isinstance(raw, list):
-            return []
-        return [i for i in raw if isinstance(i, dict) and i.get("id")]
-
     # ---- corpus ---------------------------------------------------------
     @property
     def corpus_dir(self) -> Path:
@@ -780,9 +768,6 @@ class Handler(BaseHTTPRequestHandler):
         store = self.store
         if path == "/api/ideas":
             return self.send_json({"ideas": store.load_ideas()})
-        if path == "/api/ideas-archive":
-            return self.send_json({"ideas": store.load_ideas_archive(),
-                                   "source": str(store.ideas_archive_path)})
         if path in ("/api/corpus", "/api/corpus/"):
             return self.send_json({"runs": corpus_payload(store)})
         if path == "/api/corpus/compare":

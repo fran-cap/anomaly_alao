@@ -168,7 +168,7 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
     primary view; Ideas beam; in-game Runs). Open http://127.0.0.1:8765.
   - `lab/data/ideas.json` + `lab/docs/beam-ideas.md`: the ranked beam of ALAO improvement ideas
     (38 as of 2026-09-11, top 8 queued). Score, keep or prune ideas there; new experiments should
-    trace back to an idea id. `lab/data/ideas-game-knobs.json` is an archived, unrelated list.
+    trace back to an idea id.
   - `lab/framework` (`aalo` package) + `lab/tools`: in-game A/B FPS harness that launches GAMMA via
     MO2 and captures frametimes (PresentMon if installed, psutil fallback). Needs an elevated
     terminal; see `lab/framework/README.md`. Use it to prove a rewrite helps in-game, not for

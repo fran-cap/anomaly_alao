@@ -2,7 +2,7 @@
 
 A local, read-mostly web view over the shared `data/` directory: ALAO corpus
 regression runs (the primary view), the idea beam, the end-to-end FPS run table
-with per-run frametime charts, and the archived game-knob ideas.
+with per-run frametime charts.
 
 Python 3.12 standard library only (`http.server`, `json`, `csv`). No pip
 dependencies, no CDN, no build step. Binds `127.0.0.1` only.
@@ -29,8 +29,8 @@ directory, an unparsable `ideas.json`, a truncated `samples.csv`: each yields an
 empty or partial result plus a `[dashboard]` warning on stderr.
 
 To demo without any real runs, point it at the bundled fixtures (2 ideas,
-3 FPS runs with ~40k CSV samples between them, 3 corpus runs across 2 fake ALAO
-commits, and 2 archived knob ideas):
+3 FPS runs with ~40k CSV samples between them, and 3 corpus runs across 2 fake
+ALAO commits):
 
 ```
 py -3.12 dashboard/server.py --data dashboard/fixtures
@@ -49,7 +49,6 @@ All responses are JSON, `Cache-Control: no-store`.
 | GET | `/api/corpus/<run_id>` | one run in full: `findings_by_pattern`, `patterns` (sorted desc), severity, and every failure list |
 | GET | `/api/corpus/compare?a=&b=` | per-pattern deltas, failure-list diffs, timing deltas; defaults `a`=latest, `b`=previous |
 | GET | `/api/ideas` | `{"ideas": [...]}` verbatim idea records |
-| GET | `/api/ideas-archive` | `{"ideas": [...], "source": "..."}` read-only `ideas-game-knobs.json` |
 | GET | `/api/runs` | `{"runs": [...]}` manifest fields merged with metrics, newest `started` first |
 | GET | `/api/runs/<run_id>` | `{manifest, metrics, samples, sample_count, downsampled}` |
 | GET | `/api/summary` | a `corpus` block (see below) plus counts by status, best run overall and per idea, baseline deltas |
@@ -115,9 +114,9 @@ global baseline. Crashed runs are excluded from every "best" calculation.
 ## UI
 
 Single page at `/`, served from `static/`: `index.html`, `app.js`, `style.css`.
-Vanilla JS, dark theme, laid out for 1080p, tested in Firefox and Chrome. Four
+Vanilla JS, dark theme, laid out for 1080p, tested in Firefox and Chrome. Three
 tabs, `Corpus` first and default; the active tab is mirrored in the URL hash
-(`#corpus`, `#ideas`, `#runs`, `#archive`) so a view survives a reload.
+(`#corpus`, `#ideas`, `#runs`) so a view survives a reload.
 
 **Corpus** (primary)
 
@@ -138,7 +137,7 @@ tabs, `Corpus` first and default; the active tab is mirrored in the URL hash
   more findings is green (wider ALAO coverage), more failures or more seconds
   is red.
 
-**Ideas / FPS runs / Archived knobs**
+**Ideas / FPS runs**
 
 - **Summary tiles** - ideas by status, runs done/failed/crashed, best `fps_avg`
   run, baseline, and per-idea deltas.
@@ -150,8 +149,6 @@ tabs, `Corpus` first and default; the active tab is mirrored in the URL hash
   number field; both POST on change and flash green on success, red on failure.
 - **Runs table** - run id, idea, status, started, duration, `fps_avg`, 1% low,
   p99 frametime, crashed. Sortable; click a row to open the detail panel.
-- **Archived knobs** - read-only table over `/api/ideas-archive`, the 30
-  pre-CONTRACT-v2 game-knob ideas.
 - **Run detail** - an inline SVG frametime line chart drawn from the raw path
   data (no charting library), plus the full manifest, metrics, and
   `config_diff` rendered as `old -> new`.
@@ -167,7 +164,6 @@ dashboard follows it exactly:
 
 ```
 data/ideas.json
-data/ideas-game-knobs.json          archived, read-only
 data/corpus/<run_id>/manifest.json
 data/corpus/<run_id>/results.json
 data/runs/<run_id>/manifest.json
@@ -186,7 +182,7 @@ missing, and falls back to the row index when `t_s` is absent.
 py -3.12 -m pytest tests/test_dashboard.py -q
 ```
 
-24 tests. The suite starts the server on a free port against a temp copy of
+23 tests. The suite starts the server on a free port against a temp copy of
 `dashboard/fixtures/`, then asserts every endpoint's shape, the write path,
 input validation, path-traversal rejection, and graceful handling of corrupt
 files. The corpus fixtures cover the three interesting shapes: a `fail` run

@@ -10,7 +10,6 @@ var state = {
   runs: [],
   summary: null,
   corpus: [],
-  archive: null,
   selectedRun: null,
   detail: null,
   selectedCorpus: null,
@@ -137,7 +136,7 @@ function deltaSpan(value, goodWhenPositive, digits) {
 
 /* ---------- tabs ---------- */
 
-var VIEWS = ["corpus", "ideas", "runs", "archive"];
+var VIEWS = ["corpus", "ideas", "runs"];
 
 function switchView(name) {
   if (VIEWS.indexOf(name) < 0) name = "corpus";
@@ -150,7 +149,6 @@ function switchView(name) {
     tabs[i].classList.toggle("active", tabs[i].getAttribute("data-view") === name);
   }
   if (location.hash.slice(1) !== name) location.hash = name;
-  if (name === "archive" && state.archive === null) loadArchive();
 }
 
 /* ---------- corpus: tiles ---------- */
@@ -774,40 +772,6 @@ function saveField(node, url, body, onOk) {
   }).catch(function (err) {
     node.classList.add("savefail");
     node.title = String(err.message || err);
-  });
-}
-
-/* ---------- archived knobs ---------- */
-
-function loadArchive() {
-  return jget("/api/ideas-archive").then(function (d) {
-    state.archive = d.ideas || [];
-    renderArchive();
-  }).catch(function () {
-    state.archive = [];
-    renderArchive();
-  });
-}
-
-function renderArchive() {
-  var body = document.getElementById("archive-table").tBodies[0];
-  var rows = state.archive || [];
-  document.getElementById("archive-count").textContent = rows.length + " archived";
-  document.getElementById("archive-empty").hidden = rows.length > 0;
-  body.textContent = "";
-  rows.forEach(function (idea) {
-    var tr = el("tr");
-    tr.appendChild(el("td", "mono", txt(idea.id)));
-    var title = el("td", "title", txt(idea.title));
-    if (idea.hypothesis) title.title = idea.hypothesis;
-    tr.appendChild(title);
-    tr.appendChild(el("td", null, txt(idea.category)));
-    var g = el("td"); g.appendChild(pill(idea.expected_gain)); tr.appendChild(g);
-    var r = el("td"); r.appendChild(pill(idea.risk)); tr.appendChild(r);
-    var s = el("td"); s.appendChild(pill(idea.status)); tr.appendChild(s);
-    tr.appendChild(el("td", "num", idea.score === null || idea.score === undefined
-      ? "-" : num(idea.score, 2)));
-    body.appendChild(tr);
   });
 }
 

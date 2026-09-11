@@ -418,15 +418,6 @@ def test_summary_carries_corpus_block(base):
     assert body["runs_total"] == 3 and body["ideas_total"] == 2
 
 
-def test_ideas_archive(base):
-    status, body = get(base, "/api/ideas-archive")
-    assert status == 200
-    ideas = body["ideas"]
-    assert [i["id"] for i in ideas] == ["G-001", "G-002"]
-    assert all(i["status"] == "pruned" for i in ideas)
-    assert body["source"].endswith("ideas-game-knobs.json")
-
-
 def test_corpus_tolerates_missing_and_corrupt(tmp_path):
     """No corpus/ dir at all, then a run with a broken manifest and results."""
     port = free_port()
@@ -436,7 +427,6 @@ def test_corpus_tolerates_missing_and_corrupt(tmp_path):
     try:
         b = "http://127.0.0.1:%d" % port
         assert get(b, "/api/corpus") == (200, {"runs": []})
-        assert get(b, "/api/ideas-archive")[1]["ideas"] == []
         s = get(b, "/api/summary")[1]["corpus"]
         assert s["runs_total"] == 0 and s["latest"] is None and s["health"] == "unknown"
         cmp_body = get(b, "/api/corpus/compare")[1]
