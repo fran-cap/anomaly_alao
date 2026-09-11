@@ -3184,9 +3184,15 @@ class ASTAnalyzer:
 
         `bucket_name` is what the bucket is keyed on: `db.actor`, or
         `self.object:id()` for a method bucket. The receiver is everything left
-        of the colon; we check that name, its first dotted component, and any
-        field path hanging off it, because rebinding either end invalidates the
-        cache.
+        of the colon; we check that exact name and its first dotted component,
+        because rebinding either end is what invalidates the cache.
+
+        A write to a FIELD of the receiver (`db.actor.afterFirstUpdate = true`)
+        is explicitly not a rebind: it mutates the object the cache points at,
+        and the cache still points at it, so `local actor = db.actor` followed
+        by `actor.afterFirstUpdate = true` means the same thing. Treating those
+        as rebinds cost the whole `actor_binder:update` rewrite in
+        bind_stalker.script, which is the most valuable site this idea has.
 
         Line-based on purpose, to match the rest of this pass. An assignment
         textually before the first call is fine (that is the declaration, and
@@ -3205,7 +3211,7 @@ class ASTAnalyzer:
                 continue
             if self._find_function_scope(scope) is not func_scope:
                 continue
-            if target == receiver or target == base or target.startswith(receiver + '.'):
+            if target == receiver or target == base:
                 return True
         return False
 

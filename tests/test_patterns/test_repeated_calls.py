@@ -488,3 +488,41 @@ def test_reassigned_db_field_is_never_cached(analyze):
     assert not [
         f for f in analyze(DB_STORAGE_REASSIGNED) if f.pattern_name.startswith("repeated_db_")
     ]
+
+
+# Writing a FIELD of the receiver is not a rebind: the cache still points at
+# the same object. Getting this wrong cost the actor_binder:update rewrite in
+# vanilla bind_stalker.script, the most valuable site in I-021.
+DB_ACTOR_FIELD_WRITE = """
+function f()
+    local a = db.actor:health()
+    db.actor.afterFirstUpdate = true
+    local b = db.actor:active_item()
+    local c = db.actor.some_field
+    return a, b, c
+end
+"""
+
+
+def test_writing_a_field_of_the_receiver_is_not_a_rebind(analyze, transform):
+    assert find_one(analyze(DB_ACTOR_FIELD_WRITE), "repeated_db_actor")
+    out = transform(DB_ACTOR_FIELD_WRITE)
+    assert "local actor = db.actor" in out
+    assert "actor.afterFirstUpdate = true" in out
+    assert "db.actor" not in out.split("local actor = db.actor", 1)[1]
+
+
+OBJ_FIELD_WRITE = """
+function f(obj)
+    local a = obj:id()
+    obj.marked = true
+    local b = obj:id()
+    local c = obj:id()
+    local d = obj:id()
+    return a, b, c, d
+end
+"""
+
+
+def test_method_cache_survives_a_field_write_on_the_receiver(analyze):
+    assert find_one(analyze(OBJ_FIELD_WRITE), "repeated_obj_id()")
