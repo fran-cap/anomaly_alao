@@ -184,7 +184,7 @@ everything after a `-- @section` line until the next directive is Lua.
 -- @n 200000 60000                  -- optional: total inner-iteration budget, jit_on jit_off
 -- @iters 5 20 100 2000             -- optional: sweep inner loop length K
 -- @doc_at 2000                     -- optional: which K the @doc figure refers to (default the largest)
--- @notes anything, one line
+-- @notes anything; repeat the directive for more lines, they accumulate
 -- @setup
 local acc = 0                       -- runs per timed rep, UNTIMED. N, D, K are in scope.
 -- @original

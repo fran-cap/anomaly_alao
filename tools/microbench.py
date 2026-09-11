@@ -188,7 +188,10 @@ def parse_bench_file(path: Path) -> BenchCase:
                 continue
             if name not in META_KEYS:
                 raise ValueError(f"{path.name}:{lineno}: unknown directive @{name}")
-            meta[name] = rest
+            if name == "notes" and meta.get("notes"):
+                meta["notes"] += " " + rest      # several @notes lines accumulate
+            else:
+                meta[name] = rest
             continue
         if current is not None:
             sections[current].append(line)
