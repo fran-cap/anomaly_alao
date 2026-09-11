@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Set
 import shutil
 
-from ast_analyzer import analyze_file, ASTAnalyzer, Scope
+from ast_analyzer import (analyze_file, ASTAnalyzer, Scope,
+                          EXPENSIVE_INDEX_CACHE_NAMES,
+                          CACHEABLE_OBJECT_METHODS)
 from models import Finding
 
 
@@ -1848,11 +1850,17 @@ class ASTTransformer:
         pattern = finding.pattern_name
 
         # determine cache variable name and cache line
-        if pattern == 'repeated_db_actor':
-            cache_line = 'local actor = db.actor'
-            new_name = 'actor'
-            call_pattern = 'db.actor'
-            call_pattern_re = re.compile(r'\bdb\.actor\b')
+        # I-021: every EXPENSIVE_INDEXES entry goes through one table-driven
+        # branch (repeated_db_actor, repeated_db_storage, ...) instead of a
+        # hand-written elif per property.
+        index_name = details.get('original_call', '')
+        if index_name in EXPENSIVE_INDEX_CACHE_NAMES:
+            module, _, field = index_name.partition('.')
+            new_name = EXPENSIVE_INDEX_CACHE_NAMES[index_name]
+            cache_line = 'local %s = %s' % (new_name, index_name)
+            call_pattern = index_name
+            call_pattern_re = re.compile(
+                r'\b' + re.escape(module) + r'\.' + re.escape(field) + r'\b')
         elif pattern == 'repeated_time_global':
             cache_line = 'local tg = time_global()'
             new_name = 'tg'
@@ -1898,13 +1906,18 @@ class ASTTransformer:
             new_name = 'level_name'
             call_pattern = 'level.name()'
             call_pattern_re = re.compile(r'\blevel\.name\s*\(')
-        elif pattern.endswith('_story_id()') or pattern.endswith('_section()') or pattern.endswith('_id()') or pattern.endswith('_clsid()'):
+        elif pattern.endswith('()') and any(
+                pattern.endswith('_%s()' % m) for m in CACHEABLE_OBJECT_METHODS):
             # dynamic method caching: repeated_obj_section(), repeated_item_id(), etc
             # extract object name and method from pattern: repeated_obj_section() -> obj, section
             # pattern format: repeated_{objname}_{method}()
             # NOTE: story_id must be checked before id since _id() is suffix of _story_id()
             # NOTE: Use non-greedy (.+?) to avoid capturing part of method name
-            match = re.match(r'repeated_(.+?)_(story_id|section|clsid|id)\(\)$', pattern)
+            # Longest alternative first: `section_name` must win over `name`
+            # and `story_id` over `id`, or the object name gets truncated.
+            _methods = sorted(CACHEABLE_OBJECT_METHODS, key=len, reverse=True)
+            match = re.match(
+                r'repeated_(.+?)_(' + '|'.join(_methods) + r')\(\)$', pattern)
             if not match:
                 return
             sanitized_obj_name = match.group(1)
@@ -1936,16 +1949,13 @@ class ASTTransformer:
                 return
             
             # generate cache variable name (always use sanitized for variable)
-            if method_name == 'section':
-                new_name = f'{sanitized_obj_name}_sec'
-            elif method_name == 'id':
-                new_name = f'{sanitized_obj_name}_id'
-            elif method_name == 'clsid':
-                new_name = f'{sanitized_obj_name}_cls'
-            elif method_name == 'story_id':
-                new_name = f'{sanitized_obj_name}_sid'
-            else:
-                new_name = f'{sanitized_obj_name}_{method_name}'
+            _suffix = {'section': 'sec', 'id': 'id', 'clsid': 'cls',
+                       'story_id': 'sid', 'name': 'name',
+                       'section_name': 'secname',
+                       'character_community': 'comm',
+                       'profile_name': 'profile'}
+            new_name = '%s_%s' % (sanitized_obj_name,
+                                  _suffix.get(method_name, method_name))
             
             cache_line = f'local {new_name} = {real_obj_name}:{method_name}()'
             call_pattern = f'{real_obj_name}:{method_name}()'

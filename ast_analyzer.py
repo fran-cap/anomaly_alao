@@ -153,7 +153,60 @@ DIRECT_REPLACEMENT_FUNCS = frozenset({
 # resolve through metatable lookups in the engine - caching the reference in
 # a local once is a real win in hot code. The repeated-call analysis treats
 # entries here equivalently to function calls in expensive_calls
-EXPENSIVE_INDEXES = frozenset({'db.actor'})
+# (I-021) `db` is a bare global, so every `db.x` is a global-table hash lookup
+# followed by a second hash lookup for the field. The entries below are the
+# long-lived container tables in db.script that scripts re-read many times in
+# one body; the I-021 census counted 6298 `db.actor` reads and 714 `db.storage`
+# reads across the enabled GAMMA corpus, 597 and 59 bodies respectively reading
+# the same field 3+ times. Everything here is written once at spawn/level-load
+# and never inside a callback body, so a body-local copy cannot go stale.
+EXPENSIVE_INDEXES = frozenset({
+    'db.actor',
+    'db.storage',
+    'db.offline_objects',
+    'db.OnlineStalkers',
+    'db.zone_by_name',
+    'db.actor_binder',
+    'db.script_ids',
+})
+
+# Local name to give the cached copy of each entry above. `db.actor` keeps the
+# historical `actor` (it is what every mod author writes by hand); the rest get
+# a prefixed name because a bare `storage` or `script_ids` local is far more
+# likely to collide with something already in the body.
+EXPENSIVE_INDEX_CACHE_NAMES = {
+    'db.actor': 'actor',
+    'db.storage': 'db_storage',
+    'db.offline_objects': 'db_offline_objects',
+    'db.OnlineStalkers': 'db_online_stalkers',
+    'db.zone_by_name': 'db_zone_by_name',
+    'db.actor_binder': 'db_actor_binder',
+    'db.script_ids': 'db_script_ids',
+}
+
+# Argument-less methods on an engine object whose result cannot change between
+# two reads inside one callback body, so the second read can be a local.
+#
+# GREEN entries are immutable for the lifetime of a live object (verified
+# against the X-Ray sources named beside each one). YELLOW entries are stable
+# only because no engine tick happens inside a body, which is true in practice
+# but is a weaker argument, so they need --fix-yellow.
+#
+# Deliberately NOT here: :position() (returns a freshly allocated vector whose
+# methods mutate in place, so a cached copy aliases where the original did
+# not), :alive(), :active_item(), :active_slot(), :best_enemy(), :parent(),
+# :health() - all of which a body can change by calling into the engine.
+CACHEABLE_OBJECT_METHODS = {
+    # method              severity   why it cannot change
+    'section':            'GREEN',   # stored NameSection member, xr_object.h:155
+    'id':                 'GREEN',   # stored Props.net_ID member, xr_object.h:98
+    'clsid':              'GREEN',   # m_script_clsid member, GameObject.h:257
+    'story_id':           'GREEN',   # set once from config, xrServer_Objects_ALife.cpp:375
+    'name':               'GREEN',   # cName() - the spawn name, never reassigned
+    'section_name':       'GREEN',   # cse_abstract section, set at spawn
+    'character_community':'YELLOW',  # community_index, only changed by script
+    'profile_name':       'YELLOW',  # profile string, only changed by script
+}
 
 # ---------------------------------------------------------------------------
 # LuaJIT 2.0 trace-abort awareness (I-013)
@@ -697,6 +750,10 @@ class ASTAnalyzer:
         # assignment or by `function foo()`. A write to one of these from
         # inside a function body is module state being mutated, not a slip.
         self.module_level_globals: Set[str] = set()
+        # I-021: dotted assignment targets (`db.storage = t`), which the
+        # AssignInfo list deliberately does not carry. Read only by
+        # _receiver_rebound.
+        self.index_writes: List[Tuple[str, int, Scope]] = []
         
         self.nil_sources: Dict[Tuple[int, str], NilSourceInfo] = {}
         self.nil_accesses: List[NilAccessInfo] = []
@@ -1538,6 +1595,16 @@ class ASTAnalyzer:
                 if len(node.values) == 1:
                     self._record_assignment(target_name, node.values[0], line, is_local=False)
 
+        # I-021: a dotted write (`db.storage = t`, `self.object = other`) is not
+        # an AssignInfo - that list is keyed on plain Names and feeding it
+        # dotted targets would disturb nil-tracking and unused-local detection.
+        # _receiver_rebound needs them though, so they get their own list.
+        for target in node.targets:
+            if isinstance(target, Index):
+                dotted = self._node_to_string(target)
+                if dotted and '(' not in dotted and '[' not in dotted:
+                    self.index_writes.append((dotted, line, self.current_scope))
+
         # visit targets (for calls inside index expressions like db.storage[npc:id()])
         for target in node.targets:
             self._visit(target)
@@ -1979,11 +2046,26 @@ class ASTAnalyzer:
         # Check for potential nil access
         self._check_nil_access(node.source, source, full_name, line, 'method')
 
-        # source of an invoke (e.g. `db.actor` in `db.actor:method()`) is the
-        # receiver - the Invoke itself records the full `db.actor:method`
-        # signature, so don't double-count `db.actor` as a standalone read.
+        # source of an invoke (e.g. `foo.bar` in `foo.bar:method()`) is the
+        # receiver - the Invoke itself records the full `foo.bar:method`
+        # signature, so don't double-count `foo.bar` as a standalone read.
+        #
+        # I-021: EXPENSIVE_INDEXES entries are the exception. `db.actor:xyz()`
+        # pays the same two hash lookups as a bare `db.actor` read, and it is
+        # the dominant shape in the wild - 3615 of the 6298 `db.actor` reads in
+        # the enabled GAMMA corpus are method receivers. Suppressing them meant
+        # repeated_db_actor fired 78 times where the real count is in the
+        # hundreds (the strict xfail this drops). The receiver Index is a real
+        # property read, so record it; `_edit_repeated_calls` replaces exactly
+        # that span, turning `db.actor:xyz()` into `actor:xyz()`.
         if isinstance(node.source, Index):
-            self._suppress_indexes.add(id(node.source))
+            src = node.source
+            expensive_receiver = (
+                isinstance(src.value, Name) and isinstance(src.idx, Name)
+                and f"{src.value.id}.{src.idx.id}" in EXPENSIVE_INDEXES
+            )
+            if not expensive_receiver:
+                self._suppress_indexes.add(id(src))
 
         self._visit(node.source)
         for arg in node.args:
@@ -3217,6 +3299,43 @@ class ASTAnalyzer:
                 return True
         return False
 
+    def _receiver_rebound(self, bucket_name: str, func_scope: Scope,
+                          first_line: int) -> bool:
+        """True if the receiver of `bucket_name` is assigned at or after `first_line`.
+
+        `bucket_name` is what the bucket is keyed on: `db.actor`, or
+        `self.object:id()` for a method bucket. The receiver is everything left
+        of the colon; we check that exact name and its first dotted component,
+        because rebinding either end is what invalidates the cache.
+
+        A write to a FIELD of the receiver (`db.actor.afterFirstUpdate = true`)
+        is explicitly not a rebind: it mutates the object the cache points at,
+        and the cache still points at it, so `local actor = db.actor` followed
+        by `actor.afterFirstUpdate = true` means the same thing. Treating those
+        as rebinds cost the whole `actor_binder:update` rewrite in
+        bind_stalker.script, which is the most valuable site this idea has.
+
+        Line-based on purpose, to match the rest of this pass. An assignment
+        textually before the first call is fine (that is the declaration, and
+        the cache goes in below it); the transformer separately refuses to hoist
+        a method cache above a loop or a branch, which is what would otherwise
+        make a later-line assignment reachable first.
+        """
+        receiver = bucket_name.split(':')[0]
+        if not receiver or '(' in receiver:
+            return False
+        base = receiver.split('.')[0]
+        candidates = [(a.target or '', a.line, a.scope) for a in self.assigns]
+        candidates += self.index_writes
+        for target, line, scope in candidates:
+            if line < first_line:
+                continue
+            if self._find_function_scope(scope) is not func_scope:
+                continue
+            if target == receiver or target == base:
+                return True
+        return False
+
     def _analyze_repeated_calls_in_scope(self):
         """Find repeated expensive calls within function scope."""
         # expensive function calls (need parens) to track
@@ -3230,13 +3349,10 @@ class ASTAnalyzer:
         expensive_calls = {'alife', 'system_ini', 'game_ini', 'getFS',
                            'device', 'get_console', 'get_hud', 'level.name'}
 
-        # method calls that are safe to cache (immutable object properties)
-        # based on X-Ray engine source analysis:
-        # - :section() returns stored NameSection member (xr_object.h:155)
-        # - :id() returns stored Props.net_ID member (xr_object.h:98)
-        # - :clsid() returns stored m_script_clsid member (GameObject.h:257)
-        # - :story_id() returns m_story_id set once from config (xrServer_Objects_ALife.cpp:375)
-        cacheable_methods = {'section', 'id', 'clsid', 'story_id'}
+        # method calls that are safe to cache (immutable object properties).
+        # The table, the per-method severity and the engine-source citations
+        # live in CACHEABLE_OBJECT_METHODS at the top of this file (I-021).
+        cacheable_methods = CACHEABLE_OBJECT_METHODS
 
         # group by function scope. Both CallInfo and IndexInfo carry the same
         # set of fields the downstream code depends on (line, node, scope,
@@ -3277,6 +3393,17 @@ class ASTAnalyzer:
                 threshold = self.cache_threshold - 1 if func_scope.is_hot_callback else self.cache_threshold
                 call_count = self._count_calls_branch_aware(calls)
 
+                # I-021, raised independently by agent-I041: the bucket key is
+                # the receiver's *text*, so `obj:id()` before and after
+                # `obj = something_else` landed in one bucket and the rewrite
+                # answered both with the first object's id. Silently wrong, and
+                # it predates this idea - `:id()` and `:section()` have been
+                # GREEN all along. Nothing here proves a receiver is stable, so
+                # require that its name is not assigned once the caching has
+                # started.
+                if self._receiver_rebound(name, func_scope, calls[0].line):
+                    continue
+
                 if call_count >= threshold:
                     # I-038: caching a call that may return nil turns a hidden
                     # hazard into a local that the nil pass then flags at every
@@ -3298,8 +3425,15 @@ class ASTAnalyzer:
                     # suggest caching
                     severity = 'GREEN'
 
-                    if name == 'db.actor':
-                        suggestion = 'local actor = db.actor'
+                    # I-021: a method whose stability rests only on "no engine
+                    # tick happens inside a body" is YELLOW, not GREEN.
+                    if isinstance(calls[0], CallInfo) and ':' in name:
+                        severity = CACHEABLE_OBJECT_METHODS.get(
+                            calls[0].func, 'YELLOW')
+
+                    if name in EXPENSIVE_INDEX_CACHE_NAMES:
+                        suggestion = 'local %s = %s' % (
+                            EXPENSIVE_INDEX_CACHE_NAMES[name], name)
                     elif name == 'alife':
                         suggestion = 'local sim = alife()'
                     elif name == 'system_ini':
@@ -3329,6 +3463,11 @@ class ASTAnalyzer:
                             'calls': calls,  # list of CallInfo with nodes
                             'scope': func_scope,
                             'original_call': name,  # preserve original like "self.object:id()"
+                            # I-021: the interpreted/compiled split decides how
+                            # much this rewrite is worth (~1.0x on a trace,
+                            # 1.5x-3x interpreted), so carry the I-013 verdict
+                            # into the JSON report instead of re-deriving it.
+                            'jit_mode': self._jit_mode_for_scope(func_scope),
                         },
                         source_line=suggestion,
                     ))

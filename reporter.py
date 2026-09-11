@@ -78,7 +78,16 @@ PERFORMANCE_IMPACT = {
 
 def get_performance_impact(pattern_name: str) -> str:
     """Get performance impact level for a pattern."""
-    return PERFORMANCE_IMPACT.get(pattern_name, 'low')
+    if pattern_name in PERFORMANCE_IMPACT:
+        return PERFORMANCE_IMPACT[pattern_name]
+    # I-021: the repeated_* family is generated per property/method
+    # (repeated_db_actor, repeated_self_object_id(), ...), so it cannot be
+    # enumerated here. Measured on LuaJIT 2.0 with a userdata receiver:
+    # 1.3x-1.6x interpreted at 3 repeats, 2.4x-3.1x at 6, ~1.0x compiled.
+    # That is a medium, not the 'low' the default gave it.
+    if pattern_name.startswith('repeated_'):
+        return 'medium'
+    return 'low'
 
 
 def highlight_code_match(line_content: str, details: dict, pattern_name: str) -> str:

@@ -112,14 +112,17 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 | `x ^ 0.5` | `math.sqrt(x)` | High - 3.0x interpreted, 1.00x compiled (I-012) |
 | `pos:distance_to(t) < N` | `pos:distance_to_sqr(t) < N*N` | High - avoids sqrt |
 | Uncached globals (4+ calls) | `local mfloor = math.floor` | Medium - reduces lookups |
-| Repeated `db.actor` | `local actor = db.actor` | High - cached reference |
+| Repeated `db.actor` | `local actor = db.actor` | High - cached reference. Counts `db.actor:method()` receivers as well as plain `db.actor.x` reads (I-021) |
+| Repeated `db.storage`, `db.offline_objects`, `db.OnlineStalkers`, `db.zone_by_name`, `db.actor_binder`, `db.script_ids` | `local db_storage = db.storage` etc. | Medium - two hash lookups per read (global `db`, then the field) |
 | Repeated `alife()` | `local sim = alife()` | High - cached singleton |
 | Repeated `device()` | `local dev = device()` | Medium - cached singleton |
 | Repeated `system_ini()` | `local ini = system_ini()` | Medium - cached singleton |
 | Repeated `get_console()` | `local console = get_console()` | Medium - cached singleton |
 | Repeated `get_hud()` | `local hud = get_hud()` | Medium - cached singleton |
-| Repeated `:section()` | `local sec = obj:section()` | Medium - immutable property |
-| Repeated `:id()` | `local id = obj:id()` | Medium - immutable property |
+| Repeated `:section()` | `local obj_sec = obj:section()` | Medium - immutable property |
+| Repeated `:id()` | `local obj_id = obj:id()` | Medium - immutable property |
+| Repeated `:clsid()`, `:story_id()` | `local obj_cls = obj:clsid()` | Medium - immutable property |
+| Repeated `:name()`, `:section_name()` | `local obj_name = obj:name()` | Medium - set at spawn, never reassigned. 1.5x-1.9x interpreted at 3 repeats, 2.4x-3.1x at 6, ~1.0x compiled (I-021) |
 
 
 ### YELLOW (may cause CTDs, fix with `--fix-yellow`)
@@ -130,6 +133,7 @@ Pay attention some of this fixes requires `--experimental` flag.
 |---------|-------------|--------|
 | `s = s .. x` in loop | String concatenation builds O(n²) garbage. `--experimental` only, and only worth it past ~30 loop iterations (see below) | Critical for long loops, a regression for short ones |
 | `vector():set(...)` in loop | Hoists one `local _v = vector()` above the loop and reuses it. Only when the vector provably can't outlive the iteration (not stored, not returned, not captured, not handed to an unknown callee) | High - 1.3x-2.6x interpreted, ~1.0x compiled |
+| Repeated `:character_community()`, `:profile_name()` | `local obj_comm = obj:character_community()`. YELLOW rather than GREEN because these are stable only in the sense that no engine tick happens inside one body, which is weaker than `:id()` and `:section()` being stored members | Medium |
 | Append-only local table in a loop | hoisted counter: `local t_n = 0` + `t_n = t_n + 1; t[t_n] = v`. YELLOW on purpose: never a regression (1.06x at 5 iterations, 1.6x at 20, 3.7x at 100, ~10x at 2000, loops with a literal bound under 20 are skipped) but a wrong count silently corrupts a table, and no corpus site is per-frame. Appending a possible `nil` is also why the counter and `#t` can diverge | High for long loops |
 
 
