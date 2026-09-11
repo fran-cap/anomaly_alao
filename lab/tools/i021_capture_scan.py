@@ -8,7 +8,7 @@ name against the ancestor scopes of the function it lands in.
 """
 import re, sys
 from pathlib import Path
-sys.path.insert(0, r'C:\code\GIT\anomaly_alao\.claude\worktrees\agent-I021')
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: test the checked-out ALAO
 from ast_analyzer import ASTAnalyzer
 from ast_transformer import ASTTransformer
 

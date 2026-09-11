@@ -718,7 +718,9 @@ Cross-cutting facts this generation established:
   gate that executes original vs rewritten functions under stubbed globals is now the highest-value
   safety idea on the beam (I-017, re-scored). It would not have caught the `tasks_fetch` shape,
   where parameter and `db.actor` coincide under any stub; that needs a cheaper, narrower check that
-  `--fix` never introduces a binding shadowing a live outer one (I-046).
+  `--fix` never introduces a binding shadowing a live outer one (I-046). Its prototype,
+  `lab/tools/i021_capture_scan.py`, run against the merged head on both integration fix trees: 788
+  originals, 1203 inserted declarations, **0 captures** (3 at the pre-fix code).
 - **The per-frame rewrites ALAO can do today are worth ~0.01% of a frame.** Both in-game deltas
   this generation (I-021, I-040) were predicted null from site arithmetic before they ran, and I-021
   measured null. In-game FPS remains the wrong instrument for anything except I-043/I-044-class
