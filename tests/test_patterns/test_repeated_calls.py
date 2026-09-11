@@ -298,6 +298,29 @@ def test_time_global_unsafe_shapes_are_skipped(analyze, transform, src):
     assert "local tg = time_global()" not in transform(src)
 
 
+# every read is inside a branch, so the body does not always read the clock.
+# Hoisting would add a call on the path where neither branch is taken.
+TIME_GLOBAL_ALL_CONDITIONAL = """
+function f(x)
+    local r
+    if x == 1 then
+        r = time_global()
+    elseif x == 2 then
+        r = time_global() + 1
+    end
+    if x == 3 then
+        r = time_global() + 2
+    end
+    return r
+end
+"""
+
+
+def test_time_global_with_no_unconditional_read_is_skipped(analyze, transform):
+    assert "repeated_time_global" not in pattern_names(analyze(TIME_GLOBAL_ALL_CONDITIONAL))
+    assert "local tg = time_global()" not in transform(TIME_GLOBAL_ALL_CONDITIONAL)
+
+
 # reads inside a `for` are the best case: the loop terminates whatever the
 # clock says, and the hoist saves one call per iteration
 TIME_GLOBAL_IN_FOR = """

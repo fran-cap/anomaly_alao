@@ -3152,6 +3152,15 @@ class ASTAnalyzer:
            (`if time_global() - last > 250 then last = time_global()`), which is
            exactly what we want to fix.
 
+        And one more, which is about cost rather than correctness:
+
+        4. no read on the unconditional path. If every read sits inside an
+           `if` or a loop, the hoisted declaration is a call the body did not
+           always make, so on the paths where no branch is taken the rewrite
+           is a (tiny) regression. Requiring one unconditional read makes the
+           hoist replace a call that was already guaranteed, so no path ever
+           gains a call. 27 of 154 candidates on GAMMA, 11 of 59 on vanilla.
+
         2 and 3 are line-based, like the other heuristics in here. They only
         ever drop candidates.
         """
@@ -3184,6 +3193,10 @@ class ASTAnalyzer:
                 code = self._get_source_line(ln).split('--', 1)[0]
                 if self._TG_RETURN_RE.search(code):
                     return False
+
+        # (4) at least one read that runs on every invocation
+        if not any(not c.if_chain_path and not c.in_loop for c in calls):
+            return False
 
         # (3) self-timing: assignment from the clock, subtracted from a later read
         assign_line: Dict[str, int] = {}
