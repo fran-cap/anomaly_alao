@@ -115,6 +115,7 @@ Pay attention some of this fixes requires `--experimental` flag.
 | Pattern | Description | Impact |
 |---------|-------------|--------|
 | `s = s .. x` in loop | String concatenation builds O(n²) garbage | Critical |
+| `vector():set(...)` in loop | Hoists one `local _v = vector()` above the loop and reuses it. Only when the vector provably can't outlive the iteration (not stored, not returned, not captured, not handed to an unknown callee) | High - 1.3x-2.6x interpreted, ~1.0x compiled |
 
 
 ### RED (info only (for modders), no auto-fix)
@@ -124,7 +125,7 @@ Pay attention some of this fixes requires `--experimental` flag.
 | Global variable writes | Writing to global scope (potential pollution) |
 | Per-frame callback warnings | Performance issues in `actor_on_update`, `CFoo:update`, etc. |
 | `jit_mode` | A per-frame body LuaJIT 2.0 cannot compile into a trace, with the constructs that abort it (`..`, `pairs`, `string.format`, engine calls, closures). See `lab/reports/luajit20-nyi.md` |
-| `vector()` in hot loop | Allocates new vector each iteration | Critical |
+| `vector()` in hot loop | Allocates new vector each iteration. The `vector():set(...)` subset that provably can't escape its iteration is YELLOW and fixable with `--fix-yellow`; everything else stays here |
 | Constant conditions | `if true then` / `if false then` |
 | Unnecessary else | `if x then return end else ...` |
 

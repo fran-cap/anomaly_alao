@@ -19,10 +19,12 @@ function f()
 end
 """
 
+# the vector escapes the iteration (stored into a table), so it stays RED -
+# see test_vector_scratch.py for the subset that is now a YELLOW transform
 VECTOR_IN_LOOP = """
-function f(n)
+function f(n, out)
     for i = 1, n do
-        local v = vector():set(1, 2, 3)
+        out[i] = vector():set(1, 2, 3)
     end
 end
 """
@@ -60,9 +62,10 @@ def test_local_write_is_not_flagged(analyze):
     assert "global_write" not in pattern_names(analyze(LOCAL_WRITE))
 
 
-def test_vector_allocation_in_loop_is_red(analyze):
+def test_escaping_vector_allocation_in_loop_is_red(analyze):
     finding = find_one(analyze(VECTOR_IN_LOOP), "vector_alloc_in_loop")
     assert finding.severity == "RED"
+    assert finding.details["is_safe_to_fix"] is False
     assert finding.line_num == 3
 
 
