@@ -220,8 +220,10 @@ This turns O(n²) string garbage into O(n). **But it is not free, and that is wh
 it is still behind a flag.** Building the parts table and the result buffer costs
 more than a handful of small concats, so for a short accumulation the rewrite is
 a *regression*. Measured on LuaJIT 2.0 (speedup = original / rewrite,
-interpreted, which is the mode that matters because `..` never compiles on
-LuaJIT 2.0.4):
+interpreted -- the only mode that matters here, because `..` is NYI on
+LuaJIT 2.0.4 and so a loop containing it never compiles. All 205 sites of this
+pattern in the enabled GAMMA corpus were classified and **none** sits in a
+compiled body):
 
 | loop iterations | 3 | 5 | 10 | 20 | 30 | 68 | 100 | 200 | 1000 |
 |---|---|---|---|---|---|---|---|---|---|

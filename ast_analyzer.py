@@ -117,11 +117,24 @@ EXPENSIVE_INDEXES = frozenset({'db.actor'})
 # sweep. Speedup = time(original) / time(rewrite):
 #
 #   iters:      3     5    10    20    30    50   68   100   200   1000
-#   JIT      0.60  0.62  0.85  1.23  1.32  2.49 1.32  2.65  8.79  21.46
 #   interp   0.45  0.53  0.61  0.82  1.16  1.12 1.31  1.66  5.47  11.99
+#   (JIT)    0.60  0.62  0.85  1.23  1.32  2.49 1.32  2.65  8.79  21.46
 #
-# (those are for the counter-based rewrite ALAO emits; the older `p[#p+1]`
-# form is worse still, breaking even at ~100 interpreted rather than ~30.)
+# **The interpreted row is the gate. The JIT row is recorded for completeness
+# and is not used in any decision here.** agent-I013 classified all 205 corpus
+# sites of this pattern (run 20260911-114408-i013-rerun): 0 sit in a compiled
+# body - 120 interpreted, 82 mixed - because BC_CAT is NYI on LuaJIT 2.0.4, so a
+# loop containing `..` never compiles no matter how hot it gets. table.concat is
+# NYI too, so the rewritten loop is interpreted as well. The JIT column
+# describes a machine state that no site of this pattern is ever in.
+#
+# Those are for the counter-based rewrite ALAO emits. Do not carry the number
+# over to the older `p[#p+1]` shape, which ALAO stopped emitting in b4726fe and
+# which breaks even around K=100 interpreted rather than ~30 - if you see "~100"
+# quoted as this pattern's crossover, it is describing that dead shape.
+#
+# 30 is where the interpreted row first clears G2's 1.15x bar on both harnesses
+# (1.16x and 1.28x at K=30; K=20 fails both at 0.82x and 1.01x).
 #
 # Independently reproduced by agent-I003's tools/microbench.py at best-of-25 on
 # the same protocol: 0.44/0.47 at K=3, 0.97/1.01 at K=20, 1.47/1.28 at K=30,
@@ -138,10 +151,6 @@ EXPENSIVE_INDEXES = frozenset({'db.actor'})
 # hundreds" is the honest statement. Quoting a single number for this transform
 # is a category error whichever bracket is right; that is why this comment is a
 # curve.
-#
-# The interpreted column is the one that governs: agent-I013 confirmed BC_CAT
-# is NYI on LuaJIT 2.0.4, so any loop containing `..` runs interpreted no matter
-# how hot it is, and table.concat is NYI too.
 #
 # Hence: only rewrite when the loop plausibly runs at least this many times. We
 # can only *prove* the count for a numeric `for` with literal bounds; for
