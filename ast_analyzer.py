@@ -3257,7 +3257,10 @@ class ASTAnalyzer:
         falls through and stays RED.
         """
         tree = getattr(self, '_ast_tree', None)
-        if tree is None:
+        # the main visitor already told us whether this file has any vector()
+        # inside a loop at all - and almost none of them do, so bail before
+        # paying for two full-tree walks
+        if tree is None or not self.vector_allocations:
             return {}
 
         found: Dict[int, Dict[str, Any]] = {}
