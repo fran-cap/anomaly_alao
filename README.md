@@ -51,8 +51,13 @@ python stalker_lua_lint.py [path_to_mods] [options]
 --report [file]    Generate comprehensive report (.txt, .html, .json)
 --revert           Restore all .alao-bak backup files (undo fixes)
 
+# Safety
+--verify-compile / --no-verify-compile
+                   LuaJIT-compile each rewrite before writing it and refuse the write
+                   if it fails (default: on when `lupa` is installed)
+
 # Performance
---timeout [sec]    Timeout per file (default: 10)
+--timeout [sec]    Timeout per file, analyze and fix (default: 10)
 --workers / -j     Parallel workers for fixes (default: CPU count)
 --single-thread    Disable multiprocessing (for debugging)
 

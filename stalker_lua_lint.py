@@ -35,9 +35,16 @@ Options:
     --no-first-time-auto-backup
                        Skip automatic backup creation (not recommended)
 
+    --verify-compile / --no-verify-compile
+                       LuaJIT-compile every rewrite before writing it and refuse the
+                       write if it fails (default: on whenever `lupa` is installed;
+                       `pip install lupa` to get it - it bundles LuaJIT 2.0)
+
     # MULTITHREAD processing
     --timeout [seconds]
-                       Timeout per file in seconds (default: 10)
+                       Timeout per file in seconds (default: 10). Applies to both the
+                       analyze and the fix phase; a file that fails analysis is not
+                       rewritten.
     --workers / -j    Number of parallel workers for fixes (default: CPU count)
     --single-thread   Disable multiprocessing (for debugging)
     
