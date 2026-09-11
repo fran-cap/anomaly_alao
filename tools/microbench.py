@@ -39,13 +39,16 @@ table.concat rewrite is 0.57x at 3 iterations and 8x at thousands - so a single
 huge-N number is not a G2 verdict. The per-pattern summary then reads
 "passes for K >= 100" instead of a bare pass/fail.
 
-A snippet can also declare `-- @corpus_k 3 10`: the loop lengths the pattern
-actually has in the corpus. The sweep must then contain a point inside that
-range (the file is rejected at parse time otherwise), and the G2 verdict leads
-with that range rather than with the best row - because a transform that wins
-only at K=2000 while every real site is K=3 has been scored on a part of its own
-curve the code never reaches. A speedup is a function; a scalar is a claim that
-the function is constant, and that claim has to hold where the code runs.
+A snippet can also declare `-- @corpus_k 3-10:15 68:3` with `-- @corpus_src
+<run id>`: where the pattern runs, as buckets of loop-length range to corpus site
+count. Every bucket must contain a measured point (the file is rejected at parse
+time otherwise), and the G2 verdict then leads by counting sites - "15 of 18
+corpus sites fail G2, 3 of 18 pass" - because a transform that wins only at
+K=2000 while most real sites are K=3 has been scored on a part of its own curve
+the code does not visit. Buckets rather than one range because corpora are
+bimodal and a range loses where the mass is. A speedup is a function; a scalar is
+a claim that the function is constant, and that claim has to hold where the code
+runs.
 
 Usage:
 
@@ -109,7 +112,7 @@ JITTER_WARN = 1.25
 DIRECTIVE_RE = re.compile(r"^\s*--\s*@(\w+)\s*(.*)$")
 SECTIONS = ("setup", "original", "rewrite", "sink")
 META_KEYS = ("pattern", "title", "status", "n", "doc", "notes", "iters", "doc_at",
-             "corpus_k")
+             "corpus_k", "corpus_src")
 
 # The VM we must be on. Anomaly ships LuaJIT 2.0.4; lupa.luajit20 is a 2.0-branch
 # build (version_num 20099) with the same optimization flag set, which is what
@@ -119,6 +122,44 @@ EXPECTED_JIT_OPT_FLAGS = ["fold", "cse", "dce", "fwd", "dse", "narrow",
                           "loop", "abc", "sink", "fuse"]
 KNOWN_OPT_FLAGS = set(EXPECTED_JIT_OPT_FLAGS)
 EXPECTED_JIT_MAJOR_MINOR = (2, 0)
+
+
+@dataclass
+class CorpusBucket:
+    """`3-10:15` - a loop-length range and how many corpus sites sit in it."""
+
+    lo: int
+    hi: int
+    sites: Optional[int] = None
+
+    def contains(self, k: Optional[int]) -> bool:
+        return k is not None and self.lo <= k <= self.hi
+
+    @property
+    def label(self) -> str:
+        return f"K={self.lo}" if self.lo == self.hi else f"K={self.lo}-{self.hi}"
+
+
+def parse_corpus_buckets(spec: str, where: str) -> List[CorpusBucket]:
+    """`3-10:15 68:3` -> two buckets. The `:count` is optional but wanted."""
+    buckets: List[CorpusBucket] = []
+    for token in spec.replace(",", " ").split():
+        rng, _, count = token.partition(":")
+        lo, _, hi = rng.partition("-")
+        try:
+            lo_i = int(lo)
+            hi_i = int(hi) if hi else lo_i
+            sites = int(count) if count else None
+        except ValueError:
+            raise ValueError(
+                f"{where}: bad @corpus_k token {token!r}; want <K>[-<K>][:<site count>]"
+            ) from None
+        if lo_i < 1 or hi_i < lo_i or (sites is not None and sites < 0):
+            raise ValueError(f"{where}: bad @corpus_k token {token!r}")
+        buckets.append(CorpusBucket(lo_i, hi_i, sites))
+    if not buckets:
+        raise ValueError(f"{where}: @corpus_k is empty")
+    return buckets
 
 
 @dataclass
@@ -139,11 +180,18 @@ class BenchCase:
     notes: str = ""
     iters: List[int] = field(default_factory=list)   # inner loop lengths to sweep
     doc_at: Optional[int] = None                     # which K the @doc figure refers to
-    # The inner loop lengths this pattern actually has in the corpus, as [lo, hi].
-    # A speedup is a function of K; a scalar is a claim the function is constant.
-    # This is where the claim has to hold, and it is usually not where it is easiest
-    # to measure a big number.
-    corpus_k: Optional[List[int]] = None
+    # Where this pattern actually runs, as buckets of (lo, hi, site_count). A
+    # speedup is a function of K; a scalar is a claim the function is constant.
+    # This is where the claim has to hold, and it is usually not where it is
+    # easiest to measure a big number.
+    #
+    # Buckets rather than one lo-hi range because real corpora are bimodal: the
+    # string_concat sites are 15 short UI builders at K=3-10 plus an isolated
+    # spike of 3 literal `for i=1,68` loops, nothing in between. A range flattens
+    # that to "3-68" and loses the fact that the mass is at the bottom, which is
+    # the thing that actually decides a prune.
+    corpus_k: Optional[List["CorpusBucket"]] = None
+    corpus_src: str = ""             # run id / audit this breakdown came from
 
     def n_for(self, mode: str) -> int:
         """Total inner-iteration budget for this mode."""
@@ -242,19 +290,28 @@ def parse_bench_file(path: Path) -> BenchCase:
         raise ValueError(f"{path.name}: @doc_at {doc_at} is not one of @iters {iters}")
 
     corpus_k = None
+    corpus_src = meta.get("corpus_src", "")
     if meta.get("corpus_k"):
-        parts = [int(x) for x in meta["corpus_k"].replace("-", " ").replace(",", " ").split()]
-        if len(parts) != 2 or parts[0] > parts[1] or parts[0] < 1:
-            raise ValueError(f"{path.name}: @corpus_k takes a range: <lo> <hi>, lo <= hi")
-        corpus_k = parts
-        if iters and not any(parts[0] <= k <= parts[1] for k in iters):
-            # The whole point of declaring the range is that you measured in it.
+        corpus_k = parse_corpus_buckets(meta["corpus_k"], path.name)
+        if not corpus_src:
+            # Otherwise this is a hand-entered number carrying the same trust
+            # problem as the scalar it replaces, and the rule in tools/README.md
+            # applies to it too (agent-I039).
             raise ValueError(
-                f"{path.name}: @corpus_k {parts[0]}-{parts[1]} contains none of "
-                f"@iters {iters}. The sweep never measures the loop lengths this "
-                "pattern actually has, so its G2 number would describe a region "
-                "where the transform never runs. Add a K inside the range."
+                f"{path.name}: @corpus_k needs @corpus_src naming the run id or "
+                "audit the site counts came from."
             )
+        if iters:
+            # The whole point of declaring where a pattern runs is that you
+            # measured there. Every bucket must contain a measured point.
+            blind = [b.label for b in corpus_k if not any(b.contains(k) for k in iters)]
+            if blind:
+                raise ValueError(
+                    f"{path.name}: @corpus_k bucket(s) {', '.join(blind)} contain none "
+                    f"of @iters {iters}. The sweep never measures loop lengths this "
+                    "pattern actually has, so its G2 number would describe a region "
+                    "where the transform never runs. Add a K inside each bucket."
+                )
 
     return BenchCase(
         pattern=meta["pattern"],
@@ -272,6 +329,7 @@ def parse_bench_file(path: Path) -> BenchCase:
         iters=iters,
         doc_at=doc_at,
         corpus_k=corpus_k,
+        corpus_src=corpus_src,
     )
 
 
@@ -493,6 +551,50 @@ def run_case(case: BenchCase, reps: int, modes: Sequence[str],
     return results
 
 
+def corpus_verdict(case: BenchCase, flags: Sequence[tuple]) -> Optional[str]:
+    """G2 read out over the corpus's own distribution of loop lengths.
+
+    `flags` is [(k, passed_g2), ...] from the sweep. Returns the sentence a
+    prune decision can actually be made on - "15 of 18 sites fail" - rather
+    than a range, or None if nothing was measured in any declared bucket.
+    """
+    parts: List[str] = []
+    pass_sites = fail_sites = 0
+    counted = True
+    any_measured = False
+
+    for b in case.corpus_k or []:
+        inside = [(k, ok) for k, ok in flags if b.contains(k)]
+        if not inside:
+            continue
+        any_measured = True
+        ok_all = all(ok for _, ok in inside)
+        ok_any = any(ok for _, ok in inside)
+        state = "pass" if ok_all else "fail" if not ok_any else "mixed"
+        if b.sites is None:
+            counted = False
+            parts.append(f"{b.label}: {state}")
+        else:
+            parts.append(f"{b.sites} at {b.label}: {state}")
+            if ok_all:
+                pass_sites += b.sites
+            elif not ok_any:
+                fail_sites += b.sites
+
+    if not any_measured:
+        return None
+
+    src = f" [{case.corpus_src}]" if case.corpus_src else ""
+    if counted:
+        total = sum(b.sites or 0 for b in case.corpus_k or [])
+        head = (f"{fail_sites} of {total} corpus sites fail G2" if fail_sites
+                else f"all {total} corpus sites pass G2")
+        if fail_sites and pass_sites:
+            head += f", {pass_sites} of {total} pass"
+        return f"{head}{src} ({'; '.join(parts)})"
+    return f"at corpus sites{src}: {'; '.join(parts)}"
+
+
 def g2_summary(results: Sequence[CaseResult]) -> Dict[str, str]:
     """Per pattern: the G2 verdict, qualified by inner loop length where it swings."""
     by_pattern: Dict[str, List[CaseResult]] = {}
@@ -511,21 +613,16 @@ def g2_summary(results: Sequence[CaseResult]) -> Dict[str, str]:
         flags = [(r.k, bool(r.g2)) for r in rows]
 
         # If the snippet declared where this pattern actually runs, that verdict
-        # leads. A transform scored on a region it never reaches is the failure
-        # I-039 hit: 18 corpus sites at K=3-10, a beam figure measured in the low
-        # hundreds, and a correct number that was simply about the wrong place.
+        # leads, and it counts SITES rather than bounding a range. A transform
+        # scored on a region it never reaches is the failure I-039 hit; a range
+        # alone would have flattened their bimodal corpus (15 sites at K=3-10,
+        # 3 at K=68) into "3-68" and lost the fact that the mass is at the bottom,
+        # which is the thing that decides a prune.
         case = rows[0].case
         if case.corpus_k:
-            lo, hi = case.corpus_k
-            inside = [(k, ok) for k, ok in flags if lo <= k <= hi]
-            if inside:
-                verdict = ("pass" if all(ok for _, ok in inside)
-                           else "FAIL" if not any(ok for _, ok in inside) else "mixed")
-                detail = ", ".join(f"K={k}:{'pass' if ok else 'fail'}" for k, ok in inside)
-                elsewhere = [k for k, ok in flags if ok and not (lo <= k <= hi)]
-                tail = (f" (passes only at K in {elsewhere}, which this pattern "
-                        "does not reach in the corpus)") if elsewhere and verdict == "FAIL" else ""
-                out[pattern] = f"at corpus K {lo}-{hi}: {verdict} [{detail}]{tail}"
+            verdict = corpus_verdict(case, flags)
+            if verdict:
+                out[pattern] = verdict
                 continue
         if all(f for _, f in flags):
             out[pattern] = "pass at every K measured"

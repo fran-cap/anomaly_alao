@@ -193,16 +193,41 @@ def test_json_shape():
     json.dumps(blob)  # must be serialisable
 
 
+def _snippet(tmp_path, **directives):
+    lines = ["-- @pattern x", "-- @title x"]
+    lines += [f"-- @{k} {v}" for k, v in directives.items()]
+    lines += ["-- @original", "local a = 1", "-- @rewrite", "local a = 2", "-- @sink", "1"]
+    p = tmp_path / "x.lua"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
 def test_corpus_k_must_be_inside_the_sweep(tmp_path):
     """Declaring where a pattern runs and not measuring there is the defect."""
-    p = tmp_path / "x.lua"
-    p.write_text(
-        "-- @pattern x\n-- @title x\n-- @iters 100 2000\n-- @corpus_k 3 10\n"
-        "-- @original\nlocal a = 1\n-- @rewrite\nlocal a = 2\n-- @sink\n1\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="never measures the loop lengths"):
+    p = _snippet(tmp_path, iters="100 2000", corpus_k="3-10:15", corpus_src="run-1")
+    with pytest.raises(ValueError, match="never measures loop lengths"):
         microbench.parse_bench_file(p)
+
+
+def test_every_corpus_bucket_must_be_measured(tmp_path):
+    """A bimodal corpus needs a measured point in BOTH clusters, not just one."""
+    p = _snippet(tmp_path, iters="5 10", corpus_k="3-10:15 68:3", corpus_src="run-1")
+    with pytest.raises(ValueError, match=r"bucket\(s\) K=68"):
+        microbench.parse_bench_file(p)
+
+
+def test_corpus_k_requires_provenance(tmp_path):
+    """A hand-entered site count has the same trust problem as a bare scalar."""
+    p = _snippet(tmp_path, iters="5", corpus_k="3-10:15")
+    with pytest.raises(ValueError, match="@corpus_src"):
+        microbench.parse_bench_file(p)
+
+
+def test_corpus_buckets_parse():
+    buckets = microbench.parse_corpus_buckets("3-10:15 68:3", "t")
+    assert [(b.lo, b.hi, b.sites) for b in buckets] == [(3, 10, 15), (68, 68, 3)]
+    assert buckets[1].label == "K=68"
+    assert buckets[0].label == "K=3-10"
 
 
 def _fake_rows(case, flags):
@@ -215,31 +240,45 @@ def _fake_rows(case, flags):
     ) for k, ok in flags]
 
 
-def test_corpus_k_verdict_leads_and_names_the_useless_wins():
-    """A transform that only wins where it never runs must read as FAIL.
+def _case(**kw):
+    base = dict(pattern="fake", title="t", status="shipped", path=Path("fake.lua"),
+                setup="", original="", rewrite="", sink="1")
+    base.update(kw)
+    return microbench.BenchCase(**base)
 
-    This is the failure I-039 hit on string_concat_in_loop: 18 corpus sites at
-    K=3-10, a headline figure measured in the low hundreds. Not a wrong number -
-    a correct number about the wrong part of the curve.
+
+def test_corpus_verdict_counts_sites_not_ranges():
+    """The bimodal case: the verdict must concede the wins and still carry the prune.
+
+    This is I-039's correction. A verdict of "FAIL, does not reach K=68 in the
+    corpus" was checkable and wrong - ALAO does rewrite three `for i=1,68` sites.
+    Overstating to FAIL is weaker than conceding 3 wins and counting the 15
+    losses, because the overstatement is what a reader can falsify.
     """
-    case = microbench.BenchCase(
-        pattern="fake", title="t", status="shipped", path=Path("fake.lua"),
-        setup="", original="", rewrite="", sink="1",
-        iters=[5, 100], corpus_k=[3, 10],
-    )
-    summary = microbench.g2_summary(_fake_rows(case, [(5, False), (100, True)]))
-    assert summary["fake"].startswith("at corpus K 3-10: FAIL")
-    assert "does not reach in the corpus" in summary["fake"]
+    case = _case(iters=[5, 68, 2000], corpus_src="run-1",
+                 corpus_k=microbench.parse_corpus_buckets("3-10:15 68:3", "t"))
+    summary = microbench.g2_summary(_fake_rows(case, [(5, False), (68, True), (2000, True)]))
+    assert summary["fake"].startswith("15 of 18 corpus sites fail G2, 3 of 18 pass")
+    assert "15 at K=3-10: fail" in summary["fake"]
+    assert "3 at K=68: pass" in summary["fake"]
+    assert "run-1" in summary["fake"]
+    # K=2000 passes but is outside every bucket, so it must not inflate the count
+    assert "18" in summary["fake"] and "21" not in summary["fake"]
 
 
-def test_corpus_k_verdict_passes_when_the_win_is_where_the_code_is():
-    case = microbench.BenchCase(
-        pattern="fake", title="t", status="shipped", path=Path("fake.lua"),
-        setup="", original="", rewrite="", sink="1",
-        iters=[5, 100], corpus_k=[3, 10],
-    )
-    summary = microbench.g2_summary(_fake_rows(case, [(5, True), (100, False)]))
-    assert summary["fake"].startswith("at corpus K 3-10: pass")
+def test_corpus_verdict_when_everything_passes():
+    case = _case(iters=[5], corpus_src="run-1",
+                 corpus_k=microbench.parse_corpus_buckets("3-10:15", "t"))
+    summary = microbench.g2_summary(_fake_rows(case, [(5, True)]))
+    assert summary["fake"].startswith("all 15 corpus sites pass G2")
+
+
+def test_corpus_verdict_without_site_counts_falls_back_to_ranges():
+    case = _case(iters=[5], corpus_src="run-1",
+                 corpus_k=microbench.parse_corpus_buckets("3-10", "t"))
+    summary = microbench.g2_summary(_fake_rows(case, [(5, False)]))
+    assert summary["fake"].startswith("at corpus sites")
+    assert "K=3-10: fail" in summary["fake"]
 
 
 def test_g2_summary_reports_a_threshold():

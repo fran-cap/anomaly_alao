@@ -184,7 +184,8 @@ everything after a `-- @section` line until the next directive is Lua.
 -- @n 200000 60000                  -- optional: total inner-iteration budget, jit_on jit_off
 -- @iters 5 20 100 2000             -- optional: sweep inner loop length K
 -- @doc_at 2000                     -- optional: which K the @doc figure refers to (default the largest)
--- @corpus_k 3 10                   -- optional: the loop lengths this pattern actually has in the corpus
+-- @corpus_k 3-10:15 68:3           -- optional: where this pattern runs, as <K range>:<site count> buckets
+-- @corpus_src 20260911-...-audit   -- required with @corpus_k: the run the counts came from
 -- @notes anything; repeat the directive for more lines, they accumulate
 -- @setup
 local acc = 0                       -- runs per timed rep, UNTIMED. N, D, K are in scope.
@@ -221,28 +222,41 @@ table turned out not to be. So the default assumption is inverted here: a row
 earns a scalar by being shown flat over the range that matters, rather than
 getting one by default and being caught later.
 
-`@corpus_k <lo> <hi>` declares the loop lengths the pattern has **in the corpus**.
-Two things follow:
+`@corpus_k` declares where the pattern runs, as **buckets of `<K range>:<site
+count>`** — not as one range. Real corpora are bimodal: `string_concat_in_loop`
+has 15 short UI builders at K=3-10 and an isolated spike of 3 literal
+`for i=1,68` loops, nothing between. `3-68` would be true and useless, because it
+loses the fact that the mass is at the bottom, and that is the thing that decides
+a prune. Three things follow:
 
-* The snippet is **rejected at parse time** if no `@iters` point falls inside
-  that range. Declaring where a pattern runs and then never measuring there is
+* Every bucket must contain an `@iters` point, or the snippet is **rejected at
+  parse time**. Declaring where a pattern runs and then never measuring there is
   the whole defect; the harness will not let you do it quietly.
-* The G2 verdict leads with that range instead of with the best row, and says so
-  when a transform only wins somewhere it never reaches:
+* `@corpus_src` is **required**, naming the run id or audit the counts came from.
+  Otherwise the site count is a hand-entered number with exactly the trust
+  problem of the scalar it replaces, and the rule above applies to it too.
+* The G2 verdict leads by **counting sites**:
 
   ```
-  string_concat_in_loop: at corpus K 3-10: FAIL [K=3:fail, K=5:fail, K=10:fail]
-    (passes only at K in [30, 50, 68, 100, 200, 1000, 2000], which this pattern
-     does not reach in the corpus)
+  string_concat_in_loop: 15 of 18 corpus sites fail G2, 3 of 18 pass
+    [20260911-111300-i039-audit] (15 at K=3-10: fail; 3 at K=68: pass)
   ```
 
-That line is what pruned the `string_concat_in_loop` promotion (I-039): all 18
-rewritable sites in the enabled GAMMA corpus are 3-10 element UI string builders,
-while the beam's 8.69x was measured in the low hundreds. Nothing about the 8.69x
-was *wrong* - it was simply about a part of the curve the code never visits.
-That is a different failure from the missing `collectgarbage`, which made a
-number incorrect: this one makes a correct number irrelevant, and it is the
-harder of the two to notice by eye.
+That sentence is what pruned the `string_concat_in_loop` promotion (I-039): the
+beam's 8.69x was measured in the low hundreds, while 15 of the 18 rewritable
+sites sit below every measured breakeven. Nothing about the 8.69x was *wrong* -
+it was about a part of the curve the code mostly does not visit. That is a
+different failure from the missing `collectgarbage`, which made a number
+incorrect: this one makes a correct number irrelevant, and it is the harder of
+the two to notice, because nothing about the measurement looks off.
+
+Note what the verdict does **not** say. An earlier version of this feature
+declared the corpus range as `3-10` and printed "passes only at K in [.., 68, ..],
+which this pattern does not reach in the corpus" - which was false, since ALAO
+does rewrite those three K=68 sites and they clear G2. A verdict that overstates
+to FAIL is *weaker* than one that concedes the wins and counts the losses,
+because the overstatement is the part a reader can check and falsify. The
+generated line is only worth having if it can be trusted without chasing commits.
 
 ---
 
