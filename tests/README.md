@@ -6,10 +6,12 @@ Run everything from the repo root:
 py -3.12 -m pip install pytest lupa   # luaparser + jinja2 you already have
 py -3.12 -m pytest -q                 # fast, hermetic, no game install needed
 py -3.12 -m pytest -q --corpus        # also analyzes the real vanilla corpus, read-only
+py -3.12 -m pytest -q --bench         # also runs the LuaJIT microbenchmarks (or -m slow)
 ```
 
-`pytest.ini` at the repo root sets `testpaths = tests` and registers the `corpus`
-marker. Nothing in the suite ever writes outside pytest's `tmp_path`.
+`pytest.ini` at the repo root sets `testpaths = tests` and registers the
+`corpus`, `slow` and `bench` markers. Nothing in the suite ever writes outside
+pytest's `tmp_path`.
 
 ## Layout
 
@@ -20,6 +22,7 @@ marker. Nothing in the suite ever writes outside pytest's `tmp_path`.
 | `test_transformer.py` | `SourceEdit` overlap resolution, enabler groups, encoding, `.alao-bak`, idempotence |
 | `test_cli.py` | Subprocess runs of `stalker_lua_lint.py` end to end |
 | `test_corpus_smoke.py` | Read-only pass over the vanilla Anomaly scripts (`--corpus` only) |
+| `test_microbench.py` | `tools/microbench.py` + the `bench/` snippet pairs. Fast half always runs; the slow half (`--bench` / `-m slow`) fails when a GREEN pattern has no bench pair |
 
 ## How a pattern test is built
 

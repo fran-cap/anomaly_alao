@@ -125,6 +125,159 @@ if the corpora differ, but the numbers are still meaningless).
 
 ---
 
+## microbench.py + bench/
+
+The corpus harness proves ALAO's rewrites *land* and *compile*. `microbench.py`
+is the thing that proves they are *faster*, on the VM the game actually runs
+(LuaJIT 2.0, via `lupa.luajit20`). It exists because the first hand-rolled
+attempt at this skipped GC control and declared ALAO's highest-volume fix a 23%
+regression - a wrong conclusion that survived until someone re-measured by hand.
+So the protocol from `lab/docs/beam-ideas.md` section 2 is baked in and there is
+no flag to turn any part of it off.
+
+```bash
+py -3.12 tools/microbench.py                                # all 24 pairs, ~18 s
+py -3.12 tools/microbench.py --list
+py -3.12 tools/microbench.py --pattern counter_append --json out.json
+py -3.12 tools/microbench.py --shipped                      # only what ALAO fixes today
+py -3.12 tools/microbench.py --quick                        # tiny N smoke, NOT a measurement
+py -3.12 tools/microbench.py --self-check                   # prove jit.off(f,true) works
+```
+
+Paths are resolved relative to the script, so you can run it from another
+worktree by absolute path and it still finds its own `bench/`.
+
+**Gate G2** (`>= 1.15x` in both modes, no mode below `0.98x`) is the `G2` column.
+`speedup = t(original) / t(rewrite)`.
+
+### What is enforced
+
+| Element | Setting |
+|---|---|
+| VM | `lupa.luajit20`. `jit.version`, `version_num`, `arch`, `os` and the whole `jit.status()` flag list go into the JSON; a loud warning fires if the optimization flag set is not `fold cse dce fwd dse narrow loop abc sink fuse`, the set Anomaly's LuaJIT 2.0.4 reports. |
+| Runtime | A fresh `LuaRuntime` per (case, arm, mode). Nothing is shared. |
+| JIT off | `jit.off(f, true)` on the loaded chunk. A global `jit.off(true, true)` does **not** affect already-loaded chunks and silently measures JIT-on numbers, so a self-check runs first: an obviously jittable loop must be `>= 3x` slower interpreted, or the whole run aborts. It currently measures 24x. |
+| Chunk | `local N, D, K = ...` prelude, `D` a 64-element float table (stops constant folding), `_G.__sink = <expr>` at the end (defeats DCE). |
+| Warm-up | 2 calls at N=1000. |
+| GC | `collectgarbage('collect')` immediately before every timed run. |
+| Timing | `time.perf_counter()` on the Python side. `os.clock()` in Lua has ~10 ms resolution on Windows. |
+| Reps | Best of 9, median also recorded. |
+| N | 2e6 JIT on, 3e5 JIT off, per-snippet override with `@n`. |
+
+One deliberate deviation from section 2: **`@setup` runs outside the timed
+region**, by having the chunk return the measured work as a closure. Section 2
+timed the whole chunk, which is fine when setup is two locals and lethal when it
+is "build an N-element table" - setup then dominates and squashes every ratio
+toward 1.00x. `jit.off(chunk, true)` is recursive, so the closure is covered;
+`--self-check` uses the same machinery and would catch it if it were not.
+
+### Writing a bench pair (< 1 minute)
+
+Copy any `bench/*.lua`, change five things. The format is comment directives;
+everything after a `-- @section` line until the next directive is Lua.
+
+```lua
+-- @pattern counter_append          -- required; Finding.pattern_name, and the file name
+-- @title t[#t+1]=v -> counter      -- required; one line for the table
+-- @status proposed                 -- shipped | proposed (default proposed)
+-- @doc 12.44 4.80                  -- optional: the beam-ideas s.2 figures, jit_on jit_off ('-' for none)
+-- @n 200000 60000                  -- optional: total inner-iteration budget, jit_on jit_off
+-- @iters 5 20 100 2000             -- optional: sweep inner loop length K
+-- @doc_at 2000                     -- optional: which K the @doc figure refers to (default the largest)
+-- @corpus_k 3-10?:15 68:3          -- optional: where this pattern runs, as <K range>[?]:<site count> buckets ('?' = range inferred, not measured)
+-- @corpus_src 20260911-...-audit   -- required with @corpus_k: the run the counts came from
+-- @notes anything; repeat the directive for more lines, they accumulate
+-- @setup
+local acc = 0                       -- runs per timed rep, UNTIMED. N, D, K are in scope.
+-- @original
+for r = 1, N do ... end             -- the code as mod authors write it
+-- @rewrite
+for r = 1, N do ... end             -- what ALAO produces (or would produce)
+-- @sink
+acc                                 -- an expression; assigned to _G.__sink so nothing is dead
+```
+
+The file name should match `@pattern`; `@pattern` should match
+`Finding.pattern_name` where one exists, because that is what
+`tests/test_microbench.py` checks coverage against.
+
+### Loop-length sweeps
+
+Several rewrites flip sign with loop length. `string_concat_in_loop` is **0.44x
+at 3 iterations** and **16x at 2000** - a single huge-N number would have shipped
+a regression into every short loop in the corpus. Add `@iters` to any pair whose
+win plausibly depends on how long the loop runs; the harness then prints one row
+per K, scales the outer repetition count so total work stays roughly constant,
+and summarises the pattern as e.g. `passes for K >= 100` instead of a bare
+pass/fail.
+
+The `@doc` comparison only applies to the `@doc_at` row, since the doc has one
+number per transform rather than a curve.
+
+### `@corpus_k`: measure where the pattern actually runs
+
+A speedup is a **function** of loop length. A scalar in a table is a claim that
+the function is constant, and three of the four big rows in the beam's section-2
+table turned out not to be. So the default assumption is inverted here: a row
+earns a scalar by being shown flat over the range that matters, rather than
+getting one by default and being caught later.
+
+`@corpus_k` declares where the pattern runs, as **buckets of `<K range>:<site
+count>`** — not as one range. Real corpora are bimodal: `string_concat_in_loop`
+has 15 short UI builders at K=3-10 and an isolated spike of 3 literal
+`for i=1,68` loops, nothing between. `3-68` would be true and useless, because it
+loses the fact that the mass is at the bottom, and that is the thing that decides
+a prune. Three things follow:
+
+* Every bucket must contain an `@iters` point, or the snippet is **rejected at
+  parse time**. Declaring where a pattern runs and then never measuring there is
+  the whole defect; the harness will not let you do it quietly.
+* `@corpus_src` is **required**, naming the run id or audit the counts came from.
+  Otherwise the site count is a hand-entered number with exactly the trust
+  problem of the scalar it replaces, and the rule above applies to it too.
+* A trailing `?` on a bucket's range marks it **estimated** — the site count is
+  measured, but *where those sites sit* is inference. See below; this is not
+  decoration.
+* The G2 verdict leads by **counting sites**:
+
+  ```
+  string_concat_in_loop: 15 of 18 corpus sites fail G2 (on an estimated loop
+    length), 3 of 18 pass [20260911-111300-i039-audit]
+    (15 at K=3-10 (estimated): fail; 3 at K=68: pass)
+  ```
+
+That sentence is what pruned the `string_concat_in_loop` promotion (I-039): the
+beam's 8.69x was measured in the low hundreds, while 15 of the 18 rewritable
+sites sit below every measured breakeven. Nothing about the 8.69x was *wrong* -
+it was about a part of the curve the code mostly does not visit. That is a
+different failure from the missing `collectgarbage`, which made a number
+incorrect: this one makes a correct number irrelevant, and it is the harder of
+the two to notice, because nothing about the measurement looks off.
+
+**Why `?` exists.** The two buckets above look identical in the syntax, are cited
+to the same run, and have different evidential status. `68:3` is measured: three
+`for i=1,68` loops with literal bounds read off the source. `3-10?:15` is not —
+what the run established is that those fifteen trip counts are *statically
+unknowable* (the bounds are `#p-1`, `size_table(warnings)`, `pairs()` over
+inventory tables), and `3-10` is a judgement about what those tables hold in
+Anomaly. Good inference; not a measurement; the run id does not back it. Without
+the `?`, the audit trail would point at that run as though it had said otherwise,
+and if someone later instruments the game and finds one of those `pairs()` loops
+running 300 times on a modded inventory, the verdict flips for that site. This is
+the same defect as everything else on this page, one layer in: a number that is
+correct, is sourced, and is not the kind of thing its source establishes. A
+generated line should not print inference and measurement in the same typeface.
+
+Note what the verdict does **not** say. An earlier version of this feature
+declared the corpus range as `3-10` and printed "passes only at K in [.., 68, ..],
+which this pattern does not reach in the corpus" - which was false, since ALAO
+does rewrite those three K=68 sites and they clear G2. A verdict that overstates
+to FAIL is *weaker* than one that concedes the wins and counts the losses,
+because the overstatement is the part a reader can check and falsify. The
+generated line is only worth having if it can be trusted without chasing commits.
+
+---
+
 ## script_extractor.py / split_test.py
 
 Older helpers, predating the corpus harness. `script_extractor.py` copies all

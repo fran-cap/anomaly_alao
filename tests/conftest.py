@@ -53,15 +53,27 @@ def pytest_addoption(parser):
         default=False,
         help="run the read-only smoke test against the real vanilla Anomaly corpus",
     )
+    parser.addoption(
+        "--bench",
+        action="store_true",
+        default=False,
+        help="run the slow LuaJIT microbenchmark tests (tools/microbench.py)",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--corpus"):
-        return
-    skip = pytest.mark.skip(reason="needs --corpus")
-    for item in items:
-        if "corpus" in item.keywords:
-            item.add_marker(skip)
+    if not config.getoption("--corpus"):
+        skip = pytest.mark.skip(reason="needs --corpus")
+        for item in items:
+            if "corpus" in item.keywords:
+                item.add_marker(skip)
+    # `-m slow` opts in too, so both spellings work.
+    wants_slow = config.getoption("--bench") or "slow" in (config.getoption("-m") or "")
+    if not wants_slow:
+        skip_slow = pytest.mark.skip(reason="needs --bench (or -m slow)")
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)
 
 
 # ---------------------------------------------------------------------------
