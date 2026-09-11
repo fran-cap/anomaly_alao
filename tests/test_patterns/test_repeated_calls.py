@@ -144,8 +144,14 @@ def test_immutable_property_caching_preserves_behaviour(transform, run_both, src
     run_both(src + wrapper, transform(src) + wrapper, "call_it")
 
 
-# time_global() changes on every call, so caching it would break elapsed-time
-# math. It must never be suggested.
+# --- I-040: time_global() ------------------------------------------------
+#
+# It used to be excluded from repeated-call caching on the grounds that it
+# "returns a different value each call". Within one body it does not: it is
+# `Device.dwTimeGlobal`, the render device's time stamp, written once per frame
+# (which is also why the engine ships a separate `time_global_async()`).
+# Threshold is 2, not 4, because every read is an engine C call.
+
 TIME_GLOBAL = """
 function f()
     local a = time_global()
@@ -156,9 +162,166 @@ function f()
 end
 """
 
+TIME_GLOBAL_TWO = """
+function f()
+    local a = time_global()
+    local b = time_global()
+    return a, b
+end
+"""
 
-def test_time_global_is_never_cached(analyze):
-    assert not [f for f in analyze(TIME_GLOBAL) if f.pattern_name.startswith("repeated_")]
+TIME_GLOBAL_ONCE = """
+function f()
+    local a = time_global()
+    return a
+end
+"""
+
+# the shape the census found everywhere: throttle guard at the top of a
+# per-frame body, then the timestamp written back
+TIME_GLOBAL_THROTTLE = """
+local last_upd = 0
+
+function actor_on_update()
+    if time_global() - last_upd < 250 then return end
+    last_upd = time_global()
+    return last_upd
+end
+"""
+
+
+def test_time_global_two_reads_are_cached(analyze, transform, compiles):
+    finding = find_one(analyze(TIME_GLOBAL_TWO), "repeated_time_global")
+    assert finding.severity == "GREEN"
+    assert finding.details["count"] == 2
+
+    out = transform(TIME_GLOBAL_TWO)
+    assert "local tg = time_global()" in out
+    assert out.count("time_global()") == 1
+    compiles(out)
+
+
+def test_time_global_single_read_is_left_alone(analyze):
+    assert "repeated_time_global" not in pattern_names(analyze(TIME_GLOBAL_ONCE))
+
+
+def test_time_global_caching_preserves_behaviour(transform, run_both):
+    run_both(TIME_GLOBAL, transform(TIME_GLOBAL), "f")
+
+
+def test_time_global_throttle_guard_is_cached(analyze, transform, run_both):
+    find_one(analyze(TIME_GLOBAL_THROTTLE), "repeated_time_global")
+    out = transform(TIME_GLOBAL_THROTTLE)
+    assert out.count("time_global()") == 1
+    run_both(TIME_GLOBAL_THROTTLE, out, "actor_on_update")
+
+
+# time_global_async() is the asynchronous clock: it really does move between
+# two reads, and it is the documented way to time sub-frame work.
+TIME_GLOBAL_ASYNC = """
+function f()
+    local a = time_global_async()
+    local b = time_global_async()
+    local c = time_global_async()
+    local d = time_global_async()
+    return a, b, c, d
+end
+"""
+
+
+def test_time_global_async_is_never_cached(analyze):
+    assert not [
+        f for f in analyze(TIME_GLOBAL_ASYNC) if f.pattern_name.startswith("repeated_")
+    ]
+
+
+# --- I-040 safety guards --------------------------------------------------
+
+# a loop that waits on the clock would never terminate with a hoisted read
+TIME_GLOBAL_WHILE = """
+function f()
+    local t0 = 0
+    while time_global() - t0 < 100 do
+        t0 = t0 + 1
+    end
+    return time_global()
+end
+"""
+
+# "how long did this take": folding the two reads makes the answer a constant 0
+TIME_GLOBAL_SELF_TIMING = """
+function f()
+    local t0 = time_global()
+    do_work()
+    local dt = time_global() - t0
+    return dt
+end
+"""
+
+# a hoisted declaration would call the clock on the bail-out path, where the
+# original called nothing. The reads sit in different branches, which is what
+# makes the transformer hoist to the top of the body.
+TIME_GLOBAL_EARLY_RETURN = """
+function f(obj)
+    if not obj then return end
+    if obj.a then
+        obj.x = time_global()
+    end
+    for i = 1, 3 do
+        obj.y = time_global()
+    end
+    return obj.x
+end
+"""
+
+
+@pytest.mark.parametrize("src", [
+    TIME_GLOBAL_WHILE,
+    TIME_GLOBAL_SELF_TIMING,
+    TIME_GLOBAL_EARLY_RETURN,
+])
+def test_time_global_unsafe_shapes_are_skipped(analyze, transform, src):
+    assert "repeated_time_global" not in pattern_names(analyze(src))
+    assert "local tg = time_global()" not in transform(src)
+
+
+# reads inside a `for` are the best case: the loop terminates whatever the
+# clock says, and the hoist saves one call per iteration
+TIME_GLOBAL_IN_FOR = """
+function f()
+    local acc = 0
+    for i = 1, 10 do
+        acc = acc + time_global()
+    end
+    return acc + time_global()
+end
+"""
+
+
+def test_time_global_in_numeric_for_is_cached(analyze, transform, run_both):
+    find_one(analyze(TIME_GLOBAL_IN_FOR), "repeated_time_global")
+    out = transform(TIME_GLOBAL_IN_FOR)
+    assert out.count("time_global()") == 1
+    run_both(TIME_GLOBAL_IN_FOR, out, "f")
+
+
+# a body that already has its own `local tg` must not be shadowed
+TIME_GLOBAL_NAME_TAKEN = """
+function f()
+    local tg = "not a time at all"
+    local a = time_global()
+    local b = time_global()
+    return tg, a, b
+end
+"""
+
+
+def test_time_global_cache_name_does_not_shadow(transform, run_both, compiles):
+    out = transform(TIME_GLOBAL_NAME_TAKEN)
+    assert 'local tg = "not a time at all"' in out
+    assert "local tg_alao = time_global()" in out
+    compiles(out)
+    run_both(TIME_GLOBAL_NAME_TAKEN, out, "f")
 
 
 # level.object_by_id() takes an argument and may return a different object each

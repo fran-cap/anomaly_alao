@@ -79,6 +79,15 @@ def _is_per_frame_callback_name(name: str) -> bool:
     return name.endswith('_on_update') and 'first_update' not in name
 
 # Bare globals that benefit from caching
+# I-040: how many time_global() calls in one function body justify
+# `local tg = time_global()`. Two, not `cache_threshold`: every call is an
+# engine C call that aborts the LuaJIT trace, so the body is running in the
+# interpreter either way and each extra call costs a full Lua->C round trip
+# (measured 26 ns interpreted with os.clock as a lua_CFunction stand-in, 5 ns
+# with a plain Lua closure - the engine's luabind-bound call is at least the
+# latter and probably nearer the former). db.actor & friends stay at 4.
+TIME_GLOBAL_CACHE_THRESHOLD = 2
+
 CACHEABLE_BARE_GLOBALS = frozenset({
     'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber',
     'unpack', 'select', 'rawget', 'rawset',
@@ -3096,11 +3105,97 @@ class ASTAnalyzer:
                 return True
         return False
 
+    # `x = time_global()`, with or without the `local`. Used to spot the
+    # self-timing shape below.
+    _TG_ASSIGN_RE = re.compile(r'(?:local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*time_global\s*\(\s*\)')
+    _TG_RETURN_RE = re.compile(r'(^|[^\w.:])return\b')
+
+    def _time_global_cacheable(self, func_scope: Scope, calls: List) -> bool:
+        """Is hoisting `local tg = time_global()` to the top of this body safe?
+
+        Three shapes say no:
+
+        1. a `while` or `repeat` anywhere in this body. Those are the only
+           loops whose trip count can depend on the clock, and a hoisted read
+           turns `while time_global() - t0 < 100 do ... end` into an infinite
+           loop. (On the real engine that loop already hangs, since
+           dwTimeGlobal is a per-frame stamp - but we are not betting the
+           rewrite on that.) The whole body is disqualified, not just the reads
+           under the loop, because the read in the condition belongs to the
+           function scope and a read in the body can feed the condition.
+           Numeric and generic `for` loops terminate whatever the clock says,
+           so a read inside one is fine and in fact the best case: the hoist
+           saves one call per iteration.
+        2. an early `return` above the first read, *and* a call layout that
+           makes the transformer hoist the declaration to the top of the body
+           (a read inside a loop, or reads in different branches - see
+           `_edit_repeated_calls`). Then the bail-out path would make a call
+           the original did not. When every read sits in the same block the
+           declaration lands on the first read's own line, nothing above it
+           changes, and the guard does not apply - that is 42% of the
+           candidates on GAMMA, so the distinction is worth making.
+        3. self-timing: `local t0 = time_global()` ... `time_global() - t0`,
+           i.e. "how long did this take". Folding the two reads into one turns
+           the answer into a constant 0. The engine already answers 0 for this
+           (that is what `time_global_async()` is for), so the code is measuring
+           nothing either way - but proving that is not our job here, so leave
+           the body alone. Order matters: the assignment must come *before* the
+           subtraction. The other way round is the throttle idiom
+           (`if time_global() - last > 250 then last = time_global()`), which is
+           exactly what we want to fix.
+
+        2 and 3 are line-based, like the other heuristics in here. They only
+        ever drop candidates.
+        """
+        start = func_scope.start_line
+        end = func_scope.end_line if func_scope.end_line and func_scope.end_line > 0 else start
+        first_call_line = min(c.line for c in calls)
+
+        # (1) a while/repeat anywhere in this body (not in a nested closure -
+        # that closure gets its own hoist decision)
+        for scope in self.scopes:
+            if scope.scope_type != 'loop' or scope.name not in ('<while>', '<repeat>'):
+                continue
+            if self._find_function_scope(scope) is func_scope:
+                return False
+
+        # (2) an early return above the first read, only when the decl gets
+        # hoisted to the top of the body anyway
+        hoist_likely = any(c.in_loop or c.if_chain_path != calls[0].if_chain_path
+                           for c in calls)
+        if hoist_likely:
+            for ln in range(start + 1, first_call_line):
+                code = self._get_source_line(ln).split('--', 1)[0]
+                if self._TG_RETURN_RE.search(code):
+                    return False
+
+        # (3) self-timing: assignment from the clock, subtracted from a later read
+        assign_line: Dict[str, int] = {}
+        for ln in range(start, end + 1):
+            code = self._get_source_line(ln).split('--', 1)[0]
+            for m in self._TG_ASSIGN_RE.finditer(code):
+                assign_line.setdefault(m.group(1), ln)
+        if assign_line:
+            for ln in range(start, end + 1):
+                code = self._get_source_line(ln).split('--', 1)[0]
+                if 'time_global' not in code:
+                    continue
+                for var, aline in assign_line.items():
+                    if aline >= ln:
+                        continue
+                    pat = (r'time_global\s*\(\s*\)\s*-\s*' + re.escape(var) + r'\b'
+                           r'|\b' + re.escape(var) + r'\s*-\s*time_global\s*\(')
+                    if re.search(pat, code):
+                        return False
+        return True
+
     def _analyze_repeated_calls_in_scope(self):
         """Find repeated expensive calls within function scope."""
         # expensive function calls (need parens) to track
-        # NOTE: time_global() is NOT included because it returns different values
-        # each call (current time) - caching it breaks elapsed time calculations
+        # NOTE: time_global() IS included since I-040, with its own threshold
+        # and its own safety guards - see just below. It used to be excluded on
+        # the grounds that "it returns a different value each call", which is
+        # not true within one frame: it is the render device's per-frame stamp.
         # NOTE: level.object_by_id() is NOT auto-fixed because different IDs give
         # different objects, and even same IDs can change if object is destroyed
         # NOTE: `db.actor` is a *property*, not a function - it's tracked via
@@ -3108,6 +3203,20 @@ class ASTAnalyzer:
         # below.
         expensive_calls = {'alife', 'system_ini', 'game_ini', 'getFS',
                            'device', 'get_console', 'get_hud', 'level.name'}
+
+        # I-040: time_global() is the top trace killer in per-frame bodies
+        # (186 abort sites). It is safe to cache *within one body* because it
+        # returns `Device.dwTimeGlobal`, the render device's per-frame time
+        # stamp, which the engine writes once per frame in FrameMove - that is
+        # also why the engine ships a separate `time_global_async()` for code
+        # that wants a sub-frame clock. Nothing a Lua body can do advances the
+        # frame, so every call inside one invocation returns the same number.
+        # It gets its own threshold of 2 (not cache_threshold) because each
+        # call is an engine C call, not an index: on the corpus every single
+        # body that calls it is `interpreted` or `mixed`, never `compiled`.
+        expensive_calls.add('time_global')
+        # NOTE: `time_global_async()` is deliberately NOT cacheable - it is the
+        # asynchronous clock and does change between two reads. 0 corpus uses.
 
         # method calls that are safe to cache (immutable object properties)
         # based on X-Ray engine source analysis:
@@ -3153,10 +3262,15 @@ class ASTAnalyzer:
 
         for func_scope, calls_by_name in scope_calls.items():
             for name, calls in calls_by_name.items():
-                threshold = self.cache_threshold - 1 if func_scope.is_hot_callback else self.cache_threshold
+                if name == 'time_global':
+                    threshold = TIME_GLOBAL_CACHE_THRESHOLD
+                else:
+                    threshold = self.cache_threshold - 1 if func_scope.is_hot_callback else self.cache_threshold
                 call_count = self._count_calls_branch_aware(calls)
 
                 if call_count >= threshold:
+                    if name == 'time_global' and not self._time_global_cacheable(func_scope, calls):
+                        continue
                     # I-038: caching a call that may return nil turns a hidden
                     # hazard into a local that the nil pass then flags at every
                     # use, so --fix manufactured brand new potential_nil_access
@@ -3179,6 +3293,8 @@ class ASTAnalyzer:
 
                     if name == 'db.actor':
                         suggestion = 'local actor = db.actor'
+                    elif name == 'time_global':
+                        suggestion = 'local tg = time_global()'
                     elif name == 'alife':
                         suggestion = 'local sim = alife()'
                     elif name == 'system_ini':

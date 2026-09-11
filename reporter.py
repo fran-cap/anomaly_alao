@@ -56,6 +56,13 @@ PERFORMANCE_IMPACT = {
     'math_pow_dotted': 'medium',
     'pairs_on_array': 'medium',
     'debug_statement': 'medium',
+    # I-040: every time_global() is an engine C call that aborts the trace, so
+    # the bodies holding them are always interpreted (122 interpreted / 5 mixed
+    # / 0 compiled on GAMMA). Dropping the redundant reads measured 1.18x at 2
+    # calls and 1.90x at 7 interpreted with the cheapest possible stub, 2.46x
+    # with a real C function. Medium and not high because the absolute saving
+    # is tens of nanoseconds per body per frame.
+    'repeated_time_global': 'medium',
 
     # LOW - minor impact
     'table_getn': 'low',
