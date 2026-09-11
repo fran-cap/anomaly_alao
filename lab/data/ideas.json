@@ -674,6 +674,21 @@
       "change": "New pass, not a table widening: reuse the I-009 escape analysis (stored into a table, returned, passed to unknown callee) plus a syntactic mutation check (clears 30 of 36 vanilla buckets) before admitting a :position() bucket to the repeated_* cacher.",
       "measure": "Bucket count admitted on both corpora, run_both differential on aliasing shapes, gates G4-G8.",
       "notes": "Proposed by agent-I021 after deliberately excluding :position() from I-021."
+    },
+    {
+      "id": "I-046",
+      "title": "Gate: --fix must never introduce a binding that shadows a live outer name",
+      "category": "safety",
+      "generation": 2,
+      "parent": "I-017",
+      "status": "proposed",
+      "score": 8.5,
+      "risk": "low",
+      "expected_gain": "high",
+      "hypothesis": "All three gen-2 silent-rewrite bugs compiled and were idempotent; the tasks_fetch.script capture (inserted local actor = db.actor shadowing a parameter named actor in a nested closure) would also pass a differential run because the two values coincide under any stub. A scope-aware assertion catches this class directly.",
+      "change": "tools/corpus_run.py (and a pytest guard): for every zero-width insertion edit the transformer emits, resolve the function it lands in and assert the introduced name is not a local, parameter or upvalue of any ancestor scope, nor read later in the same scope tree from an outer binding. Prototype exists as scratchpad/agent-I021/capture4.py.",
+      "measure": "Zero violations on both corpora at the merged head; must flag the 18756a9 repro and the tasks_fetch site when run against bae4b0c.",
+      "notes": "Proposed by agent-I021 after its own zero-capture scans proved to be artifacts. Cheaper and narrower than I-017; do both."
     }
   ]
 }
