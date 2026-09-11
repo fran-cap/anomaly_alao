@@ -738,6 +738,10 @@ class ASTAnalyzer:
         self.assigns: List[AssignInfo] = []
         self.concats: List[ConcatInfo] = []
         self.global_writes: List[Tuple[str, int]] = []
+        # I-021: dotted assignment targets (`db.storage = t`), which the
+        # AssignInfo list deliberately does not carry. Read only by
+        # _receiver_rebound.
+        self.index_writes: List[Tuple[str, int, Scope]] = []
         
         self.nil_sources: Dict[Tuple[int, str], NilSourceInfo] = {}
         self.nil_accesses: List[NilAccessInfo] = []
@@ -1571,6 +1575,16 @@ class ASTAnalyzer:
 
                 if len(node.values) == 1:
                     self._record_assignment(target_name, node.values[0], line, is_local=False)
+
+        # I-021: a dotted write (`db.storage = t`, `self.object = other`) is not
+        # an AssignInfo - that list is keyed on plain Names and feeding it
+        # dotted targets would disturb nil-tracking and unused-local detection.
+        # _receiver_rebound needs them though, so they get their own list.
+        for target in node.targets:
+            if isinstance(target, Index):
+                dotted = self._node_to_string(target)
+                if dotted and '(' not in dotted and '[' not in dotted:
+                    self.index_writes.append((dotted, line, self.current_scope))
 
         # visit targets (for calls inside index expressions like db.storage[npc:id()])
         for target in node.targets:
@@ -3164,6 +3178,37 @@ class ASTAnalyzer:
                 return True
         return False
 
+    def _receiver_rebound(self, bucket_name: str, func_scope: Scope,
+                          first_line: int) -> bool:
+        """True if the receiver of `bucket_name` is assigned at or after `first_line`.
+
+        `bucket_name` is what the bucket is keyed on: `db.actor`, or
+        `self.object:id()` for a method bucket. The receiver is everything left
+        of the colon; we check that name, its first dotted component, and any
+        field path hanging off it, because rebinding either end invalidates the
+        cache.
+
+        Line-based on purpose, to match the rest of this pass. An assignment
+        textually before the first call is fine (that is the declaration, and
+        the cache goes in below it); the transformer separately refuses to hoist
+        a method cache above a loop or a branch, which is what would otherwise
+        make a later-line assignment reachable first.
+        """
+        receiver = bucket_name.split(':')[0]
+        if not receiver or '(' in receiver:
+            return False
+        base = receiver.split('.')[0]
+        candidates = [(a.target or '', a.line, a.scope) for a in self.assigns]
+        candidates += self.index_writes
+        for target, line, scope in candidates:
+            if line < first_line:
+                continue
+            if self._find_function_scope(scope) is not func_scope:
+                continue
+            if target == receiver or target == base or target.startswith(receiver + '.'):
+                return True
+        return False
+
     def _analyze_repeated_calls_in_scope(self):
         """Find repeated expensive calls within function scope."""
         # expensive function calls (need parens) to track
@@ -3220,6 +3265,17 @@ class ASTAnalyzer:
             for name, calls in calls_by_name.items():
                 threshold = self.cache_threshold - 1 if func_scope.is_hot_callback else self.cache_threshold
                 call_count = self._count_calls_branch_aware(calls)
+
+                # I-021, raised independently by agent-I041: the bucket key is
+                # the receiver's *text*, so `obj:id()` before and after
+                # `obj = something_else` landed in one bucket and the rewrite
+                # answered both with the first object's id. Silently wrong, and
+                # it predates this idea - `:id()` and `:section()` have been
+                # GREEN all along. Nothing here proves a receiver is stable, so
+                # require that its name is not assigned once the caching has
+                # started.
+                if self._receiver_rebound(name, func_scope, calls[0].line):
+                    continue
 
                 if call_count >= threshold:
                     # I-038: caching a call that may return nil turns a hidden

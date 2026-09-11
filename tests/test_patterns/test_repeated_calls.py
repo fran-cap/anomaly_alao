@@ -418,3 +418,73 @@ def test_position_is_never_cached(analyze):
     assert not [
         f for f in analyze(OBJ_POSITION) if f.pattern_name.startswith("repeated_obj_position")
     ]
+
+
+# --- I-021 / agent-I041: the receiver must not be rebound -------------------
+
+RECEIVER_REASSIGNED = """
+function f(a, b)
+    local obj = a
+    local w = obj:id()
+    local x = obj:id()
+    obj = b
+    local y = obj:id()
+    local z = obj:id()
+    return w, x, y, z
+end
+"""
+
+
+def test_reassigned_receiver_is_never_cached(analyze):
+    """`obj:id()` either side of `obj = b` is two different objects.
+
+    The bucket key is the receiver's text, so both halves landed in one bucket
+    and the rewrite answered all four with the first object's id. Silently
+    wrong, and it predates I-021: `:id()` has been GREEN since the pattern
+    existed.
+    """
+    assert not [
+        f for f in analyze(RECEIVER_REASSIGNED) if f.pattern_name.startswith("repeated_")
+    ]
+
+
+def test_reassigned_receiver_rewrite_is_a_no_op(transform):
+    assert "obj_id" not in transform(RECEIVER_REASSIGNED)
+
+
+# The declaration itself sits before the first call and must not disarm the
+# pattern - otherwise the fix above would turn every local receiver off.
+RECEIVER_DECLARED_THEN_READ = """
+function f(a)
+    local obj = a
+    local w = obj:id()
+    local x = obj:id()
+    local y = obj:id()
+    local z = obj:id()
+    return w, x, y, z
+end
+"""
+
+
+def test_declaring_the_receiver_before_the_calls_still_caches(analyze, transform):
+    assert find_one(analyze(RECEIVER_DECLARED_THEN_READ), "repeated_obj_id()")
+    assert "local obj_id = obj:id()" in transform(RECEIVER_DECLARED_THEN_READ)
+
+
+# Same rule for the property family: `db.storage` rebound mid-body.
+DB_STORAGE_REASSIGNED = """
+function f(t)
+    local a = db.storage[1]
+    local b = db.storage[2]
+    db.storage = t
+    local c = db.storage[3]
+    local d = db.storage[4]
+    return a, b, c, d
+end
+"""
+
+
+def test_reassigned_db_field_is_never_cached(analyze):
+    assert not [
+        f for f in analyze(DB_STORAGE_REASSIGNED) if f.pattern_name.startswith("repeated_db_")
+    ]
