@@ -130,7 +130,7 @@ Use `py -3.12` on this machine (it has `luaparser` 4.2.0, `jinja2`, `pytest`, `l
 LuaJIT 2.0 and is the compile-checker / executor for rewritten Lua; import it as `lupa.luajit20`.
 
 ```bash
-py -3.12 -m pytest -q                 # unit + CLI tests: 198 passed, 4 skipped, 5 xfailed (2026-09-11)
+py -3.12 -m pytest -q                 # unit + CLI tests: 372 passed, 7 skipped, 5 xfailed (2026-09-11, gen-1 merge)
 py -3.12 -m pytest -q --corpus        # also analyzes the 66 vanilla scripts in the game install, read-only
 py -3.12 -m pytest -q -rx             # print the xfail reasons: each one names a real, unfixed ALAO bug
 py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
