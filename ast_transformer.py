@@ -233,6 +233,7 @@ class ASTTransformer:
         # `table.insert(t, v)` call. The counter wins, but only once we know it
         # is actually going to be attempted - the analyzer only suppresses the
         # GREEN ones, so YELLOW sites are settled here under --fix-yellow.
+        fixable = self._resolve_counter_claims(fixable)
         claimed = set()
         for f in fixable:
             if f.pattern_name == 'append_loop_counter':
@@ -285,6 +286,40 @@ class ASTTransformer:
             file_path.write_text(new_content, encoding=getattr(self.analyzer, '_file_encoding', 'latin-1'))
 
         return True, new_content, edit_count
+
+    def _resolve_counter_claims(self, fixable):
+        """Drop counter rewrites that would orphan a `local tinsert = table.insert`.
+
+        I-038's guard in the analyzer refuses to rewrite the last surviving use
+        of an alias so --fix never invents an unused_local_variable. It only
+        looks at table_insert_append's candidates; the counter rewrite (I-001)
+        takes the same calls away under --fix-yellow, so the check has to be
+        repeated here over the union, or the one alias whose only use sits in a
+        loop we claim (demonized_ledge_grabbing.script:919 on GAMMA) dies.
+        """
+        an = self.analyzer
+        if an is None or not hasattr(an, '_aliases_that_would_be_orphaned'):
+            return fixable
+        inserts = {id(c.node): c for c in an.calls
+                   if c.full_name == 'table.insert' and len(c.args) == 2}
+        orphaned = an._aliases_that_would_be_orphaned(list(inserts.values()))
+        if not orphaned:
+            return fixable
+        kept = []
+        for f in fixable:
+            if f.pattern_name == 'append_loop_counter':
+                bad = False
+                for kind, node, _value in (f.details.get('sites') or ()):
+                    c = inserts.get(id(node)) if kind == 'insert' else None
+                    if c is not None and c.alias_name:
+                        info = an._find_local_var_info(c.scope, c.alias_name)
+                        if info is not None and id(info) in orphaned:
+                            bad = True
+                            break
+                if bad:
+                    continue  # leave the alias alive; the append stays as it was
+            kept.append(f)
+        return kept
 
     def _generate_edits(self, finding: Finding):
         """Generate source edits for a finding."""

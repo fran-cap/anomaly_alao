@@ -17,7 +17,7 @@ PATTERN = "append_loop_counter"
 # hits
 # --------------------------------------------------------------------------
 
-def test_index_append_in_loop_is_green(analyze):
+def test_index_append_in_loop_is_yellow(analyze):
     findings = analyze("""
         function build(n)
             local out = {}
@@ -28,7 +28,8 @@ def test_index_append_in_loop_is_green(analyze):
         end
     """)
     f = find_one(findings, PATTERN)
-    assert f.severity == "GREEN"
+    assert f.severity == "YELLOW"  # organizer decision, gen-1: never GREEN
+    assert f.details["all_non_nil"] is True
     assert f.line_num == 3
     assert f.details["table"] == "out"
     assert f.details["seed"] == "0"
@@ -47,8 +48,10 @@ def test_table_insert_in_loop_is_claimed_by_the_counter(analyze):
         end
     """)
     f = find_one(findings, PATTERN)
-    assert f.severity == "GREEN"
-    assert findings_named(findings, "table_insert_append") == []
+    assert f.severity == "YELLOW"
+    # both fire at analysis time; under --fix-yellow the transformer lets the
+    # counter win, under plain --fix the ordinary rewrite still happens
+    assert len(findings_named(findings, "table_insert_append")) == 1
 
 
 def test_a_yellow_site_still_gets_the_plain_table_insert_rewrite(transform, analyze):
@@ -142,7 +145,7 @@ def test_long_literal_loop_still_fires(analyze):
             return out
         end
     """)
-    assert find_one(findings, PATTERN).severity == "GREEN"
+    assert find_one(findings, PATTERN).severity == "YELLOW"
 
 
 def test_two_append_sites_in_one_loop(analyze):
@@ -377,7 +380,7 @@ def test_rewrite_shape(transform):
             end
             return out
         end
-    """, fix_yellow=False)
+    """, fix_yellow=True)
     assert "local out_n = 0" in out
     assert "out_n = out_n + 1; out[out_n] = i * 2" in out
     assert "#out+1" not in out
@@ -395,7 +398,7 @@ def test_counter_name_dodges_an_existing_local(transform):
             end
             return out, out_n
         end
-    """, fix_yellow=False)
+    """, fix_yellow=True)
     assert "local out_n_alao = 0" in out
     assert "out_n_alao = out_n_alao + 1; out[out_n_alao] = i * 2" in out
     assert "local out_n = 7" in out
@@ -427,8 +430,8 @@ def test_fix_is_idempotent(transform):
             return out
         end
     """
-    once = transform(src)
-    twice = transform(once, name="pass2.script")
+    once = transform(src, fix_yellow=True)
+    twice = transform(once, name="pass2.script", fix_yellow=True)
     assert once == twice
 
 
@@ -617,7 +620,7 @@ def test_cached_global_inside_an_append_value_is_folded_in(transform, run_both):
             return table.concat(out, ",") .. a .. b .. c
         end
     """
-    out = transform(src)
+    out = transform(src, fix_yellow=True)
     assert "local tostr = tostring" in out
     assert 'out_n = out_n + 1; out[out_n] = tostr(i) .. "x"' in out
     run_both(src, out, "build", 4)
@@ -634,7 +637,7 @@ def test_debug_commented_out_next_to_an_append(transform, run_both):
             return table.concat(out, ",")
         end
     """
-    out = transform(src, fix_debug=True)
+    out = transform(src, fix_debug=True, fix_yellow=True)
     assert '-- printf("hi %s", i)' in out
     assert "out_n = out_n + 1; out[out_n] = i * 2" in out
     run_both(src, out, "build", 4)
@@ -653,8 +656,28 @@ def test_two_loops_over_one_table_reseed_from_hash_t(transform, run_both):
             return table.concat(out, ",") .. "|" .. #out
         end
     """
-    out = transform(src)
+    out = transform(src, fix_yellow=True)
     assert out.count("local out_n") == 2
     assert "local out_n = 0" in out
     assert "local out_n = #out" in out
     run_both(src, out, "build", 4)
+
+
+def test_counter_does_not_orphan_a_table_insert_alias(transform, analyze):
+    """MERGE CONTRACT with I-038: `local tinsert = table.insert` whose only use
+    is an append inside a loop we claim. Neither pass may rewrite it, or --fix
+    invents an unused_local_variable (demonized_ledge_grabbing.script:919)."""
+    src = """
+        local tinsert = table.insert
+        function build(n)
+            local out = {}
+            for i = 1, n do
+                tinsert(out, i * 2)
+            end
+            return out
+        end
+    """
+    out = transform(src, fix_yellow=True)
+    assert "tinsert(out, i * 2)" in out, "the alias's only use must survive"
+    assert "out_n" not in out
+    assert "#out+1" not in out

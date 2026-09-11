@@ -2511,31 +2511,20 @@ class ASTAnalyzer:
             # nil and `#t` stops growing while a counter marches on, so the two
             # forms genuinely diverge - see the nil case in the tests
             all_non_nil = all(isinstance(v, self._NEVER_NIL_NODES) for _, _, v in loop_sites)
-            severity = 'GREEN' if all_non_nil else 'YELLOW'
+            # Organizer decision (gen-1, 2026-09-11): YELLOW unconditionally. The
+            # rewrite never regresses (1.05x floor at 5 iters, ~10x at 2000) but
+            # 0 of the 254 corpus sites are per-frame and this is the one
+            # transform whose failure mode is a table that silently miscounts
+            # for hours. Users who want it ask for --fix-yellow; plain --fix
+            # stays conservative. all_non_nil is still recorded for the report.
+            severity = 'YELLOW'
 
             seed = '0' if (empty_ctor and not pre_sites) else '#%s' % name
 
-            # Only a GREEN finding gets to claim the call away from
-            # table_insert_append, because GREEN is what plain --fix applies.
-            # Claiming a YELLOW site would suppress the table_insert_append
-            # rewrite that --fix *would* have done and leave the call untouched.
-            # Under --fix-yellow the transformer does the same suppression for
-            # the YELLOW ones, where the counter rewrite really does happen.
-            #
-            # MERGE CONTRACT with agent-I004's I-038 guard (branch agent-I004,
-            # commits f42c0ec + 86e938d). Their _aliases_that_would_be_orphaned
-            # declines to rewrite the last surviving use of a
-            # `local tinsert = table.insert` alias, so the fix doesn't invent an
-            # unused_local_variable. It only looks at table_insert_append's
-            # candidates, and this pattern claims calls away from that list, so
-            # whoever merges the two branches must feed our claimed calls into
-            # the same check. I-004 measured the damage without it: exactly one
-            # site, demonized_ledge_grabbing.script:919 `tinsert`, whose only
-            # use is inside a loop we claim.
-            if severity == 'GREEN':
-                for kind, node, value in loop_sites:
-                    if kind == 'insert':
-                        self.append_loop_claimed.add(id(node))
+            # Nothing is claimed away from table_insert_append here any more:
+            # under plain --fix the ordinary t[#t+1] rewrite still happens, and
+            # under --fix-yellow the transformer lets the counter win (and keeps
+            # the I-038 alias-orphan guard honest, see _resolve_counter_claims).
 
             self.findings.append(Finding(
                 pattern_name='append_loop_counter',
