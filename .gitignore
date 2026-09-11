@@ -146,3 +146,10 @@ lab/data/snapshots/
 lab/data/corpus/*/diffs/
 lab/data/corpus/*/alao-report.json
 lab/**/__pycache__/
+
+# lab coordination runtime state (locks, queue, status board, built overlays)
+lab/coord/locks/
+lab/coord/queue/
+lab/coord/status/
+lab/coord/overlays/
+lab/framework/experiments/aalo-rewrite-*.toml
