@@ -274,6 +274,34 @@ function get_console() return _console end
 local _hud = {}
 function get_hud() return _hud end
 
+-- a particles-object stand-in. play_at_pos copies the three floats out and
+-- keeps no reference to the vector, which is what makes it safe to hand a
+-- reused scratch vector to (VECTOR_ARG_SAFE_METHODS in the analyzer).
+function make_particles()
+    local p = {log = {}}
+    function p:play_at_pos(v)
+        self.log[#self.log + 1] = v.x .. "," .. v.y .. "," .. v.z
+    end
+    function p:played() return table.concat(self.log, ";") end
+    return p
+end
+
+-- the opposite: a collector that keeps the object it is handed. Anything
+-- passed here must NOT be a reused scratch vector.
+function make_collector()
+    local c = {items = {}}
+    function c:keep(v) self.items[#self.items + 1] = v end
+    function c:dump()
+        local out = {}
+        for i = 1, #self.items do
+            local v = self.items[i]
+            out[i] = v.x .. "," .. v.y .. "," .. v.z
+        end
+        return table.concat(out, ";")
+    end
+    return c
+end
+
 function get_story_object(sid) return make_object(1, "story") end
 function get_object_by_name(n) return make_object(2, n) end
 function time_global() return 1000 end

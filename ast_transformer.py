@@ -52,6 +52,8 @@ class ASTTransformer:
         self._next_group_id: int = 1
         self.analyzer: Optional[ASTAnalyzer] = None
         self._line_offsets: List[int] = []  # cached line start offsets
+        self._vector_scratch_names: Set[str] = set()
+        self._source_identifiers: Optional[Set[str]] = None
 
     def _compute_line_offsets(self):
         """Compute and cache line start offsets for efficient lookups."""
@@ -80,6 +82,10 @@ class ASTTransformer:
         self.experimental = experimental
         self.fix_nil = fix_nil
         self.remove_dead_code = remove_dead_code
+        # scratch-vector names handed out for this file, so two hoists in the
+        # same file never pick the same identifier
+        self._vector_scratch_names: Set[str] = set()
+        self._source_identifiers: Optional[Set[str]] = None
 
         # run analyzer with user-specified cache_threshold
         self.analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
@@ -193,6 +199,8 @@ class ASTTransformer:
             self._edit_repeated_calls(finding)
         elif pattern == 'distance_to_comparison':
             self._edit_distance_to_comparison(finding)
+        elif pattern == 'vector_alloc_in_loop':
+            self._edit_vector_alloc_in_loop(finding)
 
 
     # Edit methods using AST positions
@@ -658,6 +666,89 @@ class ASTTransformer:
             if kw in cleaned:
                 return True
         return False
+
+    # keyword that has to start the hoist line, or we don't know where the
+    # loop really begins and we leave the file alone
+    _LOOP_LINE_RE = re.compile(r'^(for|while|repeat)\b')
+
+    def _edit_vector_alloc_in_loop(self, finding: Finding):
+        """Hoist one scratch vector out of the loop and reuse it with :set().
+
+            for i = 1, n do                 local _v = vector()
+                local p = vector():set(..)  for i = 1, n do
+                ...                  ->         local p = _v:set(..)
+            end                             ...
+                                            end
+
+        The analyzer already proved the vector can't outlive the iteration
+        (see `_find_reusable_scratch_vectors`); all that's left here is to
+        find the two spots and not make a mess of the indentation.
+        """
+        details = finding.details
+        if not details.get('is_safe_to_fix'):
+            return
+
+        node = details.get('vector_call_node')
+        hoist_line = details.get('hoist_line')
+        if node is None or not hoist_line:
+            return
+
+        start, end = self._get_node_span(node)
+        if start is None or end is None:
+            return
+
+        # sanity: the span really is a bare `vector()`. If token positions
+        # drifted we'd otherwise overwrite something else entirely.
+        if not re.fullmatch(r'vector\s*\(\s*\)', self.source[start:end]):
+            return
+
+        line_start = self._get_line_start(hoist_line)
+        line_end = self._get_line_end(hoist_line)
+        if line_start is None or line_end is None:
+            return
+
+        line_text = self.source[line_start:line_end]
+        indent = self._get_indent_at_line(hoist_line)
+        if not self._LOOP_LINE_RE.match(line_text.strip()):
+            # the loop doesn't start its own line (`if x then for i=1,n do`),
+            # so a line-start insertion would land in the middle of a statement
+            return
+
+        if self._is_inside_multiline_comment(line_start) \
+                or self._is_inside_multiline_comment(start):
+            return
+
+        name = self._resolve_cache_name('_v', self._vector_names_taken())
+        self._vector_scratch_names.add(name)
+
+        group_id = self._next_group_id
+        self._next_group_id += 1
+
+        self.edits.append(SourceEdit(
+            start_char=line_start,
+            end_char=line_start,
+            replacement=f'{indent}local {name} = vector()\n',
+            group_id=group_id,
+            is_enabler=True,
+        ))
+        self.edits.append(SourceEdit(
+            start_char=start,
+            end_char=end,
+            replacement=name,
+            group_id=group_id,
+        ))
+
+    def _vector_names_taken(self) -> Set[str]:
+        """Every identifier already in the file, plus the ones we've handed out.
+
+        Deliberately blunt - a file-wide identifier sweep instead of scope
+        resolution. Worst case we call it `_v_alao` for no reason; the case
+        we must never hit is shadowing something real.
+        """
+        if getattr(self, '_source_identifiers', None) is None:
+            self._source_identifiers = set(
+                re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', self.source))
+        return self._source_identifiers | self._vector_scratch_names
 
     def _is_inside_multiline_comment(self, pos: int) -> bool:
         """Check if a position in source is inside a multi-line comment.

@@ -83,6 +83,34 @@ CACHEABLE_MODULE_FUNCS = {
     }),
 }
 
+# --- scratch-vector reuse (vector_alloc_in_loop) ---------------------------
+#
+# A `vector()` built inside a loop can be hoisted out and reused with :set()
+# ONLY if the object never survives the iteration. Everything below is about
+# proving that. Two whitelists, both deliberately tiny: if a name is not in
+# here we assume the callee keeps the reference, because guessing wrong here
+# means a live object silently mutating under the engine's feet.
+
+# Methods you may call ON the scratch vector itself. They either read it or
+# mutate it in place and return self - either way the vector stays ours.
+VECTOR_SELF_METHODS = frozenset({
+    'set', 'add', 'sub', 'mul', 'div', 'mad', 'invert', 'normalize',
+    'magnitude', 'distance_to', 'distance_to_sqr',
+    'distance_to_xz', 'distance_to_xz_sqr',
+    'dotproduct', 'crossproduct', 'similar', 'getH', 'getP', 'abs',
+})
+
+# Methods that take a vector as an ARGUMENT and copy the three floats out
+# instead of keeping the object. Passing the scratch to one of these is not
+# an escape. Keep this list short and only add a name you can point at in the
+# engine source - a Lua class with a method of the same name that stores its
+# argument would silently break, so `set_position` and friends stay out until
+# something in the corpus actually needs them.
+VECTOR_ARG_SAFE_METHODS = frozenset({
+    'distance_to', 'distance_to_sqr', 'distance_to_xz', 'distance_to_xz_sqr',
+    'play_at_pos',
+})
+
 # Debug/logging function patterns
 DEBUG_FUNCTIONS = frozenset({
     'print', 'printf', 'printe', 'printd', 'log',
@@ -3130,34 +3158,229 @@ class ASTAnalyzer:
                 temp_vec:set(x, y, z)
             end
         
-        NOT auto-fixable because it requires:
-        1. Moving allocation to module/function level
-        2. Understanding which vectors can be safely reused
-        3. Ensuring no aliasing issues
+        Most of them are NOT auto-fixable: the vector has to die with the
+        iteration. `_find_reusable_scratch_vectors()` does that proof; the
+        ones that pass come out YELLOW with `is_safe_to_fix` and everything
+        the transformer needs to hoist them, the rest stay RED and are just
+        reported like before.
         """
+        reusable = self._find_reusable_scratch_vectors()
+
         for alloc in self.vector_allocations:
-            severity = 'RED'
-            
+            info = reusable.get(id(alloc.call_node))
+
             context = ""
             if alloc.in_per_frame_callback:
                 context = " in per-frame callback"
             if alloc.loop_depth > 1:
                 context += f" (nested {alloc.loop_depth} loops deep)"
-            
-            message = f"vector() allocation in loop{context} - pre-allocate and reuse with :set()"
-            
+
+            details = {
+                'loop_depth': alloc.loop_depth,
+                'in_per_frame_callback': alloc.in_per_frame_callback,
+                'node': alloc.call_node,
+                'is_safe_to_fix': False,
+            }
+
+            if info is not None:
+                severity = 'YELLOW'
+                message = (f"vector() allocation in loop{context} - hoist one scratch vector "
+                           f"above the loop and reuse it with :set()")
+                details.update(info)
+                details['is_safe_to_fix'] = True
+            else:
+                severity = 'RED'
+                message = f"vector() allocation in loop{context} - pre-allocate and reuse with :set()"
+
             self.findings.append(Finding(
                 pattern_name='vector_alloc_in_loop',
                 severity=severity,
                 line_num=alloc.line,
                 message=message,
-                details={
-                    'loop_depth': alloc.loop_depth,
-                    'in_per_frame_callback': alloc.in_per_frame_callback,
-                    'node': alloc.call_node,
-                },
+                details=details,
                 source_line=self._get_source_line(alloc.line),
             ))
+
+    # --- scratch-vector escape analysis ------------------------------------
+
+    @staticmethod
+    def _child_nodes(node):
+        """Yield the AST children of a node, skipping token/comment bookkeeping."""
+        for field_name in list(node.__dict__):
+            if field_name.startswith('_') or field_name in (
+                    'first_token', 'last_token', 'comments'):
+                continue
+            value = getattr(node, field_name, None)
+            if isinstance(value, Node):
+                yield value
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node):
+                        yield item
+
+    @classmethod
+    def _iter_subtree(cls, node):
+        """Every node in the subtree rooted at `node`, `node` included."""
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            yield cur
+            stack.extend(cls._child_nodes(cur))
+
+    @staticmethod
+    def _is_bare_vector_call(node) -> bool:
+        """True for a literal `vector()` with no arguments."""
+        return (isinstance(node, Call)
+                and isinstance(node.func, Name)
+                and node.func.id == 'vector'
+                and not node.args)
+
+    def _find_reusable_scratch_vectors(self) -> Dict[int, Dict[str, Any]]:
+        """Find `vector():set(...)` sites in loops whose result cannot escape.
+
+        Returns `{id(vector_call_node): details}` for the safe ones. Anything
+        not in the map is assumed to escape - that's the whole safety story
+        here, so the walk only ever *adds* a site it has positively proved.
+
+        The three shapes we accept:
+          1. `vector():set(...)` as a statement on its own (result thrown away)
+          2. `vector():set(...)` passed straight to a method in
+             VECTOR_ARG_SAFE_METHODS, which copies the floats out
+          3. `local p = vector():set(...)` where every later mention of `p`
+             inside the same loop body is a field read, a call to one of
+             VECTOR_SELF_METHODS on `p`, or an argument to one of
+             VECTOR_ARG_SAFE_METHODS - and none of them is inside a nested
+             function (that would capture it as an upvalue).
+
+        Everything else - a store into a table field, a global, `self.x`, a
+        return, a plain function call, a closure, an identity comparison -
+        falls through and stays RED.
+        """
+        tree = getattr(self, '_ast_tree', None)
+        if tree is None:
+            return {}
+
+        found: Dict[int, Dict[str, Any]] = {}
+
+        # every node that is written to, so `p.x = 1` / `p = q` can be told
+        # apart from a read of the same expression
+        assign_targets: Set[int] = set()
+        for node in self._iter_subtree(tree):
+            if isinstance(node, (Assign, LocalAssign)):
+                for tgt in (node.targets or []):
+                    assign_targets.add(id(tgt))
+
+        def walk(node, parent, loop_stack, blocked):
+            """loop_stack holds the enclosing loops *of the current function*.
+
+            `blocked` means we're inside a closure that is itself written
+            inside a loop - the hoisted declaration would land in that outer
+            loop and we'd be right back where we started, so we skip those.
+            """
+            if isinstance(node, Invoke) and self._is_bare_vector_call(node.source) \
+                    and isinstance(node.func, Name) and node.func.id == 'set' \
+                    and loop_stack and not blocked:
+                info = self._classify_scratch_use(node, parent, loop_stack, assign_targets)
+                if info is not None:
+                    found[id(node.source)] = info
+
+            # a function body starts a fresh loop context: a vector built in a
+            # closure inside a loop is allocated per call of the closure, and
+            # hoisting past the closure boundary would change its lifetime
+            if isinstance(node, (Function, LocalFunction, Method, AnonymousFunction)):
+                inner_stack = []
+                inner_blocked = blocked or bool(loop_stack)
+            elif isinstance(node, (Fornum, Forin, While, Repeat)):
+                inner_stack = loop_stack + [node]
+                inner_blocked = blocked
+            else:
+                inner_stack = loop_stack
+                inner_blocked = blocked
+
+            for child in self._child_nodes(node):
+                if isinstance(node, (Fornum, Forin, While, Repeat)):
+                    # only the body is "inside" the loop; the iterator
+                    # expression / test runs outside it
+                    child_stack = inner_stack if child is getattr(node, 'body', None) else loop_stack
+                else:
+                    child_stack = inner_stack
+                walk(child, node, child_stack, inner_blocked)
+
+        walk(tree, None, [], False)
+        return found
+
+    def _classify_scratch_use(self, invoke, parent, loop_stack,
+                              assign_targets: Set[int]) -> Optional[Dict[str, Any]]:
+        """Decide whether `invoke` (a `vector():set(...)`) escapes its iteration."""
+        outer_loop = loop_stack[0]
+        inner_loop = loop_stack[-1]
+
+        ok = False
+
+        # shape 1: bare expression statement - nobody holds the result
+        if isinstance(parent, Block):
+            ok = True
+
+        # shape 2: handed to a method that copies the floats out
+        elif isinstance(parent, Invoke) and any(a is invoke for a in (parent.args or [])):
+            fname = parent.func.id if isinstance(parent.func, Name) else None
+            ok = fname in VECTOR_ARG_SAFE_METHODS
+
+        # shape 3: bound to a local whose every use stays in the iteration
+        elif isinstance(parent, LocalAssign):
+            targets = parent.targets or []
+            values = parent.values or []
+            if len(targets) == 1 and len(values) == 1 and values[0] is invoke \
+                    and isinstance(targets[0], Name):
+                ok = self._alias_stays_in_iteration(
+                    targets[0].id, targets[0], inner_loop, assign_targets)
+
+        if not ok:
+            return None
+
+        return {
+            'vector_call_node': invoke.source,
+            'invoke_node': invoke,
+            'hoist_line': getattr(outer_loop, 'line', None),
+        }
+
+    def _alias_stays_in_iteration(self, name: str, decl_target, loop_node,
+                                  assign_targets: Set[int]) -> bool:
+        """True if every mention of `name` inside `loop_node` is a safe read.
+
+        Scans the whole loop body rather than doing real scope resolution, so
+        an unrelated outer variable with the same name can only make us say
+        no. That's the direction we want to be wrong in.
+        """
+        roots = [loop_node.body]
+        if isinstance(loop_node, Repeat):
+            # `until` can still see body locals
+            roots.append(loop_node.test)
+
+        # parent + "is this inside a nested function" for every node we visit
+        def scan(node, parent, in_closure) -> bool:
+            if isinstance(node, Name) and node.id == name and node is not decl_target:
+                if in_closure:
+                    return False            # captured as an upvalue
+                if id(node) in assign_targets:
+                    return False            # reassigned - we lose track of it
+                if isinstance(parent, Index) and parent.value is node:
+                    # p.x / p["x"] - a read unless the whole index is written to
+                    return id(parent) not in assign_targets
+                if isinstance(parent, Invoke):
+                    if parent.source is node:
+                        fname = parent.func.id if isinstance(parent.func, Name) else None
+                        return fname in VECTOR_SELF_METHODS
+                    if any(a is node for a in (parent.args or [])):
+                        fname = parent.func.id if isinstance(parent.func, Name) else None
+                        return fname in VECTOR_ARG_SAFE_METHODS
+                return False
+
+            nested = in_closure or isinstance(
+                node, (Function, LocalFunction, Method, AnonymousFunction))
+            return all(scan(child, node, nested) for child in self._child_nodes(node))
+
+        return all(scan(root, loop_node, False) for root in roots)
 
     def _get_source_line(self, line_num: int) -> str:
         """Get source line by number."""
