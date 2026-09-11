@@ -136,9 +136,10 @@ def mods_tree(tmp_path):
 @pytest.fixture
 def analyze(write_script):
     """Run ASTAnalyzer over a snippet, return the list of Findings."""
-    def _analyze(src, cache_threshold=4, experimental=False, name=None):
+    def _analyze(src, cache_threshold=4, experimental=False, name=None, **kwargs):
         path = write_script(src, name=name)
-        analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
+        analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental,
+                               **kwargs)
         return analyzer.analyze_file(path)
 
     return _analyze

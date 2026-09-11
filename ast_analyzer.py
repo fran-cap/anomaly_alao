@@ -665,9 +665,15 @@ class VectorAllocationInfo:
 class ASTAnalyzer:
     """AST-based Lua code analyzer."""
 
-    def __init__(self, cache_threshold: int = 4, experimental: bool = False):
+    def __init__(self, cache_threshold: int = 4, experimental: bool = False,
+                 show_globals: bool = False, report_global_writes: bool = True):
         self.cache_threshold = cache_threshold
         self.experimental = experimental
+        # I-031: the Anomaly module convention writes globals on purpose, so
+        # module-level global state is only reported with --show-globals, and
+        # --no-global-writes drops the family entirely.
+        self.show_globals = show_globals
+        self.report_global_writes = report_global_writes
         self.reset()
 
     def reset(self):
@@ -684,7 +690,13 @@ class ASTAnalyzer:
         self._suppress_indexes: Set[int] = set()
         self.assigns: List[AssignInfo] = []
         self.concats: List[ConcatInfo] = []
-        self.global_writes: List[Tuple[str, int]] = []
+        # (name, line, function_depth). depth 0 == written at module level,
+        # which in an Anomaly script means "this is module state / an export".
+        self.global_writes: List[Tuple[str, int, int]] = []
+        # every bare global name this file defines at module level, whether by
+        # assignment or by `function foo()`. A write to one of these from
+        # inside a function body is module state being mutated, not a slip.
+        self.module_level_globals: Set[str] = set()
         
         self.nil_sources: Dict[Tuple[int, str], NilSourceInfo] = {}
         self.nil_accesses: List[NilAccessInfo] = []
@@ -1038,6 +1050,11 @@ class ASTAnalyzer:
 
         is_hot = func_name in HOT_CALLBACKS
         is_per_frame = _is_per_frame_callback_name(func_name)
+
+        # `function foo()` at module level defines the global `foo`; a later
+        # `foo = ...` inside some body is then deliberate, not an accident.
+        if self.function_depth == 0 and func_name and '.' not in func_name and ':' not in func_name:
+            self.module_level_globals.add(func_name)
 
         self.function_depth += 1
         self._enter_scope(func_name, line, 'function', is_hot, node=node)
@@ -1514,7 +1531,9 @@ class ASTAnalyzer:
                 target_name = target.id
                 # it's a global write if not in any scope's locals
                 if not self._is_in_locals(target_name):
-                    self.global_writes.append((target_name, line))
+                    self.global_writes.append((target_name, line, self.function_depth))
+                    if self.function_depth == 0:
+                        self.module_level_globals.add(target_name)
 
                 if len(node.values) == 1:
                     self._record_assignment(target_name, node.values[0], line, is_local=False)
@@ -3335,21 +3354,74 @@ class ASTAnalyzer:
                 ))
 
     def _analyze_global_writes(self):
-        """Track global variable writes."""
-        for name, line in self.global_writes:
+        """Track global variable writes.
+
+        I-031. An Anomaly `.script` file IS a module: its top-level names are
+        meant to be global so xr_logic-style string dispatch can find them, so
+        `foo = {}` at module level is the convention, not a bug. Reporting one
+        RED line per write made this 39% of everything ALAO said about the
+        GAMMA corpus and buried the findings people can act on.
+
+        So the family is split in two and grouped per (file, name):
+
+        - `global_write` (RED, on by default): an assignment inside a function
+          body to a name this file never defines at module level. That is the
+          forgotten `local` - a typo, a leaked loop temp, or a cross-module
+          global write. This is the one worth reading.
+        - `module_global_write` (RED, only with --show-globals): module-level
+          state and deliberate mutation of it from inside the file's own
+          functions.
+
+        `--no-global-writes` drops both.
+        """
+        if not self.report_global_writes:
+            return
+
+        # group by (name, kind) so a file that sets `wpn_name` 231 times gets
+        # one finding with a count instead of 231 lines of the same thing
+        groups: Dict[Tuple[str, str], List[int]] = {}
+        for name, line, depth in self.global_writes:
             # skip common patterns that are intentional
             if name.startswith('_') or name.isupper():
                 continue
 
+            accidental = depth > 0 and name not in self.module_level_globals
+            key = (name, 'accidental' if accidental else 'module')
+            groups.setdefault(key, []).append(line)
+
+        for (name, kind), lines in groups.items():
+            lines = sorted(lines)
+            count = len(lines)
+            if kind == 'accidental':
+                pattern = 'global_write'
+                what = (f"Global write: '{name}' is assigned inside a function "
+                        f"but never declared - missing `local`?")
+            else:
+                if not self.show_globals:
+                    continue
+                pattern = 'module_global_write'
+                what = f"Module-level global: '{name}'"
+
+            if count > 1:
+                shown = ', '.join(str(l) for l in lines[:8])
+                if count > 8:
+                    shown += ', ...'
+                message = f'{what} ({count} writes, lines {shown})'
+            else:
+                message = what
+
             self.findings.append(Finding(
-                pattern_name='global_write',
+                pattern_name=pattern,
                 severity='RED',
-                line_num=line,
-                message=f'Global write: {name}',
+                line_num=lines[0],
+                message=message,
                 details={
                     'variable': name,
+                    'count': count,
+                    'lines': lines,
+                    'kind': kind,
                 },
-                source_line=self._get_source_line(line),
+                source_line=self._get_source_line(lines[0]),
             ))
 
     def _analyze_nil_access(self):
@@ -4276,7 +4348,10 @@ class ASTAnalyzer:
         return ""
 
 
-def analyze_file(file_path: Path, cache_threshold: int = 4, experimental: bool = False) -> List[Finding]:
+def analyze_file(file_path: Path, cache_threshold: int = 4, experimental: bool = False,
+                 show_globals: bool = False, report_global_writes: bool = True) -> List[Finding]:
     """Convenience function to analyze a file."""
-    analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
+    analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental,
+                           show_globals=show_globals,
+                           report_global_writes=report_global_writes)
     return analyzer.analyze_file(file_path)

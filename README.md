@@ -50,6 +50,9 @@ python stalker_lua_lint.py [path_to_mods] [options]
 
 # Reports & Restore
 --report [file]    Generate comprehensive report (.txt, .html, .json)
+--show-globals     Also report module-level global writes (module_global_write).
+                   Off by default - an Anomaly script IS a module.
+--no-global-writes Do not report global writes at all.
 --revert           Restore all .alao-bak backup files (undo fixes)
 
 # Safety
@@ -124,7 +127,8 @@ Pay attention some of this fixes requires `--experimental` flag.
 
 | Pattern | Description |
 |---------|-------------|
-| Global variable writes | Writing to global scope (potential pollution) |
+| `global_write` | A name assigned inside a function body that the file never defines at module level - a forgotten `local`. Grouped: one finding per file+name with a write count, not one line per write |
+| `module_global_write` | Module-level globals (`foo = {}` at the top of a script, and mutation of those names from the file's own functions). **Off by default** - an Anomaly `.script` IS a module and its top-level names are meant to be global. Pass `--show-globals` to see them, `--no-global-writes` to drop both patterns |
 | Per-frame callback warnings | Performance issues in `actor_on_update`, `CFoo:update`, etc. |
 | `jit_mode` | A per-frame body LuaJIT 2.0 cannot compile into a trace, with the constructs that abort it (`..`, `pairs`, `string.format`, engine calls, closures). See `lab/reports/luajit20-nyi.md` |
 | `vector()` in hot loop | Allocates new vector each iteration. The `vector():set(...)` subset that provably can't escape its iteration is YELLOW and fixable with `--fix-yellow`; everything else stays here |

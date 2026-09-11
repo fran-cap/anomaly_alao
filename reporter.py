@@ -61,6 +61,9 @@ PERFORMANCE_IMPACT = {
     'table_getn': 'low',
     'string_len': 'low',
     'global_write': 'low',
+    # I-031: module-level globals are the Anomaly module convention, so this
+    # one is informational and is only emitted with --show-globals at all
+    'module_global_write': 'low',
     'empty_function': 'low',
     'math_pow_complex': 'low',
     'file_too_large': 'low',
@@ -89,7 +92,7 @@ def highlight_code_match(line_content: str, details: dict, pattern_name: str) ->
     if pattern_name in ('table_insert_append', 'table_getn', 'string_len',
                         'math_pow_simple', 'math_pow_dotted', 'math_pow_complex'):
         match_text = details.get('full_match')
-    elif pattern_name == 'global_write':
+    elif pattern_name in ('global_write', 'module_global_write'):
         var = details.get('variable')
         if var:
             match_text = var
