@@ -224,10 +224,12 @@ def test_corpus_k_requires_provenance(tmp_path):
 
 
 def test_corpus_buckets_parse():
-    buckets = microbench.parse_corpus_buckets("3-10:15 68:3", "t")
-    assert [(b.lo, b.hi, b.sites) for b in buckets] == [(3, 10, 15), (68, 68, 3)]
+    buckets = microbench.parse_corpus_buckets("3-10?:15 68:3", "t")
+    assert [(b.lo, b.hi, b.sites, b.estimated) for b in buckets] == [
+        (3, 10, 15, True), (68, 68, 3, False),
+    ]
+    assert buckets[0].label == "K=3-10 (estimated)"
     assert buckets[1].label == "K=68"
-    assert buckets[0].label == "K=3-10"
 
 
 def _fake_rows(case, flags):
@@ -264,6 +266,28 @@ def test_corpus_verdict_counts_sites_not_ranges():
     assert "run-1" in summary["fake"]
     # K=2000 passes but is outside every bucket, so it must not inflate the count
     assert "18" in summary["fake"] and "21" not in summary["fake"]
+
+
+def test_estimated_bucket_is_not_printed_as_measured():
+    """An inferred loop length must not read like one read off the source.
+
+    I-039's two buckets look identical in the syntax and are not: 68:3 is three
+    literal `for i=1,68` bounds, 3-10:15 is a judgement about what Anomaly's UI
+    tables hold. Same run id cited for both, only one of them established by it.
+    """
+    case = _case(iters=[5, 68], corpus_src="run-1",
+                 corpus_k=microbench.parse_corpus_buckets("3-10?:15 68:3", "t"))
+    verdict = microbench.g2_summary(_fake_rows(case, [(5, False), (68, True)]))["fake"]
+    assert "estimated" in verdict
+    assert "15 at K=3-10 (estimated): fail" in verdict
+    assert "3 at K=68: fail" not in verdict     # the measured bucket passes
+
+
+def test_measured_only_verdict_says_nothing_about_estimates():
+    case = _case(iters=[5, 68], corpus_src="run-1",
+                 corpus_k=microbench.parse_corpus_buckets("3-10:15 68:3", "t"))
+    verdict = microbench.g2_summary(_fake_rows(case, [(5, False), (68, True)]))["fake"]
+    assert "estimated" not in verdict
 
 
 def test_corpus_verdict_when_everything_passes():

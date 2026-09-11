@@ -126,25 +126,47 @@ EXPECTED_JIT_MAJOR_MINOR = (2, 0)
 
 @dataclass
 class CorpusBucket:
-    """`3-10:15` - a loop-length range and how many corpus sites sit in it."""
+    """`3-10:15` - a loop-length range and how many corpus sites sit in it.
+
+    A trailing `?` on the range (`3-10?:15`) marks the RANGE as estimated: the
+    site count is measured, but where those sites sit is inference rather than
+    something read off the source. The distinction is not pedantry. I-039's two
+    buckets look identical in this syntax and are not: the three K=68 sites have
+    literal `for i=1,68` bounds read straight out of the file, while the fifteen
+    K=3-10 sites have statically unknowable bounds (`#p-1`, `size_table(...)`,
+    `pairs()` over inventory tables) and 3-10 is a judgement about what those
+    tables hold in Anomaly. Both are cited to the same run id, and only one of
+    them is the kind of thing that run establishes. If someone later instruments
+    the game and finds one of those `pairs()` loops running 300 times on a modded
+    inventory, the verdict flips for that site - so the generated line must not
+    print inference and measurement in the same typeface.
+    """
 
     lo: int
     hi: int
     sites: Optional[int] = None
+    estimated: bool = False
 
     def contains(self, k: Optional[int]) -> bool:
         return k is not None and self.lo <= k <= self.hi
 
     @property
     def label(self) -> str:
-        return f"K={self.lo}" if self.lo == self.hi else f"K={self.lo}-{self.hi}"
+        rng = f"K={self.lo}" if self.lo == self.hi else f"K={self.lo}-{self.hi}"
+        return f"{rng} (estimated)" if self.estimated else rng
 
 
 def parse_corpus_buckets(spec: str, where: str) -> List[CorpusBucket]:
-    """`3-10:15 68:3` -> two buckets. The `:count` is optional but wanted."""
+    """`3-10?:15 68:3` -> two buckets, the first with an estimated range.
+
+    `<K>[-<K>][?][:<site count>]`; the `?` marks the range as inferred rather
+    than read off the source, and the `:count` is optional but wanted.
+    """
     buckets: List[CorpusBucket] = []
     for token in spec.replace(",", " ").split():
         rng, _, count = token.partition(":")
+        estimated = rng.endswith("?")
+        rng = rng[:-1] if estimated else rng
         lo, _, hi = rng.partition("-")
         try:
             lo_i = int(lo)
@@ -152,11 +174,12 @@ def parse_corpus_buckets(spec: str, where: str) -> List[CorpusBucket]:
             sites = int(count) if count else None
         except ValueError:
             raise ValueError(
-                f"{where}: bad @corpus_k token {token!r}; want <K>[-<K>][:<site count>]"
+                f"{where}: bad @corpus_k token {token!r}; "
+                "want <K>[-<K>][?][:<site count>]"
             ) from None
         if lo_i < 1 or hi_i < lo_i or (sites is not None and sites < 0):
             raise ValueError(f"{where}: bad @corpus_k token {token!r}")
-        buckets.append(CorpusBucket(lo_i, hi_i, sites))
+        buckets.append(CorpusBucket(lo_i, hi_i, sites, estimated))
     if not buckets:
         raise ValueError(f"{where}: @corpus_k is empty")
     return buckets
@@ -559,7 +582,7 @@ def corpus_verdict(case: BenchCase, flags: Sequence[tuple]) -> Optional[str]:
     than a range, or None if nothing was measured in any declared bucket.
     """
     parts: List[str] = []
-    pass_sites = fail_sites = 0
+    pass_sites = fail_sites = est_fail_sites = 0
     counted = True
     any_measured = False
 
@@ -580,6 +603,8 @@ def corpus_verdict(case: BenchCase, flags: Sequence[tuple]) -> Optional[str]:
                 pass_sites += b.sites
             elif not ok_any:
                 fail_sites += b.sites
+                if b.estimated:
+                    est_fail_sites += b.sites
 
     if not any_measured:
         return None
@@ -589,6 +614,10 @@ def corpus_verdict(case: BenchCase, flags: Sequence[tuple]) -> Optional[str]:
         total = sum(b.sites or 0 for b in case.corpus_k or [])
         head = (f"{fail_sites} of {total} corpus sites fail G2" if fail_sites
                 else f"all {total} corpus sites pass G2")
+        if fail_sites and est_fail_sites:
+            # Do not let an inferred loop length read as a measured one.
+            head += (f" ({est_fail_sites} on an estimated loop length)"
+                     if est_fail_sites != fail_sites else " (on an estimated loop length)")
         if fail_sites and pass_sites:
             head += f", {pass_sites} of {total} pass"
         return f"{head}{src} ({'; '.join(parts)})"

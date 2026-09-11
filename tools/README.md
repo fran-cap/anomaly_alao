@@ -184,7 +184,7 @@ everything after a `-- @section` line until the next directive is Lua.
 -- @n 200000 60000                  -- optional: total inner-iteration budget, jit_on jit_off
 -- @iters 5 20 100 2000             -- optional: sweep inner loop length K
 -- @doc_at 2000                     -- optional: which K the @doc figure refers to (default the largest)
--- @corpus_k 3-10:15 68:3           -- optional: where this pattern runs, as <K range>:<site count> buckets
+-- @corpus_k 3-10?:15 68:3          -- optional: where this pattern runs, as <K range>[?]:<site count> buckets ('?' = range inferred, not measured)
 -- @corpus_src 20260911-...-audit   -- required with @corpus_k: the run the counts came from
 -- @notes anything; repeat the directive for more lines, they accumulate
 -- @setup
@@ -235,11 +235,15 @@ a prune. Three things follow:
 * `@corpus_src` is **required**, naming the run id or audit the counts came from.
   Otherwise the site count is a hand-entered number with exactly the trust
   problem of the scalar it replaces, and the rule above applies to it too.
+* A trailing `?` on a bucket's range marks it **estimated** — the site count is
+  measured, but *where those sites sit* is inference. See below; this is not
+  decoration.
 * The G2 verdict leads by **counting sites**:
 
   ```
-  string_concat_in_loop: 15 of 18 corpus sites fail G2, 3 of 18 pass
-    [20260911-111300-i039-audit] (15 at K=3-10: fail; 3 at K=68: pass)
+  string_concat_in_loop: 15 of 18 corpus sites fail G2 (on an estimated loop
+    length), 3 of 18 pass [20260911-111300-i039-audit]
+    (15 at K=3-10 (estimated): fail; 3 at K=68: pass)
   ```
 
 That sentence is what pruned the `string_concat_in_loop` promotion (I-039): the
@@ -249,6 +253,20 @@ it was about a part of the curve the code mostly does not visit. That is a
 different failure from the missing `collectgarbage`, which made a number
 incorrect: this one makes a correct number irrelevant, and it is the harder of
 the two to notice, because nothing about the measurement looks off.
+
+**Why `?` exists.** The two buckets above look identical in the syntax, are cited
+to the same run, and have different evidential status. `68:3` is measured: three
+`for i=1,68` loops with literal bounds read off the source. `3-10?:15` is not —
+what the run established is that those fifteen trip counts are *statically
+unknowable* (the bounds are `#p-1`, `size_table(warnings)`, `pairs()` over
+inventory tables), and `3-10` is a judgement about what those tables hold in
+Anomaly. Good inference; not a measurement; the run id does not back it. Without
+the `?`, the audit trail would point at that run as though it had said otherwise,
+and if someone later instruments the game and finds one of those `pairs()` loops
+running 300 times on a modded inventory, the verdict flips for that site. This is
+the same defect as everything else on this page, one layer in: a number that is
+correct, is sourced, and is not the kind of thing its source establishes. A
+generated line should not print inference and measurement in the same typeface.
 
 Note what the verdict does **not** say. An earlier version of this feature
 declared the corpus range as `3-10` and printed "passes only at K in [.., 68, ..],
