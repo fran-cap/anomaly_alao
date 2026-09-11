@@ -1885,6 +1885,15 @@ class ASTAnalyzer:
         if tree is None:
             return
 
+        # `local table_insert = table.insert` is everywhere in mod code, and
+        # ALAO's own table_insert_append rewrites those into `t[#t+1] = v`.
+        # If we didn't resolve the alias here, pass 1 would produce our shape
+        # and pass 2 would rewrite it - i.e. --fix would stop being a fixpoint.
+        self._table_insert_call_ids = {
+            id(c.node) for c in self.calls
+            if c.full_name == 'table.insert' and len(c.args) == 2
+        }
+
         for stmts in self._iter_stmt_lists(tree):
             for i, stmt in enumerate(stmts):
                 if not isinstance(stmt, self._APPEND_LOOP_NODES):
@@ -2018,12 +2027,15 @@ class ASTAnalyzer:
                             and isinstance(b, Number) and b.n == 1):
                         return ('index', stmt.values[0])
             return None
-        if isinstance(stmt, Call):
+        if isinstance(stmt, Call) and len(stmt.args or []) == 2:
+            if not (isinstance(stmt.args[0], Name) and stmt.args[0].id == name):
+                return None
             func = stmt.func
-            if (isinstance(func, Index) and isinstance(func.value, Name)
-                    and func.value.id == 'table' and isinstance(func.idx, Name)
-                    and func.idx.id == 'insert' and len(stmt.args or []) == 2
-                    and isinstance(stmt.args[0], Name) and stmt.args[0].id == name):
+            direct = (isinstance(func, Index) and isinstance(func.value, Name)
+                      and func.value.id == 'table' and isinstance(func.idx, Name)
+                      and func.idx.id == 'insert')
+            aliased = id(stmt) in getattr(self, '_table_insert_call_ids', ())
+            if direct or aliased:
                 return ('insert', stmt.args[1])
         return None
 
