@@ -132,8 +132,12 @@ EXPENSIVE_INDEXES = frozenset({'db.actor'})
 #
 # Which is to say: "string_concat_in_loop is 8.69x", as the beam had it, was
 # never a property of the transform. It was a property of the loop length the
-# original measurement happened to use (~100-200). Quoting a single number here
-# is a category error; that is why this comment is a curve.
+# original measurement happened to use - somewhere in the low hundreds. The two
+# sweeps bracket that crossing differently (I-003 puts it at K=100-200, I-039 at
+# K=200-500) and on a shared machine neither can place it tighter, so "low
+# hundreds" is the honest statement. Quoting a single number for this transform
+# is a category error whichever bracket is right; that is why this comment is a
+# curve.
 #
 # The interpreted column is the one that governs: agent-I013 confirmed BC_CAT
 # is NYI on LuaJIT 2.0.4, so any loop containing `..` runs interpreted no matter
