@@ -24,7 +24,8 @@ _FALLBACK = {
         "shortcut": "Anomaly (DX11-AVX)",
         "exe": "AnomalyDX11AVX.exe",
     },
-    "run": {"timeout_s": 900, "launch_grace_s": 60, "sample_hz": 1.0, "warmup_s": 30.0},
+    "run": {"timeout_s": 900, "launch_grace_s": 60, "sample_hz": 1.0, "warmup_s": 30.0,
+            "autoload_save": "", "skip_keypress": True},
 }
 
 
@@ -68,6 +69,10 @@ class Config:
     launch_grace_s: int = 60
     sample_hz: float = 1.0
     warmup_s: float = 30.0
+    # save to load straight from the command line (no main menu); "" = load by hand
+    autoload_save: str = ""
+    # set keypress_on_start off for auto-loaded runs, so nobody has to press a key
+    skip_keypress: bool = True
     source: Path | None = None
     raw: dict = field(default_factory=dict, repr=False)
 
@@ -195,6 +200,8 @@ def load(path: str | os.PathLike | None = None) -> Config:
         launch_grace_s=int(r.get("launch_grace_s", 60)),
         sample_hz=float(r.get("sample_hz", 1.0)),
         warmup_s=float(r.get("warmup_s", 30.0)),
+        autoload_save=str(r.get("autoload_save", "") or ""),
+        skip_keypress=bool(r.get("skip_keypress", True)),
         source=Path(cfg_path) if cfg_path else None,
         raw=merged,
     )

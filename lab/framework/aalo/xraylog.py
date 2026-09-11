@@ -28,6 +28,13 @@ _SIGIL_RE = re.compile(r"^(?P<sigil>[*!~#$])\s?(?P<rest>.*)$")
 _TAG_RE = re.compile(r"^\[(?P<tag>[^\]]+)\]:\s*(?P<rest>.*)$")
 _PHASE_RE = re.compile(r"phase time:\s*(?P<ms>\d+)\s*ms", re.IGNORECASE)
 _LOADTIME_RE = re.compile(r"(?:level\s+)?load(?:ing)?\s*time[^\d]*(?P<v>[\d.]+)\s*(?P<unit>ms|s|sec)?", re.IGNORECASE)
+# Engine milestones that mean the world is actually up (alife_storage_manager /
+# alife_simulator): a save finished loading, or a new game finished spawning.
+# GAMMA never prints "Loading level", so these are what the runner waits on.
+_WORLD_RE = re.compile(
+    r"\*\s*(?:Game\s+(?P<save>.+?)\s+is successfully loaded|New game is successfully created)",
+    re.IGNORECASE,
+)
 _LEVEL_RE = re.compile(r"(?:Starting|Loading)\s+level\s*\[?(?P<level>[\w\-\\/. ]+?)\]?\s*$", re.IGNORECASE)
 _ALIFE_RE = re.compile(r"\b(?:alife|a-life)\b", re.IGNORECASE)
 _NUMKV_RE = re.compile(r"(?P<key>[A-Za-z][\w \-]*?)\s*[:=]\s*(?P<val>-?\d+(?:\.\d+)?)")
@@ -65,6 +72,9 @@ class XrayLog:
     errors: list[str] = field(default_factory=list)
     stack_trace: list[str] = field(default_factory=list)
     levels: list[str] = field(default_factory=list)
+    # every "save loaded" / "new game created" milestone, in order; the save
+    # name, or "<new game>"
+    world_loads: list[str] = field(default_factory=list)
     phase_times_ms: list[int] = field(default_factory=list)
     alife: dict = field(default_factory=dict)
     crashed: bool = False
@@ -95,6 +105,7 @@ class XrayLog:
             "error_count": self.error_count,
             "warning_count": self.warning_count,
             "levels": self.levels,
+            "world_loads": self.world_loads,
             "phase_time_total_ms": sum(self.phase_times_ms) if self.phase_times_ms else None,
             "alife": self.alife,
             "build": self.build,
@@ -183,6 +194,10 @@ def parse(text: str, path=None) -> XrayLog:
         if m:
             log.phase_times_ms.append(int(m.group("ms")))
 
+        m = _WORLD_RE.search(line)
+        if m:
+            log.world_loads.append((m.group("save") or "<new game>").strip())
+
         m = _LEVEL_RE.search(entry.text)
         if m:
             level = m.group("level").strip()
@@ -190,6 +205,9 @@ def parse(text: str, path=None) -> XrayLog:
                 log.levels.append(level)
 
         m = _LOADTIME_RE.search(entry.text)
+        # "texture loading time: 0" is a texture-streaming stat, not the level load
+        if m and "texture" in entry.text.lower():
+            m = None
         if m and log.load_time_s is None:
             val = float(m.group("v"))
             unit = (m.group("unit") or "s").lower()

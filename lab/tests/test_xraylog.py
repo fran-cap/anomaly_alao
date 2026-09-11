@@ -114,3 +114,29 @@ def test_newest_log_picks_latest_mtime(tmp_path):
 
 def test_newest_log_missing_dir(tmp_path):
     assert xraylog.newest_log(tmp_path / "nope") is None
+
+
+# GAMMA never prints "Loading level [..]"; these are the engine lines it does
+# print, copied from a real GAMMA 0.9.4 session (2026-09-10).
+GAMMA_LOAD_LOG = """\
+[d:/gog_games/gamma/s.t.a.l.k.e.r. gamma/anomaly/bin/../appdata/user.ltx] successfully loaded.
+* 18677 spawn points are successfully loaded
+* New game is successfully created!
+Level name: l12_stancia_2
+* 18677 spawn points are successfully loaded
+* 22410 objects are successfully loaded
+* Game player - autosave is successfully loaded from file 'd:/gog_games/gamma/s.t.a.l.k.e.r. gamma/anomaly/bin/../appdata/savedgames/player - autosave.scop' (0.716s)
+"""
+
+
+def test_gamma_world_markers():
+    log = xraylog.parse(GAMMA_LOAD_LOG)
+    # config and spawn-registry "successfully loaded" lines are not world loads
+    assert log.world_loads == ["<new game>", "player - autosave"]
+    assert log.levels == []
+    assert log.summary()["world_loads"] == ["<new game>", "player - autosave"]
+
+
+def test_menu_only_log_has_no_world_marker():
+    log = xraylog.parse(GAMMA_LOAD_LOG.splitlines()[0] + "\n")
+    assert log.world_loads == []

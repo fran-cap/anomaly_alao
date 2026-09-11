@@ -129,6 +129,8 @@ def cmd_run(args) -> int:
     cfg = _config.get()
     if args.experiment:
         exp = _runner.load_experiment(args.experiment, cfg)
+        if args.save is not None:
+            exp.save = args.save
         if args.warmup is not None:
             exp.warmup_s = args.warmup
         if args.duration is not None:
@@ -156,6 +158,7 @@ def cmd_run(args) -> int:
         mod_toggles=toggles or None,
         notes=args.notes or "",
         profile=args.profile,
+        autoload_save=args.save,
     )
     print(f"run {run.run_id} -> {run.dir}")
     _print_json(run.metrics)
@@ -330,6 +333,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--disable", action="append", metavar="MOD")
     sp.add_argument("--experiment", help="experiment name or .toml path")
     sp.add_argument("--repeats", type=int)
+    sp.add_argument("--save", metavar="NAME",
+                    help="auto-load this save on launch (no main menu, keypress_on_start off); "
+                         "--save \"\" forces a manual load; default: aalo.toml [run] autoload_save")
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("runs", help="list runs")

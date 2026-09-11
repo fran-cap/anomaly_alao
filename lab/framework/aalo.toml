@@ -28,3 +28,8 @@ sample_hz = 1.0
 # alife.ltx has auto_switch=true: switch_distance drops from 1250 m to 450 m
 # about 10 s after load, so early frames measure the transient, not the config.
 warmup_s = 30.0
+# Save to load straight from the command line on every run, skipping the main
+# menu ("" = load by hand). Overridden by `aalo run --save` / experiment `save`.
+autoload_save = ''
+# With an auto-loaded save, set keypress_on_start off for the run (restored after).
+skip_keypress = true

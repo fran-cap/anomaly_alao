@@ -61,6 +61,29 @@ the config. It needs no elevation and no game install access beyond reading.
   duration. The value used, whether the marker was seen, how long that took and
   how many samples were trimmed are recorded in `metrics.json` under `extra`.
 
+## Unattended runs: auto-loading a save
+
+By default the game boots to the main menu and someone has to load a save by
+hand; the runner waits for the engine's "save loaded" line for the whole
+`timeout_s`, so that works but ties you to the keyboard for every launch.
+
+Pass `--save <name>` (or `save = "<name>"` in an experiment TOML, or
+`autoload_save` in `aalo.toml [run]`) and the runner launches through
+`ModOrganizer.exe run -a "-start server(<name>/single/alife/load) client(localhost)" -e "<shortcut>"`
+instead of the shortcut, so the engine loads that save straight away. It also
+sets `keypress_on_start off` for the run (snapshotted and restored like any
+other `user.ltx` change; turn off with `skip_keypress = false`). The save must
+exist in `appdata/savedgames` and its name cannot contain `( ) / "`.
+`--save ""` forces a manual load even when `aalo.toml` sets a default.
+
+```
+py -3.12 -m aalo run --slug baseline --duration 300 --save gammabaseline
+py -3.12 -m aalo run --experiment alife-stutter-mod --save gammabaseline
+```
+
+Stand the save somewhere representative and leave the character still; the
+measurement is only as repeatable as the scene.
+
 ## Where user.ltx lives
 
 The G.A.M.M.A. profile sets `LocalSettings=true`, so Mod Organizer 2 shadows

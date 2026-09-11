@@ -43,6 +43,8 @@ SAMPLES_HEADER = ["t_s", "frametime_ms", "fps"]
 # PresentMon column names differ across major versions; try each in order.
 _FRAMETIME_COLUMNS = ("msbetweenpresents", "frametime", "mspresenttime", "msinpresentapi")
 _TIME_COLUMNS = ("timeinseconds", "cpustarttime", "time")
+# PresentMon 2.x writes milliseconds instead (TimeInMs, CPUStartTimeInMs)
+_TIME_MS_COLUMNS = ("timeinms", "cpustarttimeinms")
 
 
 @dataclass
@@ -65,6 +67,9 @@ class Sample:
 # -- PresentMon discovery ---------------------------------------------------
 
 _PRESENTMON_DIRS = [
+    # the Intel MSI ships the CLI here; PresentMonApplication\PresentMon.exe next
+    # door is the GUI and must never be picked (it ignores the CLI flags)
+    r"C:\Program Files\Intel\PresentMon\PresentMonConsoleApplication",
     r"C:\Program Files\Intel\PresentMon",
     r"C:\Program Files\PresentMon",
     r"C:\Program Files (x86)\PresentMon",
@@ -77,7 +82,11 @@ def find_presentmon(extra_dirs=None) -> Path | None:
         hit = shutil.which(name)
         if hit:
             return Path(hit)
+    # the lab root and lab/tools are checked too, so a loose PresentMon-x.y.z-x64.exe
+    # dropped next to the data folder works without touching PATH or PRESENTMON
+    lab_root = Path(__file__).resolve().parents[2]
     dirs = [Path(d) for d in (list(_PRESENTMON_DIRS) + list(extra_dirs or []))]
+    dirs += [lab_root, lab_root / "tools"]
     env = os.environ.get("PRESENTMON")
     if env and Path(env).is_file():
         return Path(env)
@@ -111,6 +120,10 @@ def parse_presentmon_csv(path) -> list[Sample]:
         lower = {name.lower().strip(): name for name in reader.fieldnames}
         ft_col = next((lower[c] for c in _FRAMETIME_COLUMNS if c in lower), None)
         t_col = next((lower[c] for c in _TIME_COLUMNS if c in lower), None)
+        t_scale = 1.0
+        if t_col is None:
+            t_col = next((lower[c] for c in _TIME_MS_COLUMNS if c in lower), None)
+            t_scale = 0.001
         t0 = None
         for i, row in enumerate(reader):
             try:
@@ -120,7 +133,7 @@ def parse_presentmon_csv(path) -> list[Sample]:
             t = None
             if t_col:
                 try:
-                    t = float(row[t_col])
+                    t = float(row[t_col]) * t_scale
                 except (TypeError, ValueError):
                     t = None
             if t is None:
@@ -212,7 +225,7 @@ class FrameSampler:
             str(out),
             "--stop_existing_session",
             "--terminate_on_proc_exit",
-            "--no_top",
+            "--no_console_stats",  # 2.x name; 1.x called it --no_top
         ]
         try:
             self._proc = subprocess.Popen(

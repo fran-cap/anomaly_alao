@@ -130,7 +130,7 @@ Use `py -3.12` on this machine (it has `luaparser` 4.2.0, `jinja2`, `pytest`, `l
 LuaJIT 2.0 and is the compile-checker / executor for rewritten Lua; import it as `lupa.luajit20`.
 
 ```bash
-py -3.12 -m pytest -q                 # unit + CLI tests: 178 passed, 4 skipped, 12 xfailed (2026-09-11)
+py -3.12 -m pytest -q                 # unit + CLI tests: 182 passed, 4 skipped, 8 xfailed (2026-09-10)
 py -3.12 -m pytest -q --corpus        # also analyzes the 66 vanilla scripts in the game install, read-only
 py -3.12 -m pytest -q -rx             # print the xfail reasons: each one names a real, unfixed ALAO bug
 py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
@@ -143,10 +143,7 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   idempotence; `test_cli.py` runs the real CLI in subprocesses. `tests/README.md` has the details.
 - **Strict xfails are the bug list.** A test marked `xfail(strict=True)` documents a confirmed
   defect; when you fix the defect the test starts passing and pytest fails until you drop the
-  marker. Never delete or loosen one to make the suite green. Known defects as of 2026-09-11:
-  - `ast_transformer.py` `_apply_edits` (~line 2272) drops an outer `table_insert_append` edit when a
-    cacheable-global rewrite sits inside the `table.insert(...)` arguments, so `--fix` is not a
-    fixpoint (8 files on GAMMA, e.g. `G.A.M.M.A. UI/.../ui_inventory.script:807`).
+  marker. Never delete or loosen one to make the suite green. Known defects as of 2026-09-10:
   - `ast_transformer.py:155` writes with `Path.write_text()` and default newline translation; LF
     files come back CRLF on Windows.
   - `ast_analyzer.py:1612` suppresses the `db.actor` index when it is an Invoke receiver, so
@@ -162,7 +159,8 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   rewritten file, does a second fix pass to catch idempotence violations, and writes
   `lab/data/corpus/<run_id>/{manifest,results}.json`. `tools/corpus_compare.py --latest` diffs two
   runs. Baseline on GAMMA (1503 enabled scripts, 577 mods): 0 parse failures, 0 compile failures,
-  analyze ~13 s, fix ~24 s, 513 files rewritten, 8 idempotence violations.
+  analyze ~13 s, fix ~24 s, 513 files rewritten, 0 idempotence violations (was 8 before
+  `_apply_edits` learned to fold contained edits into their container, 2026-09-10).
 - `lab/` (contract and schemas in `lab/CONTRACT.md`):
   - `lab/dashboard/server.py --port 8765`: stdlib HTTP dashboard over `lab/data` (Corpus tab is the
     primary view; Ideas beam; in-game Runs). Open http://127.0.0.1:8765.
@@ -172,7 +170,11 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   - `lab/framework` (`aalo` package) + `lab/tools`: in-game A/B FPS harness that launches GAMMA via
     MO2 and captures frametimes (PresentMon if installed, psutil fallback). Needs an elevated
     terminal; see `lab/framework/README.md`. Use it to prove a rewrite helps in-game, not for
-    settings hunting.
+    settings hunting. PresentMon 2.5.1 CLI is installed (Intel MSI, `PresentMonConsoleApplication`).
+    `aalo run --save gammabaseline` auto-loads that save via `-start server(...)` and skips the
+    keypress screen, so runs are unattended. First real baseline (2026-09-10, run
+    `20260910-231400-gamma-baseline`, stock GAMMA, uncapped, standing still): 212 fps avg,
+    147 fps 1% low, 6.1 ms p99, per-30 s windows within 207-215. RTSS still runs with OSD on.
   - `lab/reports/`: install and corpus sanity reports.
 - Benchmark honesty: microbenchmarks must state N, warm-up, best-of-K, JIT on/off, and must call
   `collectgarbage()` before every timed run (the protocol table in `lab/docs/beam-ideas.md` section 2).

@@ -136,6 +136,7 @@ class Run:
         sampler_backend=None,
         keep_changes: bool = False,
         warmup_s: float | None = None,
+        autoload_save: str | None = None,
     ) -> dict:
         """Apply changes, launch (unless *dry_run*), measure, restore.
 
@@ -146,6 +147,20 @@ class Run:
         cfg = self.cfg
         timeout_s = float(timeout_s if timeout_s is not None else cfg.timeout_s)
         warmup_s = float(warmup_s if warmup_s is not None else cfg.warmup_s)
+        # None = use aalo.toml's autoload_save; "" = load by hand
+        save = cfg.autoload_save if autoload_save is None else autoload_save
+        game_args = None
+        if save:
+            game_args = autoload_args(save)  # raises on a name -start cannot carry
+            if not dry_run and find_save(save, cfg) is None:
+                raise FileNotFoundError(
+                    f"save {save!r} not found in {cfg.appdata / 'savedgames'}; "
+                    "the engine would fall back to the main menu and the run would stall"
+                )
+            self.manifest["autoload_save"] = save
+            if cfg.skip_keypress:
+                user_ltx_changes = dict(user_ltx_changes or {})
+                user_ltx_changes.setdefault("keypress_on_start", "off")
         snap_dir = None
         work_profile = self.profile
         self.set_status("running")
@@ -187,7 +202,7 @@ class Run:
                 self.manifest["dry_run"] = True
             else:
                 samples, duration, crashed, log, warmup = self._launch_and_sample(
-                    work_profile, timeout_s, duration_s, sampler_backend, warmup_s
+                    work_profile, timeout_s, duration_s, sampler_backend, warmup_s, game_args=game_args
                 )
 
             _metrics.write_samples_csv(self.samples_path, samples)
@@ -259,8 +274,12 @@ class Run:
             src = _xraylog.newest_log(cfg=self.cfg)
             if src is not None and src.stat().st_mtime > mtime_before:
                 try:
-                    if _xraylog.load(src).levels:
+                    parsed = _xraylog.load(src)
+                    # GAMMA never prints "Loading level"; the engine's own
+                    # "save loaded" / "new game created" line is the real signal
+                    if parsed.world_loads or parsed.levels:
                         info["level_marker_seen"] = True
+                        info["world_marker"] = (parsed.world_loads or parsed.levels)[-1]
                         break
                 except OSError:
                     pass
@@ -269,10 +288,11 @@ class Run:
         time.sleep(warmup_s)
         return info
 
-    def _launch_and_sample(self, profile, timeout_s, duration_s, sampler_backend, warmup_s: float = 0.0):
+    def _launch_and_sample(self, profile, timeout_s, duration_s, sampler_backend, warmup_s: float = 0.0,
+                           game_args: str | None = None):
         cfg = self.cfg
         m = _mo2.MO2(cfg)
-        cmd = m.command_for(profile=profile if profile != m.selected_profile else None)
+        cmd = m.command_for(profile=profile if profile != m.selected_profile else None, game_args=game_args)
         self.manifest["command"] = cmd
         self.write_manifest()
 
@@ -293,9 +313,12 @@ class Run:
 
         # Warm up before the first sample, so A-Life's auto_switch transient and
         # the shader cache are not counted against the configuration under test.
-        # Look for the level-load marker only for as long as the launch grace;
-        # if the log never shows one, the warm-up runs from launch instead.
-        warmup = self._wait_for_warmup(warmup_s, mtime_before, deadline_s=float(cfg.launch_grace_s))
+        # Nothing auto-loads a save: the game boots to the main menu and the
+        # player loads one by hand, which easily takes minutes on GAMMA. So wait
+        # for the world marker for the whole run timeout, not just the launch
+        # grace (60 s would start sampling the main menu). If it never shows,
+        # the warm-up runs from the deadline instead.
+        warmup = self._wait_for_warmup(warmup_s, mtime_before, deadline_s=float(timeout_s))
         self.manifest["warmup"] = warmup
         self.write_manifest()
 
@@ -381,6 +404,7 @@ class Experiment:
     warmup_s: float | None = None
     notes: str = ""
     profile: str | None = None
+    save: str | None = None  # auto-load this save every run (None = aalo.toml default)
     arms: dict = field(default_factory=dict)  # {"baseline": {...}, "variant": {...}}
     path: Path | None = None
 
@@ -410,6 +434,7 @@ class Experiment:
             warmup_s=data.get("warmup_s"),
             notes=data.get("notes", ""),
             profile=data.get("profile"),
+            save=data.get("save"),
             arms=arms,
             path=Path(path) if path else None,
         )
@@ -441,7 +466,7 @@ def load_experiment(path, cfg=None) -> Experiment:
 
 def run_once(cfg=None, idea_id=None, slug="run", dry_run=False, duration_s=None, timeout_s=None,
              user_ltx_changes=None, mod_toggles=None, notes="", profile=None, sampler_backend=None,
-             warmup_s=None, config_diff=None) -> Run:
+             warmup_s=None, config_diff=None, autoload_save=None) -> Run:
     """Create and execute a single run."""
     cfg = cfg or _config.get()
     run = Run.create(cfg=cfg, idea_id=idea_id, slug=slug, profile=profile, notes=notes, config_diff=config_diff)
@@ -453,6 +478,7 @@ def run_once(cfg=None, idea_id=None, slug="run", dry_run=False, duration_s=None,
         user_ltx_changes=user_ltx_changes,
         mod_toggles=mod_toggles,
         sampler_backend=sampler_backend,
+        autoload_save=autoload_save,
     )
     return run
 
@@ -486,9 +512,42 @@ def run_experiment(experiment: Experiment, cfg=None, dry_run: bool = False, repe
             warmup_s=experiment.warmup_s,
             user_ltx_changes=spec.get("user_ltx"),
             mod_toggles=spec.get("mods"),
+            autoload_save=experiment.save,
         )
         runs.append(run)
     return runs
+
+
+def autoload_args(save: str) -> str:
+    """Engine command line that loads *save* straight away, skipping the menu.
+
+    X-Ray parses ``-start server(<save>/single/alife/load) client(localhost)``;
+    the save name sits inside ``(...)`` and ``/`` separates the fields, so
+    names containing those characters cannot be expressed.
+    """
+    save = (save or "").strip()
+    if save.lower().endswith(".scop"):
+        save = save[:-5]
+    bad = set('()/"') & set(save)
+    if not save or bad:
+        raise ValueError(f"save name {save!r} cannot be auto-loaded (empty or contains {''.join(sorted(bad))})")
+    return f"-start server({save}/single/alife/load) client(localhost)"
+
+
+def find_save(save: str, cfg=None) -> Path | None:
+    """The ``.scop`` for *save*, from appdata or the MO2 profile's local saves."""
+    cfg = cfg or _config.get()
+    name = save[:-5] if save.lower().endswith(".scop") else save
+    dirs = [cfg.appdata / "savedgames"]
+    try:
+        dirs.append(cfg.mo2_root / "profiles" / cfg.profile / "saves")
+    except Exception:
+        pass
+    for d in dirs:
+        p = d / f"{name}.scop"
+        if p.is_file():
+            return p
+    return None
 
 
 def _trim_warmup(samples, warmup_s: float):

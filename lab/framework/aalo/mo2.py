@@ -315,23 +315,40 @@ class MO2:
         title = shortcut or self.cfg.shortcut
         return [str(self.cfg.mo2_exe), f"moshortcut://:{title}"]
 
-    def launch_command_run(self, exe=None, profile: str | None = None) -> list[str]:
-        """``ModOrganizer.exe run <exe> -p <profile>`` - used to force a profile.
+    def launch_command_run(self, exe=None, profile: str | None = None, game_args: str | None = None,
+                           executable: str | None = None) -> list[str]:
+        """``ModOrganizer.exe [-p <profile>] run [-a <args>] (-e <title> | <exe>)``.
 
-        MO2 2.5 accepts ``run`` with ``-p``; the shortcut form always uses the
-        profile currently selected in ModOrganizer.ini, so any experiment that
-        varies the profile must use this form.
+        Used whenever the shortcut form cannot express the launch: a profile
+        other than the selected one, or extra arguments for the game. ``-p`` is
+        a global MO2 option and goes *before* ``run``; ``-a`` and ``-e`` belong
+        to ``run``. With *executable* set, ``-e`` runs that configured MO2
+        executable by title, so its working directory is inherited (the engine
+        resolves gamedata from it); otherwise *exe* (default: the game binary)
+        is run directly.
         """
-        binary = str(exe or self.cfg.game_exe)
-        cmd = [str(self.cfg.mo2_exe), "run", binary]
+        cmd = [str(self.cfg.mo2_exe)]
         if profile:
             cmd += ["-p", profile]
+        cmd.append("run")
+        if game_args:
+            cmd += ["-a", game_args]
+        if executable:
+            cmd += ["-e", executable]
+        else:
+            cmd.append(str(exe or self.cfg.game_exe))
         return cmd
 
-    def command_for(self, profile: str | None = None, shortcut: str | None = None) -> list[str]:
-        """Pick the launch form that can honour *profile*."""
-        if profile and profile != self.selected_profile:
-            return self.launch_command_run(profile=profile)
+    def command_for(self, profile: str | None = None, shortcut: str | None = None,
+                    game_args: str | None = None) -> list[str]:
+        """Pick the launch form that can honour *profile* and *game_args*."""
+        other_profile = bool(profile and profile != self.selected_profile)
+        if other_profile or game_args:
+            return self.launch_command_run(
+                profile=profile if other_profile else None,
+                game_args=game_args,
+                executable=shortcut or self.cfg.shortcut,
+            )
         return self.launch_command(shortcut)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
