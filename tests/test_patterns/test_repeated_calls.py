@@ -201,3 +201,60 @@ end
 )
 def test_db_actor_as_method_receiver_should_be_cached(analyze):
     assert "repeated_db_actor" in pattern_names(analyze(DB_ACTOR_METHOD_CALLS))
+
+
+# --- I-038: --fix must not create new findings ----------------------------
+
+ALIFE_WITH_ARGS = """
+function f()
+    alife(l08_yantar):create("snork", 1, 2, 3)
+    alife(l10_red_forest):create("burer", 4, 5, 6)
+    alife(k00_marsh):create("informer", 7, 8, 9)
+    alife(l08_yantar):create("controller", 10, 11, 12)
+end
+"""
+
+ALIFE_CHAIN_WE_DO_NOT_WARN_ABOUT = """
+function f()
+    alife():create("snork", 1, 2, 3)
+    alife():create("burer", 4, 5, 6)
+    alife():create("informer", 7, 8, 9)
+    alife():create("controller", 10, 11, 12)
+end
+"""
+
+ALIFE_CHAIN_WE_DO_WARN_ABOUT = """
+function f(id)
+    local a = alife():object(id)
+    local b = alife():actor()
+    local c = alife():story_object(id)
+    local d = alife():object(id + 1)
+    return a, b, c, d
+end
+"""
+
+
+def test_calls_with_arguments_are_not_coalesced_into_one_cache(analyze):
+    """`alife(a)` and `alife(b)` are different calls; caching one drops the arg.
+
+    Real site: operacia_monolith.script, where --fix turned
+    `alife(l08_yantar):create(...)` into `sim:create(...)` off a single
+    `local sim = alife()`.
+    """
+    assert "repeated_alife" not in pattern_names(analyze(ALIFE_WITH_ARGS))
+
+
+def test_nil_returning_call_is_not_cached_when_the_chain_is_unwarned(analyze):
+    """Caching `alife()` here would invent potential_nil_access findings.
+
+    `alife():object(id)` is in NIL_RETURNING_FUNCTIONS and flagged either way,
+    but `alife():create(...)` is not - so only the rewritten
+    `local sim = alife(); sim:create(...)` gets flagged and --fix ends up
+    creating work for itself.
+    """
+    assert "repeated_alife" not in pattern_names(analyze(ALIFE_CHAIN_WE_DO_NOT_WARN_ABOUT))
+
+
+def test_a_nil_returning_call_we_already_warn_about_is_still_cached(analyze):
+    """The guard above must not kill the ordinary alife() caching case."""
+    assert "repeated_alife" in pattern_names(analyze(ALIFE_CHAIN_WE_DO_WARN_ABOUT))

@@ -170,3 +170,46 @@ def test_unparenthesized_not_eq_is_not_flagged(analyze):
     assert "redundant_not_eq" not in pattern_names(
         analyze(REDUNDANT_NOT_EQ_UNPARENTHESIZED)
     )
+
+
+# --- I-038: the fix must not orphan the alias it rewrote away -------------
+
+ALIAS_ONLY_USE = """
+local tinsert = table.insert
+
+function f(t, v)
+    tinsert(t, v)
+    return t
+end
+"""
+
+ALIAS_WITH_ANOTHER_USE = """
+local tinsert = table.insert
+
+function f(t, v)
+    tinsert(t, v)
+    tinsert(t, 1, v)
+    return t
+end
+"""
+
+
+def test_rewriting_the_last_alias_use_is_declined(analyze):
+    """`local tinsert = table.insert` + its only call site.
+
+    Rewriting `tinsert(t, v)` to `t[#t+1] = v` leaves the alias dead, and the
+    next analyze pass reports a brand new unused_local_variable that --fix
+    invented. Six of those on GAMMA; decline the rewrite instead.
+    """
+    findings = analyze(ALIAS_ONLY_USE)
+    assert "table_insert_append" not in pattern_names(findings)
+    assert "unused_local_variable" not in pattern_names(findings)
+
+
+def test_an_alias_that_survives_the_rewrite_is_still_fixed(analyze):
+    """The 3-arg call keeps the alias alive, so the 2-arg one is fair game."""
+    assert "table_insert_append" in pattern_names(analyze(ALIAS_WITH_ANOTHER_USE))
+
+
+def test_a_plain_table_insert_is_unaffected_by_the_alias_guard(analyze):
+    assert "table_insert_append" in pattern_names(analyze(TABLE_INSERT))
