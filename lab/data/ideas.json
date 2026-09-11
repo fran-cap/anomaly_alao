@@ -621,14 +621,14 @@
       "category": "analyzer",
       "generation": 2,
       "parent": "I-013",
-      "status": "proposed",
+      "status": "queued",
       "score": 8.5,
       "risk": "low",
       "expected_gain": "high",
       "hypothesis": "The hot live vanilla code is not in update bodies but in what they call (xr_logic.pick_section_from_condlist 21 abort sites, try_switch_to_another_section 7, determine_section_to_activate 5, trade_manager.update 5, axr_main.make_callback), so every mode-gated decision is gated on the wrong function set.",
       "change": "ast_analyzer.py - after _analyze_trace_aborts(), propagate per-frame status one hop along same-file and module.func call edges, re-run the classifier over the closure. Report-only first, as I-013 shipped.",
       "measure": "Count of interpreted functions entering the per-frame set; whether I-040 / I-021 site counts rise inside it.",
-      "notes": "Proposed by agent-I041 (vanilla census, lab/reports/vanilla-per-frame-census.md, commit 759956b). Independently required by I-005 (agent-I005): the intra-procedural classifier cannot gate rewrites. Top of the gen-3 queue. Also: ENGINE_NYI_METHODS lacks section_name and profile_name, so bodies using them classify as compiled (agent-I021); one-line fix to do alongside."
+      "notes": "Proposed by agent-I041 (vanilla census, lab/reports/vanilla-per-frame-census.md, commit 759956b). Independently required by I-005 (agent-I005): the intra-procedural classifier cannot gate rewrites. Top of the gen-3 queue. Also: ENGINE_NYI_METHODS lacks section_name and profile_name, so bodies using them classify as compiled (agent-I021); one-line fix to do alongside. Gen-3 scope: run the census on GAMMA mods as well as vanilla."
     },
     {
       "id": "I-043",
@@ -636,14 +636,14 @@
       "category": "transform",
       "generation": 2,
       "parent": "I-041",
-      "status": "proposed",
+      "status": "queued",
       "score": 8.0,
       "risk": "med",
       "expected_gain": "high",
       "hypothesis": "make_callback does a pairs walk plus a type() test per listener for every SendScriptCallback, i.e. per online NPC per frame via npc_on_update; likely the highest-frequency Lua function in the game, and it aborts its trace on pairs.",
       "change": "Maintain a parallel listener array next to the keyed table and dispatch with a numeric for. Keys are functions/userdata, so I-005 cannot derive it; own pattern or a measured hand patch.",
       "measure": "Microbench the dispatcher at 5/20/60 listeners interpreted and compiled, then an FPS delta arm (it is in the standing-still frame chain).",
-      "notes": "Proposed by agent-I041. agent-I005: make_callback goes through spairs, which does pairs + table.sort + a closure per dispatch; not matchable by any table-driven pattern."
+      "notes": "Proposed by agent-I041. agent-I005: make_callback goes through spairs, which does pairs + table.sort + a closure per dispatch; not matchable by any table-driven pattern. Gen-3 scope: microbench the spairs dispatcher at 5/20/60 listeners first; measure any hand patch with I-048, fps only as fallback."
     },
     {
       "id": "I-044",
@@ -651,14 +651,14 @@
       "category": "experiment",
       "generation": 2,
       "parent": "I-041",
-      "status": "proposed",
+      "status": "queued",
       "score": 7.0,
       "risk": "low",
       "expected_gain": "med",
       "hypothesis": "34 debug_statement findings sit inside the 103 live vanilla per-frame bodies (mod-side count unknown, likely larger), each a call plus concatenation and sometimes game.translate_string; plain --fix leaves them.",
       "change": "No code. Build overlays from a --fix --fix-debug run on both corpora and queue a delta vs the full-ALAO baseline.",
       "measure": "FPS delta with 5 repeats; the 1% low must move with the avg.",
-      "notes": "Proposed by agent-I041; cheapest untested lever in the census."
+      "notes": "Proposed by agent-I041; cheapest untested lever in the census. Gen-3 scope: count debug_statement sites in live per-frame bodies on GAMMA mods first; queue the delta only if the arithmetic clears 1% of frame time."
     },
     {
       "id": "I-045",
@@ -681,14 +681,29 @@
       "category": "safety",
       "generation": 2,
       "parent": "I-017",
-      "status": "proposed",
+      "status": "queued",
       "score": 8.5,
       "risk": "low",
       "expected_gain": "high",
       "hypothesis": "All three gen-2 silent-rewrite bugs compiled and were idempotent; the tasks_fetch.script capture (inserted local actor = db.actor shadowing a parameter named actor in a nested closure) would also pass a differential run because the two values coincide under any stub. A scope-aware assertion catches this class directly.",
       "change": "tools/corpus_run.py (and a pytest guard): for every zero-width insertion edit the transformer emits, resolve the function it lands in and assert the introduced name is not a local, parameter or upvalue of any ancestor scope, nor read later in the same scope tree from an outer binding. Prototype exists as scratchpad/agent-I021/capture4.py.",
       "measure": "Zero violations on both corpora at the merged head; must flag the 18756a9 repro and the tasks_fetch site when run against bae4b0c.",
-      "notes": "Proposed by agent-I021 after its own zero-capture scans proved to be artifacts. Cheaper and narrower than I-017; do both. Prototype merged as lab/tools/i021_capture_scan.py (sys.path fixed to the repo root); at the merged head on both integration fix trees: 788 originals, 1203 inserted declarations, 0 captures. Remaining work: make it a corpus_run.py gate and a pytest guard."
+      "notes": "Proposed by agent-I021 after its own zero-capture scans proved to be artifacts. Cheaper and narrower than I-017; do both. Prototype merged as lab/tools/i021_capture_scan.py (sys.path fixed to the repo root); at the merged head on both integration fix trees: 788 originals, 1203 inserted declarations, 0 captures. Remaining work: make it a corpus_run.py gate and a pytest guard. Gen-3 scope: G9 in corpus_run.py plus a pytest guard on the two repros; extend from cache declarations to every insertion ALAO makes."
+    },
+    {
+      "id": "I-048",
+      "title": "Script-side profiler harness: measure Lua ms per callback in-game with profile_timer",
+      "category": "lab",
+      "generation": 3,
+      "parent": "I-010",
+      "status": "queued",
+      "score": 9.0,
+      "risk": "med",
+      "expected_gain": "high",
+      "hypothesis": "FPS resolves the whole frame (+-2% noise, 203-222 fps spread on identical arms) while every ALAO rewrite changes only the script slice, so all per-frame deltas read null. The engine exposes profile_timer (lua_help.script:1200, start/stop/time) to Lua, so script time per callback can be measured directly, at far higher sensitivity.",
+      "change": "lab/framework: an overlay mod that wraps axr_main.make_callback dispatch (and the actor / NPC update binders) with profile_timer, accumulates per-callback-name totals per frame, and dumps them to the log or a file every N seconds; a parser that turns the dump into per-callback ms/frame with run-to-run spread; fps_runner support for a profiler arm.",
+      "measure": "On the standing-still save: run-to-run spread of total script ms/frame (<5% is the target), and per-callback ranking. Then re-measure the I-021 and I-040 overlays in script-ms to see whether the 0.01%-of-frame prediction holds.",
+      "notes": "Registered 2026-09-11 for gen-3 by the organizer. Deciding question: is script-ms per frame stable enough to be an instrument? If yes, I-043 and I-044 are measured with it, not with fps."
     }
   ]
 }
