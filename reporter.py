@@ -32,12 +32,18 @@ PERFORMANCE_IMPACT = {
 
     # HIGH - moderate to high impact in tight loops
     'distance_to_comparison': 'high',
-    'table_insert_append': 'high',
     'math_pow_simple': 'high',
     'string_format_in_loop': 'high',
+    # I-013: a per-frame body that cannot be JIT-compiled pays the
+    # interpreter's price on every construct inside it, every frame
+    'jit_mode': 'high',
 
     # MEDIUM - low to moderate impact
     'uncached_globals_summary': 'medium',
+    # I-002/I-013, corrected by measurement: table.insert(t, v) compiles
+    # cleanly on a LuaJIT 2.0 trace, so this rewrite is ~1.00x there and
+    # 1.2-1.5x interpreted. It was rated 'high' on no evidence.
+    'table_insert_append': 'medium',
     'math_pow_dotted': 'medium',
     'pairs_on_array': 'medium',
     'debug_statement': 'medium',

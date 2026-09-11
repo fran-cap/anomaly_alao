@@ -90,7 +90,7 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 
 | Pattern | Replacement | Impact |
 |---------|-------------|--------|
-| `table.insert(t, v)` | `t[#t+1] = v` | High - avoids function call overhead |
+| `table.insert(t, v)` | `t[#t+1] = v` | Medium - ~1.00x on a JIT-compiled trace, 1.2-1.5x interpreted |
 | `table.getn(t)` | `#t` | Low - deprecated function |
 | `string.len(s)` | `#s` | Low - unnecessary function call |
 | `math.pow(x, 2)` | `x*x` | High - single MUL opcode |
@@ -122,7 +122,8 @@ Pay attention some of this fixes requires `--experimental` flag.
 | Pattern | Description |
 |---------|-------------|
 | Global variable writes | Writing to global scope (potential pollution) |
-| Per-frame callback warnings | Performance issues in `actor_on_update`, etc. |
+| Per-frame callback warnings | Performance issues in `actor_on_update`, `CFoo:update`, etc. |
+| `jit_mode` | A per-frame body LuaJIT 2.0 cannot compile into a trace, with the constructs that abort it (`..`, `pairs`, `string.format`, engine calls, closures). See `lab/reports/luajit20-nyi.md` |
 | `vector()` in hot loop | Allocates new vector each iteration | Critical |
 | Constant conditions | `if true then` / `if false then` |
 | Unnecessary else | `if x then return end else ...` |
