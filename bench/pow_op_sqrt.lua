@@ -1,7 +1,7 @@
--- @pattern pow_op_half_to_sqrt
--- @title x^0.5 -> math.sqrt(x) (the residual miss ALAO leaves behind)
--- @status proposed
--- @doc 1.00 4.12
+-- @pattern pow_op_sqrt
+-- @title x^0.5 -> math.sqrt(x)
+-- @status shipped
+-- @doc 1.00 2.96
 -- @setup
 local acc = 0
 -- @original

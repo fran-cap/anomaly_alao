@@ -25,7 +25,16 @@ It also prevents unnecessary memory allocations, further reducing GC pressure.
 
 Another example ALAO handles is the usage of `math.pow(v, 2)`.  
 We can replace the function call with a single MUL bytecode instruction `v*v`.   
-The same pattern applies to `math.pow(v, 3)` and `math.pow(v, 0.5)`.
+The same pattern applies to `math.pow(v, 3)`. A square root is different: both
+`math.pow(v, 0.5)` and `v ^ 0.5` go through the same C `pow()` in the LuaJIT
+interpreter, so ALAO rewrites both to `math.sqrt(v)`, which is about 3x faster
+there. On a JIT-compiled trace LuaJIT already folds the constant `0.5` exponent
+into a hardware sqrt, so the rewrite costs nothing and, incidentally, makes the
+interpreted result agree bit-for-bit with the compiled one (`pow(x,0.5)` in the
+interpreter is 1 ULP off `sqrt(x)` on a few percent of inputs). ALAO declines the
+rewrite when the base is written as a negative number, the one case where the two
+really differ: `(-0)^0.5` is `0` but `math.sqrt(-0)` is `-0`, and `(-1/0)^0.5` is
+`inf` but `math.sqrt(-1/0)` is `nan`.
 
 
 ## Quick Start
@@ -96,7 +105,8 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 | `string.len(s)` | `#s` | Low - unnecessary function call |
 | `math.pow(x, 2)` | `x*x` | High - single MUL opcode |
 | `math.pow(x, 3)` | `x*x*x` | High - MUL opcodes |
-| `math.pow(x, 0.5)` | `x^0.5` | Medium - native operator |
+| `math.pow(x, 0.5)` | `math.sqrt(x)` | High - 3.1x interpreted, 1.00x compiled (I-012) |
+| `x ^ 0.5` | `math.sqrt(x)` | High - 3.0x interpreted, 1.00x compiled (I-012) |
 | `pos:distance_to(t) < N` | `pos:distance_to_sqr(t) < N*N` | High - avoids sqrt |
 | Uncached globals (4+ calls) | `local mfloor = math.floor` | Medium - reduces lookups |
 | Repeated `db.actor` | `local actor = db.actor` | High - cached reference |

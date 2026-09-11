@@ -2716,13 +2716,22 @@ class ASTAnalyzer:
                     full_match = f'math.pow({base}, {exp})'
 
                     if exp == 0.5:
+                        # I-012: target math.sqrt, not x^0.5. Both `math.pow(x,0.5)`
+                        # and `x^0.5` go through the same C pow() in the interpreter
+                        # (~3x slower than sqrt); the JIT already folds them to a
+                        # hardware sqrt, which is why the compiled ratio is 1.00x and
+                        # why the rewritten value is the one a hot trace computes
+                        # today. See _analyze_pow_operator for the equivalence notes.
+                        if self._negative_base(call.args[0]):
+                            continue
                         self.findings.append(Finding(
                             pattern_name='math_pow_simple',
                             severity='GREEN',
                             line_num=call.line,
-                            message=f'{full_match} -> {base}^0.5',
+                            message=f'{full_match} -> math.sqrt({base})',
                             details={
                                 'base': base,
+                                'base_node': call.args[0],
                                 'exponent': exp,
                                 'type': 'sqrt',
                                 'is_simple': True,
@@ -2752,6 +2761,20 @@ class ASTAnalyzer:
     def _is_simple_expr(self, node: Node) -> bool:
         """Check if node is a simple expression (safe to repeat)."""
         return isinstance(node, (Name, Number))
+
+    @staticmethod
+    def _negative_base(node: Node) -> bool:
+        """True if the node is *syntactically* a negative number.
+
+        The only inputs where `math.sqrt(x)` and `x^0.5` genuinely disagree are
+        negative ones: `(-0)^0.5` is `0` while `math.sqrt(-0)` is `-0`, and
+        `(-1/0)^0.5` is `inf` while `math.sqrt(-1/0)` is `nan`. Finite negatives
+        give nan either way. We can't prove the sign of a variable, but when the
+        source literally writes a negative we can just decline the rewrite.
+        """
+        if isinstance(node, UMinusOp):
+            return True
+        return isinstance(node, Number) and getattr(node, 'n', 0) < 0
 
     def _analyze_string_literal_concat(self):
         """Find `"a" .. "b" .. "c"` chains where every leaf is a String literal.
@@ -2932,6 +2955,9 @@ class ASTAnalyzer:
             if not isinstance(right, Number):
                 continue
             exp = right.n
+            if exp == 0.5:
+                self._emit_pow_op_sqrt(node)
+                continue
             if exp not in (2, 3) or not self._is_simple_expr(node.left):
                 continue
             base = self._node_to_string(node.left)
@@ -2951,7 +2977,44 @@ class ASTAnalyzer:
                 },
                 source_line=self._get_source_line(self._get_line(node)),
             ))
-    
+
+    def _emit_pow_op_sqrt(self, node):
+        """`x ^ 0.5` -> `math.sqrt(x)` (I-012).
+
+        Measured on the bundled LuaJIT 2.0 (bench/pow_op_half_to_sqrt.lua):
+        2.96x interpreted at N=2000, 1.50x at N=3, 1.00x compiled - it never
+        loses in either mode at any loop length.
+
+        On equivalence: interpreted, `x^0.5` calls C pow() and lands 1 ULP off
+        `math.sqrt(x)` on ~4% of random doubles; *compiled*, LuaJIT folds the
+        constant 0.5 exponent into a hardware sqrt and returns math.sqrt's bits
+        exactly. So the game already computes both answers today depending on
+        whether the enclosing trace got hot, and this rewrite makes the
+        interpreter agree with the JIT (and with the correctly-rounded value).
+        The only real divergences are negative bases, which _negative_base
+        declines when they are written literally.
+
+        Unlike `x^2 -> x*x` the base is evaluated exactly once, so it does not
+        have to be a simple expression.
+        """
+        if self._negative_base(node.left):
+            return
+        base = self._node_to_string(node.left)
+        full_match = f'{base}^0.5'
+        self.findings.append(Finding(
+            pattern_name='pow_op_sqrt',
+            severity='GREEN',
+            line_num=self._get_line(node),
+            message=f'{full_match} -> math.sqrt({base})',
+            details={
+                'base': base,
+                'base_node': node.left,
+                'full_match': full_match,
+                'node': node,
+            },
+            source_line=self._get_source_line(self._get_line(node)),
+        ))
+
     def _count_calls_branch_aware(self, calls: List) -> int:
         """Maximum number of calls executable on any single control-flow path.
 

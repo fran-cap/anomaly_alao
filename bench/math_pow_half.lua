@@ -1,6 +1,6 @@
 -- @pattern math_pow_half
--- @title math.pow(x,0.5) -> x^0.5 (what ALAO does today)
--- @status shipped
+-- @title math.pow(x,0.5) -> x^0.5 (superseded by I-012; kept for the comparison)
+-- @status proposed
 -- @doc 1.00 1.05
 -- @notes compare against math_pow_half_to_sqrt: same source, far better target
 -- @setup
