@@ -13,6 +13,7 @@ from luaparser.astnodes import (
     Index, Name, String, Number, Nil, TrueExpr, FalseExpr,
     Table, Field,
     Concat, AddOp, SubOp, MultOp, FloatDivOp, ModOp, ExpoOp,
+    AriOp, RelOp, BitOp,
     Return, Break,
     UMinusOp, UBNotOp, ULNotOp, ULengthOP,
     AndLoOp, OrLoOp,
@@ -277,6 +278,12 @@ ENGINE_NYI_METHODS = frozenset({
 
 # Abort codes 6 (LINNER, inner loop in root trace) and 7 (LUNROLL) are trace
 # shaping, not NYI, and are deliberately absent from all of the above.
+
+# I-001: below this many iterations the hoisted counter is not worth it - the
+# `#t` boundary search is O(log n), so at 5 iterations the rewrite measures
+# 1.06x (G2 wants 1.15x) and only clears the bar from ~20 on. Only applied when
+# the trip count is a literal we can read; anything dynamic is assumed long.
+APPEND_LOOP_MIN_ITERATIONS = 20
 
 # Functions/properties that can return nil - calling methods on these without
 # nil checks can cause CTD (crash to desktop)
@@ -2151,6 +2158,7 @@ class ASTAnalyzer:
         """Analyze collected data and generate findings."""
         # must run first: later passes read self.jit_modes
         self._analyze_trace_aborts()
+        self._analyze_append_loop()
         self._analyze_table_insert()
         self._analyze_deprecated_funcs()
         self._analyze_math_pow()
@@ -2308,6 +2316,9 @@ class ASTAnalyzer:
         orphaned = self._aliases_that_would_be_orphaned(candidates)
 
         for call in candidates:
+            # the counter rewrite (I-001) already owns this call
+            if id(call.node) in getattr(self, 'append_loop_claimed', ()):
+                continue
             if call.alias_name:
                 info = self._find_local_var_info(call.scope, call.alias_name)
                 if info is not None and id(info) in orphaned:
@@ -2334,6 +2345,284 @@ class ASTAnalyzer:
                 },
                 source_line=self._get_source_line(call.line),
             ))
+
+    # I-001: counter-based append. Anchor node types and the small allow-list of
+    # expressions that can never evaluate to nil in Lua 5.1 (they either produce
+    # a value or raise). Anything outside this list might be nil, and appending
+    # nil is exactly what makes a hoisted counter diverge from `#t+1`.
+    _APPEND_LOOP_NODES = (Fornum, Forin, While, Repeat)
+    _NEVER_NIL_NODES = (
+        Number, String, Table, TrueExpr, FalseExpr, AnonymousFunction,
+        Concat, AriOp, RelOp, BitOp, ULengthOP, UMinusOp, UBNotOp, ULNotOp,
+    )
+
+    def _analyze_append_loop(self):
+        """Find append-only local tables in loops that can use a hoisted counter.
+
+        `t[#t+1] = v` re-runs the array-boundary search on every single append.
+        A counter doesn't: ~13x faster with the JIT on, ~3x interpreted. That's
+        the biggest single win on the board - but only if nothing else can touch
+        the table while the loop runs, because a stale count silently corrupts
+        it and nobody notices for hours.
+
+        So the proof here is deliberately paranoid. The table has to be a local
+        declared with a table constructor in the *same block* as the loop, every
+        single mention of it from the declaration to the end of the loop has to
+        be an append, and nothing may rebind or capture the name. One occurrence
+        we can't explain and the whole candidate is dropped.
+        """
+        self.append_loop_claimed = set()
+        tree = getattr(self, '_ast_tree', None)
+        if tree is None:
+            return
+
+        # `local table_insert = table.insert` is everywhere in mod code, and
+        # ALAO's own table_insert_append rewrites those into `t[#t+1] = v`.
+        # If we didn't resolve the alias here, pass 1 would produce our shape
+        # and pass 2 would rewrite it - i.e. --fix would stop being a fixpoint.
+        self._table_insert_call_ids = {
+            id(c.node) for c in self.calls
+            if c.full_name == 'table.insert' and len(c.args) == 2
+        }
+
+        for stmts in self._iter_stmt_lists(tree):
+            for i, stmt in enumerate(stmts):
+                if not isinstance(stmt, self._APPEND_LOOP_NODES):
+                    continue
+                self._append_loop_for(stmts, i, stmt)
+
+    def _iter_stmt_lists(self, tree):
+        """Yield every statement list in the file (i.e. every Block body)."""
+        for node in ast.walk(tree):
+            if isinstance(node, Block) and isinstance(node.body, list):
+                yield node.body
+
+    def _append_loop_for(self, stmts, loop_index, loop):
+        """Try to prove a counter rewrite for every table declared before `loop`."""
+        # candidate tables: `local t = {...}` earlier in this same block. A later
+        # re-declaration of the same name kills the candidate - we'd have no idea
+        # which binding the loop body is talking about
+        decls = {}
+        for j in range(loop_index):
+            s = stmts[j]
+            if not isinstance(s, LocalAssign):
+                continue
+            for t in (s.targets or []):
+                if isinstance(t, Name):
+                    decls.pop(t.id, None)
+            if (len(s.targets or []) == 1 and len(s.values or []) == 1
+                    and isinstance(s.targets[0], Name)
+                    and isinstance(s.values[0], Table)):
+                ctor = s.values[0]
+                # a keyed field ({[2]=x} or {a=1}) or any hole means #t is not a
+                # reliable starting point, so we can't seed the counter
+                if all(f.key is None for f in (ctor.fields or [])):
+                    decls[s.targets[0].id] = (j, len(ctor.fields or []) == 0)
+
+        if not decls:
+            return
+
+        # `#t` is an O(log n) boundary search, so the counter only pays off once
+        # the table gets long: measured 1.06x at 5 iterations (below G2's 1.15x
+        # bar) but 1.6x at 20, 3.7x at 100 and ~10x at 2000. If the loop bound
+        # is a literal we can read, and it's short, there is nothing to win and
+        # we leave the code alone. Everything else (for-in, dynamic bounds,
+        # while/repeat) could run long, so it stays in.
+        if self._literal_trip_count_below(loop, APPEND_LOOP_MIN_ITERATIONS):
+            return
+
+        # the loop header is evaluated outside the body; if it reads the table
+        # (e.g. `while #t < 10 do`) the count is load-bearing and we bail
+        header = [getattr(loop, a, None) for a in ('start', 'stop', 'step', 'test', 'iter')]
+
+        for name, (decl_index, empty_ctor) in decls.items():
+            sites = []
+            if not self._scan_node(header, name, sites, False) or sites:
+                continue
+            # statements between the declaration and the loop may only append
+            pre_sites = []
+            if not self._scan_stmts(stmts[decl_index + 1:loop_index], name, pre_sites, False):
+                continue
+            # ...and then the loop itself
+            loop_sites = []
+            if not self._scan_stmts([loop], name, loop_sites, False):
+                continue
+            if not loop_sites:
+                continue
+
+            # GREEN needs every appended value to be provably non-nil. Append a
+            # nil and `#t` stops growing while a counter marches on, so the two
+            # forms genuinely diverge - see the nil case in the tests
+            all_non_nil = all(isinstance(v, self._NEVER_NIL_NODES) for _, _, v in loop_sites)
+            severity = 'GREEN' if all_non_nil else 'YELLOW'
+
+            seed = '0' if (empty_ctor and not pre_sites) else '#%s' % name
+
+            # Only a GREEN finding gets to claim the call away from
+            # table_insert_append, because GREEN is what plain --fix applies.
+            # Claiming a YELLOW site would suppress the table_insert_append
+            # rewrite that --fix *would* have done and leave the call untouched.
+            # Under --fix-yellow the transformer does the same suppression for
+            # the YELLOW ones, where the counter rewrite really does happen.
+            #
+            # MERGE CONTRACT with agent-I004's I-038 guard (branch agent-I004,
+            # commits f42c0ec + 86e938d). Their _aliases_that_would_be_orphaned
+            # declines to rewrite the last surviving use of a
+            # `local tinsert = table.insert` alias, so the fix doesn't invent an
+            # unused_local_variable. It only looks at table_insert_append's
+            # candidates, and this pattern claims calls away from that list, so
+            # whoever merges the two branches must feed our claimed calls into
+            # the same check. I-004 measured the damage without it: exactly one
+            # site, demonized_ledge_grabbing.script:919 `tinsert`, whose only
+            # use is inside a loop we claim.
+            if severity == 'GREEN':
+                for kind, node, value in loop_sites:
+                    if kind == 'insert':
+                        self.append_loop_claimed.add(id(node))
+
+            self.findings.append(Finding(
+                pattern_name='append_loop_counter',
+                severity=severity,
+                line_num=self._get_line(loop),
+                message=('Append-only table %s in loop: hoist a counter '
+                         '(local n = %s; n = n + 1; %s[n] = v)' % (name, seed, name)),
+                details={
+                    'table': name,
+                    'seed': seed,
+                    'loop_node': loop,
+                    'sites': loop_sites,
+                    'site_count': len(loop_sites),
+                    'all_non_nil': all_non_nil,
+                    'file_names': self._all_identifiers(),
+                    'scope': self._enclosing_function_scope(self._get_line(loop)),
+                },
+                source_line=self._get_source_line(self._get_line(loop)),
+            ))
+
+    @staticmethod
+    def _literal_trip_count_below(loop, minimum):
+        """True when `loop` is a numeric for whose trip count we can read off
+        the source and it is under `minimum`. Anything we can't read returns
+        False - we only skip loops we can prove are short."""
+        if not isinstance(loop, Fornum):
+            return False
+        start, stop, step = loop.start, loop.stop, getattr(loop, 'step', None)
+        if not (isinstance(start, Number) and isinstance(stop, Number)):
+            return False
+        s_val = 1
+        if isinstance(step, Number):
+            s_val = step.n
+        elif step is not None and not isinstance(step, int):
+            return False
+        try:
+            if s_val == 0:
+                return False
+            trips = int((stop.n - start.n) / s_val) + 1
+        except Exception:
+            return False
+        return 0 <= trips < minimum
+
+    def _all_identifiers(self):
+        """Every identifier used anywhere in the file - the set a new counter
+        name has to dodge. Coarser than real scope resolution, on purpose."""
+        cached = getattr(self, '_cached_identifiers', None)
+        if cached is not None:
+            return cached
+        names = set()
+        tree = getattr(self, '_ast_tree', None)
+        if tree is not None:
+            for node in ast.walk(tree):
+                if isinstance(node, Name):
+                    names.add(node.id)
+        self._cached_identifiers = names
+        return names
+
+    def _enclosing_function_scope(self, line):
+        """Innermost recorded function scope containing `line`, if any."""
+        best = None
+        for s in self.scopes:
+            if s.scope_type != 'function':
+                continue
+            end = s.end_line if s.end_line and s.end_line > 0 else line
+            if s.start_line <= line <= end:
+                if best is None or s.start_line > best.start_line:
+                    best = s
+        return best
+
+    def _classify_append(self, stmt, name):
+        """Is `stmt` an append to `name`? Returns (kind, value_node) or None.
+
+        Only statement position counts. `x = table.insert(t, v)` as an
+        expression is not something we can turn into two statements.
+        """
+        if isinstance(stmt, LocalAssign):
+            return None
+        if isinstance(stmt, Assign) and len(stmt.targets or []) == 1 and len(stmt.values or []) == 1:
+            tgt = stmt.targets[0]
+            if (isinstance(tgt, Index) and isinstance(tgt.value, Name)
+                    and tgt.value.id == name and isinstance(tgt.idx, AddOp)):
+                left, right = tgt.idx.left, tgt.idx.right
+                for a, b in ((left, right), (right, left)):
+                    if (isinstance(a, ULengthOP) and isinstance(a.operand, Name)
+                            and a.operand.id == name
+                            and isinstance(b, Number) and b.n == 1):
+                        return ('index', stmt.values[0])
+            return None
+        if isinstance(stmt, Call) and len(stmt.args or []) == 2:
+            if not (isinstance(stmt.args[0], Name) and stmt.args[0].id == name):
+                return None
+            func = stmt.func
+            direct = (isinstance(func, Index) and isinstance(func.value, Name)
+                      and func.value.id == 'table' and isinstance(func.idx, Name)
+                      and func.idx.id == 'insert')
+            aliased = id(stmt) in getattr(self, '_table_insert_call_ids', ())
+            if direct or aliased:
+                return ('insert', stmt.args[1])
+        return None
+
+    def _scan_stmts(self, stmts, name, sites, in_func):
+        """Walk a statement list. False the moment we see a mention of `name`
+        that isn't an append we can rewrite."""
+        for s in stmts:
+            app = self._classify_append(s, name)
+            if app is not None:
+                kind, value = app
+                if in_func:
+                    # an append from inside a closure can run after the loop
+                    return False
+                # the value must not read the table either (`t[#t+1] = #t`)
+                if not self._scan_node(value, name, sites, in_func):
+                    return False
+                sites.append((kind, s, value))
+                continue
+            if not self._scan_node(s, name, sites, in_func):
+                return False
+        return True
+
+    def _scan_node(self, node, name, sites, in_func):
+        """Structural walk. Any bare occurrence of `name` fails - which also
+        takes care of rebinding, since a binding target is a Name node too."""
+        if node is None:
+            return True
+        if isinstance(node, list):
+            for item in node:
+                if not self._scan_node(item, name, sites, in_func):
+                    return False
+            return True
+        if not isinstance(node, Node):
+            return True
+        if isinstance(node, Name):
+            return node.id != name
+        if isinstance(node, Block):
+            return self._scan_stmts(node.body or [], name, sites, in_func)
+        if isinstance(node, (Function, LocalFunction, Method, AnonymousFunction)):
+            in_func = True
+        for key, child in vars(node).items():
+            if key.startswith('_') or key == 'comments':
+                continue
+            if not self._scan_node(child, name, sites, in_func):
+                return False
+        return True
 
     def _analyze_deprecated_funcs(self):
         """Find deprecated functions: table.getn, string.len."""

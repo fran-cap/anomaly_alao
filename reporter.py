@@ -28,6 +28,7 @@ PERFORMANCE_IMPACT = {
     'per_frame_callback': 'critical',
     'expensive_in_hotpath': 'critical',
     'string_concat_in_loop': 'critical',
+    'append_loop_counter': 'critical',
 
     # HIGH - moderate to high impact in tight loops
     # measured 1.3x-2.6x interpreted and ~1.0x compiled on LuaJIT 2.0 - real,

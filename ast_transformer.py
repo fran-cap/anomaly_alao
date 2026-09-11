@@ -119,6 +119,12 @@ class SourceEdit:
     # if its group has no surviving replacements. Replacements in the same
     # group leave this empty.
     is_enabler: bool = False
+    # All-or-nothing group: if any replacement carrying this flag is rejected,
+    # every admitted replacement in the same group is dropped too (and the
+    # group's enabler insertion goes with it via pass 3). Used by the
+    # counter-based append, where a partially applied loop would silently
+    # miscount the table.
+    atomic_group: bool = False
 
 
 class ASTTransformer:
@@ -223,6 +229,23 @@ class ASTTransformer:
                 if df.line_num not in existing_lines:
                     fixable.append(df)
 
+        # A counter rewrite (I-001) and table_insert_append want the same
+        # `table.insert(t, v)` call. The counter wins, but only once we know it
+        # is actually going to be attempted - the analyzer only suppresses the
+        # GREEN ones, so YELLOW sites are settled here under --fix-yellow.
+        claimed = set()
+        for f in fixable:
+            if f.pattern_name == 'append_loop_counter':
+                for kind, node, _value in (f.details.get('sites') or ()):
+                    if kind == 'insert':
+                        claimed.add(id(node))
+        if claimed:
+            fixable = [
+                f for f in fixable
+                if not (f.pattern_name == 'table_insert_append'
+                        and id(f.details.get('node')) in claimed)
+            ]
+
         if not fixable:
             return False, self.source, 0
 
@@ -267,7 +290,9 @@ class ASTTransformer:
         """Generate source edits for a finding."""
         pattern = finding.pattern_name
 
-        if pattern == 'table_insert_append':
+        if pattern == 'append_loop_counter':
+            self._edit_append_loop(finding)
+        elif pattern == 'table_insert_append':
             self._edit_table_insert(finding)
         elif pattern == 'table_getn':
             self._edit_table_getn(finding)
@@ -305,6 +330,93 @@ class ASTTransformer:
 
 
     # Edit methods using AST positions
+
+    def _edit_append_loop(self, finding: Finding):
+        """Hoist a counter for an append-only table in a loop (I-001).
+
+        Turns
+
+            local t = {}
+            for ... do
+                t[#t+1] = v          -- or table.insert(t, v)
+            end
+
+        into
+
+            local t = {}
+            local t_n = 0
+            for ... do
+                t_n = t_n + 1; t[t_n] = v
+            end
+
+        The analyzer already proved nothing else can touch `t` between the
+        declaration and the end of the loop, so the counter can't go stale.
+        The edits go out as one atomic group: if any single site is rejected we
+        drop the lot, because a loop where half the appends bump the counter and
+        half don't is exactly the silent corruption this pattern exists to avoid.
+        """
+        table_name = finding.details.get('table')
+        loop_node = finding.details.get('loop_node')
+        sites = finding.details.get('sites') or []
+        seed = finding.details.get('seed', '0')
+        if not table_name or loop_node is None or not sites:
+            return
+
+        loop_start, _ = self._get_node_span(loop_node)
+        if loop_start is None:
+            return
+
+        # the hoisted declaration goes on its own line right above the loop, so
+        # the loop keyword has to actually start its line - otherwise something
+        # like `local t = {} for i=1,n do` would get cut in half
+        line_start = self._get_line_start(finding.line_num)
+        if line_start is None or self.source[line_start:loop_start].strip():
+            return
+        indent = self.source[line_start:loop_start]
+
+        taken = set(finding.details.get('file_names') or ())
+        taken |= self._collect_function_locals(finding.details.get('scope'))
+        counter = self._resolve_cache_name(f'{table_name}_n', taken)
+
+        # build every site replacement first - if one of them can't be placed we
+        # emit nothing at all rather than a half-rewritten loop
+        site_edits = []
+        for kind, node, value in sites:
+            start, end = self._get_node_span(node)
+            if start is None or end is None:
+                return
+            if kind == 'insert':
+                value_text = self._extract_table_insert_value(self.source[start:end], table_name)
+            else:
+                v_start, v_end = self._get_node_span(value)
+                value_text = self.source[v_start:v_end] if v_start is not None and v_end else None
+            if not value_text:
+                return
+            site_edits.append(SourceEdit(
+                start_char=start,
+                end_char=end,
+                replacement=f'{counter} = {counter} + 1; {table_name}[{counter}] = {value_text}',
+                # below everything else on purpose: any smaller rewrite that
+                # lands inside an append (a cached global in the value, say) is
+                # admitted first and folded into our text by _apply_edits
+                priority=-1,
+            ))
+
+        group_id = self._next_group_id
+        self._next_group_id += 1
+        for e in site_edits:
+            e.group_id = group_id
+            e.atomic_group = True
+            self.edits.append(e)
+
+        self.edits.append(SourceEdit(
+            start_char=line_start,
+            end_char=line_start,
+            replacement=f'{indent}local {counter} = {seed}\n',
+            priority=-1,
+            group_id=group_id,
+            is_enabler=True,
+        ))
 
     def _edit_table_insert(self, finding: Finding):
         """Convert table.insert(t, v) to t[#t+1] = v."""
@@ -2496,6 +2608,7 @@ class ASTTransformer:
         covered_ends: List[int] = []
         covered_edits: List[SourceEdit] = []
         absorbed: Set[int] = set()   # id() of edits folded into a container
+        absorbed_by: Dict[int, List[SourceEdit]] = {}  # container id -> folded edits
         for edit in replacements:
             s, e = edit.start_char, edit.end_char
             # admitted spans are disjoint and sorted, so the ones touching
@@ -2526,6 +2639,7 @@ class ASTTransformer:
                 fe = base + (t.end_char - a)
                 folded = folded[:fs] + t.replacement + folded[fe:]
             edit.replacement = folded
+            absorbed_by[id(edit)] = list(touching)
             for t in touching:
                 absorbed.add(id(t))
             admitted_repl.append(edit)
@@ -2533,6 +2647,33 @@ class ASTTransformer:
             covered_starts.insert(lo, s)
             covered_ends.insert(lo, e)
             covered_edits.insert(lo, edit)
+
+        # Pass 1b: all-or-nothing groups. A group that lost any member loses all
+        # of them - a half-applied counter rewrite miscounts its table, which is
+        # worse than not rewriting at all. Anything such a container had folded
+        # into itself is released so it applies on its own again.
+        atomic_groups = {
+            e.group_id for e in replacements
+            if e.atomic_group and e.group_id is not None
+        }
+        if atomic_groups:
+            admitted_ids = {id(e) for e in admitted_repl}
+            broken = {
+                g for g in atomic_groups
+                if any(e.group_id == g and id(e) not in admitted_ids for e in replacements)
+            }
+            if broken:
+                kept = []
+                for e in admitted_repl:
+                    if e.atomic_group and e.group_id in broken:
+                        for child in absorbed_by.get(id(e), ()):
+                            absorbed.discard(id(child))
+                        continue
+                    kept.append(e)
+                admitted_repl = kept
+                ordered = sorted(admitted_repl, key=lambda e: e.start_char)
+                covered_starts = [e.start_char for e in ordered]
+                covered_ends = [e.end_char for e in ordered]
 
         # Pass 2: insertions - dedupe by (pos, text), then drop any whose
         # position is inside an admitted replacement's span. Allow insertion

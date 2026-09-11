@@ -90,6 +90,7 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 
 | Pattern | Replacement | Impact |
 |---------|-------------|--------|
+| Append-only local table in a loop | hoisted counter: `local t_n = 0` + `t_n = t_n + 1; t[t_n] = v` | Scales with table length - `#t` is an O(log n) boundary search, so 1.06x at 5 iterations, 1.6x at 20, 3.7x at 100, ~10x at 2000. Loops with a literal bound under 20 are skipped |
 | `table.insert(t, v)` | `t[#t+1] = v` | Medium - ~1.00x on a JIT-compiled trace, 1.2-1.5x interpreted |
 | `table.getn(t)` | `#t` | Low - deprecated function |
 | `string.len(s)` | `#s` | Low - unnecessary function call |
@@ -116,6 +117,7 @@ Pay attention some of this fixes requires `--experimental` flag.
 |---------|-------------|--------|
 | `s = s .. x` in loop | String concatenation builds O(n²) garbage | Critical |
 | `vector():set(...)` in loop | Hoists one `local _v = vector()` above the loop and reuses it. Only when the vector provably can't outlive the iteration (not stored, not returned, not captured, not handed to an unknown callee) | High - 1.3x-2.6x interpreted, ~1.0x compiled |
+| Append-only local table in a loop, value may be nil | Same counter rewrite as the GREEN row. Only YELLOW because appending `nil` stops `#t` growing while a counter keeps going, so the two forms genuinely diverge | Critical |
 
 
 ### RED (info only (for modders), no auto-fix)
