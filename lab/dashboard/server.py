@@ -571,7 +571,12 @@ def runs_payload(store: Store) -> list:
             "exe": m.get("exe"),
             "mo2_profile": m.get("mo2_profile"),
             "notes": m.get("notes") or "",
+            "arm": m.get("arm") or ("baseline" if _is_baseline({"idea_id": m.get("idea_id"), "notes": m.get("notes") or ""}) else "variant"),
+            "experiment": m.get("experiment") or "",
+            "mods_enabled": sorted(k[4:] for k, val in (cfg.items() if isinstance(cfg, dict) else [])
+                                   if k.startswith("mod/") and isinstance(val, list) and val[-1] == "enabled"),
             "config_diff": cfg if isinstance(cfg, dict) else {},
+            "capped": bool((met.get("extra") or {}).get("capped")),
             "fps_avg": _num(met.get("fps_avg")),
             "fps_1pct_low": _num(met.get("fps_1pct_low")),
             "frametime_p99_ms": _num(met.get("frametime_p99_ms")),

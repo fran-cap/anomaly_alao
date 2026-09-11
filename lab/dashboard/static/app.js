@@ -790,6 +790,21 @@ function renderRuns() {
     if (run.run_id === state.selectedRun) tr.classList.add("selected");
     tr.appendChild(el("td", "mono", run.run_id));
     tr.appendChild(el("td", "mono", txt(run.idea_id)));
+    var armCell = el("td");
+    armCell.appendChild(pill(run.arm || "-", run.arm === "variant" ? "running" : "done"));
+    if (run.mods_enabled && run.mods_enabled.length) {
+      var overlay = el("span", "mono muted", " " + run.mods_enabled.map(function (m) {
+        return m.replace(/^aalo-rewrite-\d{8}-\d{6}-/, "");
+      }).join(" "));
+      overlay.title = run.mods_enabled.join("\n");
+      armCell.appendChild(overlay);
+    }
+    if (run.capped) {
+      var cap = el("span", "pill failed", "capped");
+      cap.title = "flat on a refresh rate / limiter in every window; excluded from A/B means";
+      armCell.appendChild(cap);
+    }
+    tr.appendChild(armCell);
     var st = el("td"); st.appendChild(pill(run.status)); tr.appendChild(st);
     tr.appendChild(el("td", "mono", shortTime(run.started)));
     tr.appendChild(el("td", "num", num(run.duration_s, 0)));
@@ -846,6 +861,9 @@ function renderDetail() {
     ["idea_id", txt(m.idea_id)], ["status", txt(m.status)],
     ["started", shortTime(m.started)], ["finished", shortTime(m.finished)],
     ["exe", txt(m.exe)], ["mo2_profile", txt(m.mo2_profile)],
+    ["arm", txt(m.arm)], ["experiment", txt(m.experiment)],
+    ["mods toggled", Object.keys(m.config_diff || {}).filter(function (k) { return k.indexOf("mod/") === 0; })
+      .map(function (k) { return k.slice(4) + " -> " + (m.config_diff[k] || []).slice(-1)[0]; }).join("; ") || "-"],
     ["notes", txt(m.notes)]
   ]));
 

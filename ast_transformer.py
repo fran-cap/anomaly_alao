@@ -2717,12 +2717,19 @@ class ASTTransformer:
                 covered_starts = [e.start_char for e in ordered]
                 covered_ends = [e.end_char for e in ordered]
 
-        # Pass 2: insertions - dedupe by (pos, text), then drop any whose
-        # position is inside an admitted replacement's span. Allow insertion
-        # at the boundary (s == replacement.start) because that lands at the
-        # leading edge before the replacement text.
+        # Pass 2: insertions - dedupe by (pos, text). One that lands strictly
+        # inside an admitted replacement's span gets folded into that
+        # replacement's text (I-019: `string.find(...)` -> `, 1, true` sitting
+        # inside the value of a `table.insert` we are turning into `t[#t+1] = v`
+        # used to be dropped here, so --fix needed a second pass to land it).
+        # We anchor on the source text around the insertion point, widening
+        # until it occurs exactly once in the container's replacement; if no
+        # unique anchor exists (the container rebuilt that region) we drop it
+        # as before. Insertion exactly at the boundary (s == replacement.start)
+        # is allowed through untouched: it lands before the replacement text.
         insertions.sort(key=lambda e: (-e.priority, -e.start_char))
         admitted_ins = []
+        folded_ins: List[SourceEdit] = []
         seen_insertions: set = set()
         for edit in insertions:
             key = (edit.start_char, edit.replacement)
@@ -2730,13 +2737,30 @@ class ASTTransformer:
                 continue
             seen_insertions.add(key)
             s = edit.start_char
-            inside_replacement = False
+            container = None
             if covered_starts:
                 i = bisect_right(covered_starts, s) - 1
                 if i >= 0 and covered_starts[i] < s < covered_ends[i]:
-                    inside_replacement = True
-            if not inside_replacement:
+                    container = covered_edits[i]
+            if container is None:
                 admitted_ins.append(edit)
+                continue
+            cs, ce = container.start_char, container.end_char
+            a = b = s
+            base = None
+            while a > cs or b < ce:
+                a = max(cs, a - 1)
+                b = min(ce, b + 1)
+                anchor = self.source[a:b]
+                if anchor and container.replacement.count(anchor) == 1:
+                    base = container.replacement.index(anchor)
+                    break
+            if base is None:
+                continue  # no unique anchor: the container rewrote that region
+            at = base + (s - a)
+            container.replacement = container.replacement[:at] + edit.replacement + container.replacement[at:]
+            absorbed_by.setdefault(id(container), []).append(edit)
+            folded_ins.append(edit)
 
         # Pass 3: drop "enabler" insertions whose group has no surviving
         # replacement. This is how `local tostr = tostring` style cache decls
@@ -2759,7 +2783,7 @@ class ASTTransformer:
         # - it is baked into its container's text - so it counts as applied.
         # Everything else we generated and did not apply was dropped, which is
         # the counter that would have exposed I-008 on day one.
-        self.edits_applied = len(admitted_repl) + len(admitted_ins)
+        self.edits_applied = len(admitted_repl) + len(admitted_ins) + len(folded_ins)
         self.edits_dropped = max(0, len(self.edits) - self.edits_applied)
         admitted.sort(key=lambda e: -e.start_char)
         result = self.source

@@ -1,0 +1,23 @@
+{
+  "run_id": "20260911-151002-vanilla-i019",
+  "alao_commit": "29f2dc23f4321c07a31dbd59f4cbd79221eaca33",
+  "alao_dirty": true,
+  "corpus": "vanilla-1.5.3",
+  "corpus_files": 826,
+  "flags": [
+    "--report",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260911-151002-vanilla-i019\\alao-report.json",
+    "--timeout",
+    "10.0",
+    "--cache-threshold",
+    "4",
+    "--exclude",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260911-151002-vanilla-i019\\empty-exclude.txt",
+    "|",
+    "--fix"
+  ],
+  "started": "2026-09-11T15:10:02",
+  "finished": "2026-09-11T15:10:31",
+  "status": "done",
+  "notes": ""
+}
