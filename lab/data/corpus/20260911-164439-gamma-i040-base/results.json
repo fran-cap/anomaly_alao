@@ -1,0 +1,118 @@
+{
+  "analyze_s": 11.09,
+  "fix_s": 21.04,
+  "parse_failures": [
+    {
+      "file": "410- 3DSS for GAMMA - Redotix99 & Andtheherois & party50/gamedata/scripts/zzz_mspizza_Godis_ZoomCalc.script",
+      "error": "SyntaxException: syntax errors: None"
+    },
+    {
+      "file": "410- 3DSS for GAMMA - Redotix99 & Andtheherois & party50/gamedata/scripts/zzz_mspizza_Godis_Zoom_control.script",
+      "error": "SyntaxException: syntax errors: line 109:0: no viable alternative at input 'RegisterScriptCallback(\"on_key_release\", function(released_key)\\n        if released_key == key then\\n            func()\\n        end\\n    end\\nend'"
+    },
+    {
+      "file": "76- Boomsticks and Sharpsticks - Mich/gamedata/scripts/despawn_guns.script",
+      "error": "SyntaxException: syntax errors: None"
+    }
+  ],
+  "timeouts": [],
+  "crashes": [],
+  "findings_by_pattern": {
+    "global_write": 5697,
+    "debug_statement": 2586,
+    "unused_local_variable": 1581,
+    "potential_nil_access": 1499,
+    "table_insert_append": 678,
+    "unnecessary_else": 621,
+    "string_find_plain": 441,
+    "uncached_globals_summary": 280,
+    "per_frame_callback": 262,
+    "append_loop_counter": 254,
+    "jit_mode": 205,
+    "string_concat_in_loop": 205,
+    "string_literal_concat": 189,
+    "repeated_db_actor": 78,
+    "vector_alloc_in_loop": 78,
+    "unused_local_function": 71,
+    "redundant_not_eq": 66,
+    "distance_to_comparison": 57,
+    "string_len": 38,
+    "repeated_obj_id()": 18,
+    "repeated_item_section()": 17,
+    "pow_op_simple": 17,
+    "repeated_npc_id()": 14,
+    "repeated_get_console": 12,
+    "repeated_weapon_section()": 8,
+    "table_getn": 7,
+    "repeated_wpn_section()": 7,
+    "dead_code_if_false": 7,
+    "constant_condition": 6,
+    "repeated_self_object_id()": 6,
+    "repeated_device": 6,
+    "repeated_level_name": 5,
+    "repeated_item_id()": 4,
+    "math_pow_simple": 4,
+    "repeated_det_section()": 3,
+    "repeated_field_section()": 3,
+    "repeated_npc_section()": 3,
+    "repeated_who_id()": 3,
+    "repeated_db_actor_id()": 3,
+    "repeated_obj_section()": 3,
+    "repeated_gun_section()": 2,
+    "repeated_wpn_id()": 2,
+    "repeated_obj_s_section()": 2,
+    "repeated_obj_2_section()": 2,
+    "repeated_torch_id()": 1,
+    "repeated_obj_mutant_id()": 1,
+    "repeated_obj_d_section()": 1,
+    "repeated_who_section()": 1,
+    "repeated_item_obj_uneqiup_section()": 1,
+    "repeated_weapon_id()": 1,
+    "repeated_enemy_id()": 1,
+    "repeated_shit_draftsman_section()": 1,
+    "repeated_seller_id()": 1,
+    "repeated_obj_1_id()": 1
+  },
+  "findings_by_severity": {
+    "GREEN": 1995,
+    "YELLOW": 4259,
+    "RED": 6069,
+    "DEBUG": 2737
+  },
+  "files_modified": 513,
+  "edits_applied": 4708,
+  "edits_dropped_overlap": 0,
+  "compile_failures_after_fix": [],
+  "idempotence_violations": [],
+  "differential_failures": [],
+  "extra": {
+    "analyze_returncode": 0,
+    "stdout_counts": {
+      "files_analyzed": 1500,
+      "files_with_issues": 1174,
+      "files_skipped": null,
+      "parse_errors": 3,
+      "files_modified": null,
+      "edits_applied": null
+    },
+    "report_summary": {
+      "total": 15060,
+      "green": 1995,
+      "yellow": 4259,
+      "red": 6069,
+      "debug": 2737
+    },
+    "failure_source": "alao-report",
+    "fix_returncode": 0,
+    "fix_stdout_counts": {
+      "files_analyzed": 1500,
+      "files_with_issues": 1174,
+      "files_skipped": null,
+      "parse_errors": 3,
+      "files_modified": 513,
+      "edits_applied": 4708
+    },
+    "edits_generated": 4708,
+    "diffs_written": 50
+  }
+}

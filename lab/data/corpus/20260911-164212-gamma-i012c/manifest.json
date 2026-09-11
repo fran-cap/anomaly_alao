@@ -1,0 +1,23 @@
+{
+  "run_id": "20260911-164212-gamma-i012c",
+  "alao_commit": "7a80a979b8475ed0c6828eb66bd38856d47028bd",
+  "alao_dirty": false,
+  "corpus": "gamma-0.9.4",
+  "corpus_files": 1503,
+  "flags": [
+    "--report",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260911-164212-gamma-i012c\\alao-report.json",
+    "--timeout",
+    "10.0",
+    "--cache-threshold",
+    "4",
+    "--exclude",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260911-164212-gamma-i012c\\empty-exclude.txt",
+    "|",
+    "--fix"
+  ],
+  "started": "2026-09-11T16:42:12",
+  "finished": "2026-09-11T16:43:10",
+  "status": "done",
+  "notes": ""
+}
