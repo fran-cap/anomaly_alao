@@ -125,6 +125,95 @@ if the corpora differ, but the numbers are still meaningless).
 
 ---
 
+## microbench.py + bench/
+
+The corpus harness proves ALAO's rewrites *land* and *compile*. `microbench.py`
+is the thing that proves they are *faster*, on the VM the game actually runs
+(LuaJIT 2.0, via `lupa.luajit20`). It exists because the first hand-rolled
+attempt at this skipped GC control and declared ALAO's highest-volume fix a 23%
+regression - a wrong conclusion that survived until someone re-measured by hand.
+So the protocol from `lab/docs/beam-ideas.md` section 2 is baked in and there is
+no flag to turn any part of it off.
+
+```bash
+py -3.12 tools/microbench.py                                # all 24 pairs, ~18 s
+py -3.12 tools/microbench.py --list
+py -3.12 tools/microbench.py --pattern counter_append --json out.json
+py -3.12 tools/microbench.py --shipped                      # only what ALAO fixes today
+py -3.12 tools/microbench.py --quick                        # tiny N smoke, NOT a measurement
+py -3.12 tools/microbench.py --self-check                   # prove jit.off(f,true) works
+```
+
+Paths are resolved relative to the script, so you can run it from another
+worktree by absolute path and it still finds its own `bench/`.
+
+**Gate G2** (`>= 1.15x` in both modes, no mode below `0.98x`) is the `G2` column.
+`speedup = t(original) / t(rewrite)`.
+
+### What is enforced
+
+| Element | Setting |
+|---|---|
+| VM | `lupa.luajit20`. `jit.version`, `version_num`, `arch`, `os` and the whole `jit.status()` flag list go into the JSON; a loud warning fires if the optimization flag set is not `fold cse dce fwd dse narrow loop abc sink fuse`, the set Anomaly's LuaJIT 2.0.4 reports. |
+| Runtime | A fresh `LuaRuntime` per (case, arm, mode). Nothing is shared. |
+| JIT off | `jit.off(f, true)` on the loaded chunk. A global `jit.off(true, true)` does **not** affect already-loaded chunks and silently measures JIT-on numbers, so a self-check runs first: an obviously jittable loop must be `>= 3x` slower interpreted, or the whole run aborts. It currently measures 24x. |
+| Chunk | `local N, D, K = ...` prelude, `D` a 64-element float table (stops constant folding), `_G.__sink = <expr>` at the end (defeats DCE). |
+| Warm-up | 2 calls at N=1000. |
+| GC | `collectgarbage('collect')` immediately before every timed run. |
+| Timing | `time.perf_counter()` on the Python side. `os.clock()` in Lua has ~10 ms resolution on Windows. |
+| Reps | Best of 9, median also recorded. |
+| N | 2e6 JIT on, 3e5 JIT off, per-snippet override with `@n`. |
+
+One deliberate deviation from section 2: **`@setup` runs outside the timed
+region**, by having the chunk return the measured work as a closure. Section 2
+timed the whole chunk, which is fine when setup is two locals and lethal when it
+is "build an N-element table" - setup then dominates and squashes every ratio
+toward 1.00x. `jit.off(chunk, true)` is recursive, so the closure is covered;
+`--self-check` uses the same machinery and would catch it if it were not.
+
+### Writing a bench pair (< 1 minute)
+
+Copy any `bench/*.lua`, change five things. The format is comment directives;
+everything after a `-- @section` line until the next directive is Lua.
+
+```lua
+-- @pattern counter_append          -- required; Finding.pattern_name, and the file name
+-- @title t[#t+1]=v -> counter      -- required; one line for the table
+-- @status proposed                 -- shipped | proposed (default proposed)
+-- @doc 12.44 4.80                  -- optional: the beam-ideas s.2 figures, jit_on jit_off ('-' for none)
+-- @n 200000 60000                  -- optional: total inner-iteration budget, jit_on jit_off
+-- @iters 5 20 100 2000             -- optional: sweep inner loop length K
+-- @doc_at 2000                     -- optional: which K the @doc figure refers to (default the largest)
+-- @notes anything, one line
+-- @setup
+local acc = 0                       -- runs per timed rep, UNTIMED. N, D, K are in scope.
+-- @original
+for r = 1, N do ... end             -- the code as mod authors write it
+-- @rewrite
+for r = 1, N do ... end             -- what ALAO produces (or would produce)
+-- @sink
+acc                                 -- an expression; assigned to _G.__sink so nothing is dead
+```
+
+The file name should match `@pattern`; `@pattern` should match
+`Finding.pattern_name` where one exists, because that is what
+`tests/test_microbench.py` checks coverage against.
+
+### Loop-length sweeps
+
+Several rewrites flip sign with loop length. `string_concat_in_loop` is **0.44x
+at 3 iterations** and **16x at 2000** - a single huge-N number would have shipped
+a regression into every short loop in the corpus. Add `@iters` to any pair whose
+win plausibly depends on how long the loop runs; the harness then prints one row
+per K, scales the outer repetition count so total work stays roughly constant,
+and summarises the pattern as e.g. `passes for K >= 100` instead of a bare
+pass/fail.
+
+The `@doc` comparison only applies to the `@doc_at` row, since the doc has one
+number per transform rather than a curve.
+
+---
+
 ## script_extractor.py / split_test.py
 
 Older helpers, predating the corpus harness. `script_extractor.py` copies all

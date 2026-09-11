@@ -153,6 +153,15 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   - Nil-guard detection is line-based: a one-line `if o then ... end` is not seen as a guard.
   - `stalker_lua_lint.py:738` reports timeouts as parse errors; `transform_file_worker` (~line 110)
     applies no timeout at all; the JSON report (`reporter.py:368`) has no failure data.
+- `tools/microbench.py` + `bench/*.lua`: paired-snippet LuaJIT 2.0 microbenchmarks, one pair per
+  `Finding.pattern_name`, with the beam's section-2 protocol baked in and no opt-out (fresh
+  `LuaRuntime` per arm/mode, `jit.off(f, true)` on the chunk plus a self-check that the interpreter
+  really is ~20x slower, `collectgarbage` before every timed run, best-of-9, `_G.__sink`, a 64-float
+  `D` table). `--iters` sweeps inner loop length, because several rewrites flip sign with it
+  (`table.concat` is 0.43x at 3 iterations and 15x at 2000). Prints a markdown table with a G2
+  pass/fail column plus a jitter warning, writes JSON with `--json`. `pytest --bench` (or `-m slow`)
+  runs the coverage guard that fails when a GREEN pattern has no bench pair. Format docs in
+  `tools/README.md`; last full run in `lab/reports/microbench-table.md` / `-baseline.json`.
 - `tools/corpus_extract.py --corpus gamma|vanilla` copies scripts from the GAMMA install
   (`D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA`, READ-ONLY, never run `--fix` there) into `extracted/`
   (gitignored). `tools/corpus_run.py` runs analyze + fix on a fresh copy, LuaJIT-compiles every
