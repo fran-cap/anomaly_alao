@@ -633,7 +633,14 @@ Corrections to earlier sections:
 - **In-game FPS is the wrong instrument for these patterns.** A standing-still capture executes none of the
   menu/UI/event code the rewrites touch. The reference stock-vs-ALAO experiment (queue item
   `20260911-111301-REF-15707b`) read +4.9% avg / +7.5% 1% low but was confounded by concurrent corpus
-  jobs; the rerun (`20260911-120033-REF-8e18cc`) is the number to cite.
+  jobs; the second rerun was interrupted. **The clean measurement is queue item
+  `20260911-122705-REF-5954d8`** (2026-09-11, idle box, RTSS closed, ALAO --fix on the merged gen-1
+  code, 290 live rewritten files, 3 rounds A/B/A/B/A/B of 300 s): stock 212.3 / 206.5 / 207.6 fps avg,
+  ALAO 144.0 / 206.9 / 205.3. The 144.0 round is a flat 144 in every 30 s window, i.e. a frame cap or
+  vsync engaging for that launch, not script cost (same engine-log error count as the healthy rounds).
+  Excluding it: **stock 207.0 vs ALAO 206.1 fps avg, 1% low 167.0 vs 165.1, p99 5.57 vs 5.59 ms: no
+  measurable difference.** That is the expected result given that the rewrites live in menu, UI and
+  event code a standing-still capture never runs; it also confirms ALAO's rewrites cost nothing.
 
 What generation 2 should chase, given the above: `time_global()`-guarded per-frame bodies (186 abort sites)
 and engine-call hoisting in the 183 interpreted per-frame bodies; `pairs`->`ipairs` (I-005) must be gated by
