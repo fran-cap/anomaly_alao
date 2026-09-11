@@ -2682,10 +2682,30 @@ class ASTTransformer:
     def _collect_function_locals(self, func_scope) -> Set[str]:
         """Return every local name visible anywhere inside `func_scope`'s body.
 
-        Includes the function's own scope and every descendant scope (loop /
-        block / nested function bodies). Used to avoid colliding with a cache
-        name we are about to introduce - declaring `local mfloor = math.floor`
-        on top of a user-written `local mfloor = ...` would silently shadow it.
+        Includes the function's own scope, every descendant scope (loop /
+        block / nested function bodies), and every ENCLOSING scope up to the
+        module. Used to avoid colliding with a cache name we are about to
+        introduce - declaring `local mfloor = math.floor` on top of a
+        user-written `local mfloor = ...` would silently shadow it.
+
+        The enclosing scopes matter as much as the descendants, and that was
+        missed until I-040: a module-level `local tg = 0` used as throttle
+        state is invisible to a scan of the body alone, so `local tg =
+        time_global()` shadowed it and
+
+            if time_global() == tg then return end
+            tg = time_global()
+
+        became
+
+            local tg = time_global()
+            if tg == tg then return end
+
+        - a guard that is always true, i.e. a function that always returns on
+        its first line (drx_da_main_artefacts_movement.script, artefact
+        movement silently stops). The same hole applies to every cache name in
+        the repeated_* / global-caching families; `tg` just collides with what
+        mod authors call their own cached clock, so it is the one that hit.
         """
         if func_scope is None or self.analyzer is None:
             return set()
@@ -2708,6 +2728,12 @@ class ASTTransformer:
         for s in self.analyzer.scopes:
             if id(s) in descendant_ids:
                 names.update(s.locals)
+
+        # ...and everything the body can see as an upvalue
+        anc = func_scope.parent
+        while anc is not None:
+            names.update(anc.locals)
+            anc = anc.parent
         return names
 
     @staticmethod
