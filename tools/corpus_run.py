@@ -206,14 +206,27 @@ def probe_failures(work: Path, timeout: float, cache_threshold: int, workers: in
                 print(f"\r[probe] {i}/{len(items)}", end="", flush=True)
             if not error:
                 continue
-            first = error.splitlines()[0] if error else ""
+            # Since I-035 the worker returns a (kind, message) pair; older ALAO
+            # returned one string that had to be substring-matched.
+            if isinstance(error, tuple):
+                kind, message = error
+            else:
+                message = error
+                first_line = message.splitlines()[0] if message else ""
+                if "TimeoutError" in first_line:
+                    kind = "timeout"
+                elif "SyntaxError" in first_line or "parse" in message.lower():
+                    kind = "parse"
+                else:
+                    kind = "crash"
+            first = message.splitlines()[0] if message else ""
             entry_file = rel(work, path)
-            if "TimeoutError" in first:
+            if kind == "timeout":
                 timeouts.append(entry_file)
-            elif "SyntaxError" in first or "parse" in error.lower():
+            elif kind in ("parse", "encoding"):
                 parse_failures.append({"file": entry_file, "error": first})
             else:
-                crashes.append({"file": entry_file, "traceback": error[-4000:]})
+                crashes.append({"file": entry_file, "traceback": message[-4000:]})
     print(f"\r[probe] done: {len(parse_failures)} parse, {len(timeouts)} timeout, {len(crashes)} crash")
     return parse_failures, timeouts, crashes
 
