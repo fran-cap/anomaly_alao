@@ -4340,23 +4340,30 @@ class ASTAnalyzer:
             roots.append((fnode, func_scope_by_node.get(id(fnode))))
 
         for root, fscope in roots:
-            candidates = []       # (forin node, call node, table name)
-            for node in self._iter_own_nodes(root):
+            own = list(self._iter_own_nodes(root))
+            raw = []
+            for node in own:
                 if not isinstance(node, Forin):
                     continue
                 hit = self._pairs_loop_target(node)
-                if hit is None:
-                    continue
-                call_node, tname = hit
-                if self._prove_array_like(root, tname, node):
-                    candidates.append((node, call_node, tname))
+                if hit is not None:
+                    raw.append((node,) + hit)
+            if not raw:
+                continue
 
+            # one walk of this body's shape, shared by every candidate in it
+            ctx = self._sequence_proof_context(root, own)
+            candidates = [
+                (node, call_node, tname) for node, call_node, tname in raw
+                if self._prove_array_like(root, tname, node, ctx)
+            ]
             if not candidates:
                 continue
 
             rewrite_lines = {self._get_line(c) for _, c, _ in candidates}
             mode = self._mode_without_pairs(fscope, rewrite_lines)
-            decidable = self._calls_are_decidable(root)
+            # only asked when it can change the answer
+            decidable = mode != 'compiled' or self._calls_are_decidable(own)
             if mode == 'compiled' and not decidable:
                 mode = 'undecidable'
             is_per_frame = fscope is not None and id(fscope) in per_frame_scopes
@@ -4435,7 +4442,35 @@ class ASTAnalyzer:
 
     # --- the sequence proof ------------------------------------------------
 
-    def _prove_array_like(self, root, tname: str, forin: Forin) -> bool:
+    def _sequence_proof_context(self, root, own):
+        """The per-body facts `_prove_array_like` needs, computed once.
+
+        `nested_names` are the names any closure inside this body can see and
+        therefore mutate behind our back; `assign_target_ids` are the nodes
+        that appear on the left of an `=`.
+        """
+        nested_names = set()
+        for fnode in self._collect_function_nodes(root):
+            if fnode is root:
+                continue
+            for n in self._iter_own_nodes(fnode):
+                if isinstance(n, Name):
+                    nested_names.add(n.id)
+
+        assign_target_ids = set()
+        for n in own:
+            if isinstance(n, Assign):
+                for t in (n.targets or []):
+                    assign_target_ids.add(id(t))
+
+        return {
+            'own': own,
+            'parent': self._parent_map(root),
+            'nested_names': nested_names,
+            'assign_target_ids': assign_target_ids,
+        }
+
+    def _prove_array_like(self, root, tname: str, forin: Forin, ctx) -> bool:
         """Is `tname` provably a hole-free sequence for the whole of `root`?
 
         Conservative to the point of rudeness: one local declaration in this
@@ -4447,15 +4482,12 @@ class ASTAnalyzer:
         hole and we would never see it.
         """
         # 1. it must not be visible to any nested closure at all
-        for fnode in self._collect_function_nodes(root):
-            if fnode is root:
-                continue
-            for n in self._iter_own_nodes(fnode):
-                if isinstance(n, Name) and n.id == tname:
-                    return False
+        if tname in ctx['nested_names']:
+            return False
 
-        own = list(self._iter_own_nodes(root))
-        parent = self._parent_map(root)
+        own = ctx['own']
+        parent = ctx['parent']
+        assign_target_ids = ctx['assign_target_ids']
 
         # 2. exactly one `local t = <empty or literal array>` in this function
         decls = [
@@ -4477,12 +4509,6 @@ class ASTAnalyzer:
             for a in (getattr(root, 'args', None) or []):
                 if isinstance(a, Name) and a.id == tname:
                     return False
-
-        assign_target_ids = set()
-        for n in own:
-            if isinstance(n, Assign):
-                for t in (n.targets or []):
-                    assign_target_ids.add(id(t))
 
         for n in own:
             if not (isinstance(n, Name) and n.id == tname):
@@ -4592,14 +4618,14 @@ class ASTAnalyzer:
             cur = parent.get(id(cur))
         return False
 
-    def _calls_are_decidable(self, root) -> bool:
+    def _calls_are_decidable(self, own) -> bool:
         """Can the intra-procedural classifier be trusted about this body?
 
         Only if every call in it is a fastfunc we know compiles, or one the
         NYI tables already recognise. One call into another Lua function and
         the `compiled` verdict is a guess - see JIT_TRANSPARENT_CALLS.
         """
-        for n in self._iter_own_nodes(root):
+        for n in own:
             if isinstance(n, Invoke):
                 method = n.func.id if isinstance(n.func, Name) else None
                 if method not in ENGINE_NYI_METHODS:
