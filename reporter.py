@@ -42,6 +42,10 @@ PERFORMANCE_IMPACT = {
     'string_concat_in_loop': 'medium',
     'append_loop_counter': 'high',
     'math_pow_simple': 'high',
+    # I-012: measured 2.96-3.41x interpreted, 1.00x compiled. The `^` form was
+    # not in this table at all before, so it fell to the 'low' default.
+    'pow_op_sqrt': 'high',
+    'pow_op_simple': 'medium',
     'string_format_in_loop': 'high',
     # I-013: a per-frame body that cannot be JIT-compiled pays the
     # interpreter's price on every construct inside it, every frame
@@ -90,7 +94,8 @@ def highlight_code_match(line_content: str, details: dict, pattern_name: str) ->
     match_text = None
 
     if pattern_name in ('table_insert_append', 'table_getn', 'string_len',
-                        'math_pow_simple', 'math_pow_dotted', 'math_pow_complex'):
+                        'math_pow_simple', 'math_pow_dotted', 'math_pow_complex',
+                        'pow_op_simple', 'pow_op_sqrt'):
         match_text = details.get('full_match')
     elif pattern_name in ('global_write', 'module_global_write'):
         var = details.get('variable')
