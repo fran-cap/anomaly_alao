@@ -1,0 +1,1043 @@
+{
+  "lupa": "2.8",
+  "jit_version": "LuaJIT 2.0.1774896119",
+  "jit_version_num": 20099,
+  "arch": "x64 Windows",
+  "rows": [
+    {
+      "name": "numeric_for",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "control",
+      "body": "s = s + D[(i % 64) + 1]"
+    },
+    {
+      "name": "while_loop",
+      "status": "compiled",
+      "stops": 2,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "control",
+      "body": "local j = 0 while j < 3 do j = j + 1 end s = s + j"
+    },
+    {
+      "name": "repeat_loop",
+      "status": "compiled",
+      "stops": 2,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "control",
+      "body": "local j = 0 repeat j = j + 1 until j >= 3 s = s + j"
+    },
+    {
+      "name": "nested_for",
+      "status": "compiled",
+      "stops": 3,
+      "aborts": 1,
+      "reasons": [
+        "LINNER"
+      ],
+      "error": null,
+      "category": "control",
+      "body": "for k = 1, 4 do s = s + k end"
+    },
+    {
+      "name": "arith_mul_div",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "arith",
+      "body": "s = s + D[(i % 64) + 1] * 1.5 / 3.0"
+    },
+    {
+      "name": "arith_mod_pow",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "arith",
+      "body": "s = s + (i % 7) + D[(i % 64) + 1] ^ 2"
+    },
+    {
+      "name": "array_index",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "table",
+      "body": "s = s + t[(i % 8) + 1]"
+    },
+    {
+      "name": "hash_index",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "table",
+      "body": "s = s + h.a"
+    },
+    {
+      "name": "array_store",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "table",
+      "body": "t[(i % 8) + 1] = i"
+    },
+    {
+      "name": "table_new_in_loop",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "table",
+      "body": "local u = {} u[1] = i s = s + u[1]"
+    },
+    {
+      "name": "length_op_table",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "table",
+      "body": "s = s + #t"
+    },
+    {
+      "name": "length_op_string",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "string",
+      "body": "s = s + #str"
+    },
+    {
+      "name": "pairs",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: pairs"
+      ],
+      "error": null,
+      "category": "iter",
+      "body": "for k, v in pairs(t) do s = s + v end"
+    },
+    {
+      "name": "ipairs",
+      "status": "compiled",
+      "stops": 2,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "iter",
+      "body": "for k, v in ipairs(t) do s = s + v end"
+    },
+    {
+      "name": "next_explicit",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: next"
+      ],
+      "error": null,
+      "category": "iter",
+      "body": "local k, v = next(t) s = s + (v or 0)"
+    },
+    {
+      "name": "pairs_hash",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: pairs"
+      ],
+      "error": null,
+      "category": "iter",
+      "body": "for k, v in pairs(h) do s = s + v end"
+    },
+    {
+      "name": "numeric_for_over_len",
+      "status": "compiled",
+      "stops": 2,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "iter",
+      "body": "for j = 1, #t do s = s + t[j] end"
+    },
+    {
+      "name": "table_insert_append",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "tablelib",
+      "body": "local u = {} table.insert(u, i) s = s + #u"
+    },
+    {
+      "name": "table_insert_pos",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFFU: table.insert"
+      ],
+      "error": null,
+      "category": "tablelib",
+      "body": "local u = {1,2,3} table.insert(u, 2, i) s = s + #u"
+    },
+    {
+      "name": "table_remove_tail",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "tablelib",
+      "body": "local u = {1,2,3} table.remove(u) s = s + #u"
+    },
+    {
+      "name": "table_remove_pos",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFFU: table.remove"
+      ],
+      "error": null,
+      "category": "tablelib",
+      "body": "local u = {1,2,3} table.remove(u, 1) s = s + #u"
+    },
+    {
+      "name": "table_concat",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: table.concat"
+      ],
+      "error": null,
+      "category": "tablelib",
+      "body": "s = s + #table.concat(strs, ',')"
+    },
+    {
+      "name": "table_sort",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 3,
+      "reasons": [
+        "NYIFF: table.sort"
+      ],
+      "error": null,
+      "category": "tablelib",
+      "body": "local u = {3,1,2} table.sort(u) s = s + u[1]"
+    },
+    {
+      "name": "table_getn",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "tablelib",
+      "body": "s = s + table.getn(t)"
+    },
+    {
+      "name": "unpack",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: unpack"
+      ],
+      "error": null,
+      "category": "tablelib",
+      "body": "local a, b = unpack(t) s = s + a + b"
+    },
+    {
+      "name": "string_format",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.format"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.format('%d', i)"
+    },
+    {
+      "name": "string_format_s",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.format"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.format('%s-%s', 'a', str)"
+    },
+    {
+      "name": "string_sub",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.sub(str, 1, 3)"
+    },
+    {
+      "name": "string_byte",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + string.byte(str, 1)"
+    },
+    {
+      "name": "string_char",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.char"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.char(65, 66)"
+    },
+    {
+      "name": "string_len",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + string.len(str)"
+    },
+    {
+      "name": "string_rep",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.rep"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.rep('ab', 3)"
+    },
+    {
+      "name": "string_upper",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.upper"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.upper(str)"
+    },
+    {
+      "name": "string_lower",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.lower"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.lower(str)"
+    },
+    {
+      "name": "string_reverse",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.reverse"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #string.reverse(str)"
+    },
+    {
+      "name": "string_find_plain",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "LINNER",
+        "NYIFF: string.find"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + (string.find(str, 'cd', 1, true) or 0)"
+    },
+    {
+      "name": "string_find_pattern",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.find"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + (string.find(str, 'c.') or 0)"
+    },
+    {
+      "name": "string_match",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.match"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #(string.match(str, '%a+') or '')"
+    },
+    {
+      "name": "string_gmatch",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 11,
+      "reasons": [
+        "NYIFF: string.gmatch"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "for w in string.gmatch(str, '%a') do s = s + 1 end"
+    },
+    {
+      "name": "string_gsub",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: string.gsub"
+      ],
+      "error": null,
+      "category": "stringlib",
+      "body": "s = s + #(string.gsub(str, 'a', 'b'))"
+    },
+    {
+      "name": "concat_two",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIBC: CAT (string concatenation)"
+      ],
+      "error": null,
+      "category": "concat",
+      "body": "local x = 'a' .. str s = s + #x"
+    },
+    {
+      "name": "concat_many",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIBC: CAT (string concatenation)"
+      ],
+      "error": null,
+      "category": "concat",
+      "body": "local x = 'a' .. str .. 'b' .. str .. 'c' s = s + #x"
+    },
+    {
+      "name": "concat_number",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIBC: CAT (string concatenation)"
+      ],
+      "error": null,
+      "category": "concat",
+      "body": "local x = 'a' .. i s = s + #x"
+    },
+    {
+      "name": "concat_tostring",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIBC: CAT (string concatenation)"
+      ],
+      "error": null,
+      "category": "concat",
+      "body": "local x = 'a' .. tostring(i) s = s + #x"
+    },
+    {
+      "name": "tostring_number",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "baselib",
+      "body": "s = s + #tostring(i)"
+    },
+    {
+      "name": "tostring_table",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFFU: tostring"
+      ],
+      "error": null,
+      "category": "baselib",
+      "body": "s = s + #tostring(t)"
+    },
+    {
+      "name": "tonumber",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "baselib",
+      "body": "s = s + (tonumber('42') or 0)"
+    },
+    {
+      "name": "type_call",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "baselib",
+      "body": "if type(t) == 'table' then s = s + 1 end"
+    },
+    {
+      "name": "rawget_rawset",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "baselib",
+      "body": "rawset(h, 'a', i) s = s + rawget(h, 'a')"
+    },
+    {
+      "name": "select_hash",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "baselib",
+      "body": "s = s + select('#', 1, 2, 3)"
+    },
+    {
+      "name": "select_n",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "baselib",
+      "body": "s = s + (select(1, 7, 8))"
+    },
+    {
+      "name": "assert_call",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "baselib",
+      "body": "assert(t) s = s + 1"
+    },
+    {
+      "name": "lua_call",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "func",
+      "body": "s = s + addone(i)"
+    },
+    {
+      "name": "method_call",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "func",
+      "body": "s = s + obj:get()"
+    },
+    {
+      "name": "vararg_pack",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 2,
+      "reasons": [
+        "LINNER"
+      ],
+      "error": null,
+      "category": "func",
+      "body": "s = s + varsum(1, 2, 3)"
+    },
+    {
+      "name": "closure_in_loop",
+      "status": "interpreted",
+      "stops": 1,
+      "aborts": 4,
+      "reasons": [
+        "NYIBC: FNEW (closure creation)"
+      ],
+      "error": null,
+      "category": "func",
+      "body": "local f = function() return i end s = s + f()"
+    },
+    {
+      "name": "pcall_ok",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "func",
+      "body": "local ok, v = pcall(addone, i) s = s + v"
+    },
+    {
+      "name": "pcall_error",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 7,
+      "reasons": [
+        "NYIFF: error"
+      ],
+      "error": null,
+      "category": "func",
+      "body": "local ok, e = pcall(thrower) s = s + (ok and 0 or 1)"
+    },
+    {
+      "name": "xpcall_ok",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "func",
+      "body": "local ok = xpcall(noop, noop) s = s + 1"
+    },
+    {
+      "name": "error_caught",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 7,
+      "reasons": [
+        "NYIBC: FNEW (closure creation)",
+        "NYIFF: error"
+      ],
+      "error": null,
+      "category": "func",
+      "body": "local ok = pcall(function() error('x') end) s = s + 1"
+    },
+    {
+      "name": "coroutine_resume",
+      "status": "interpreted",
+      "stops": 1,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: coroutine.create"
+      ],
+      "error": null,
+      "category": "func",
+      "body": "local co = coroutine.create(noop) coroutine.resume(co) s = s + 1"
+    },
+    {
+      "name": "coroutine_wrap_call",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 8,
+      "reasons": [
+        "NYIFF: coroutine.yield",
+        "NYIFF: function: builtin#35"
+      ],
+      "error": null,
+      "category": "func",
+      "body": "s = s + wrapped()"
+    },
+    {
+      "name": "string_method_colon",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "func",
+      "body": "s = s + #str:sub(1, 2)"
+    },
+    {
+      "name": "metatable_index_table",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "meta",
+      "body": "s = s + mt_tbl.inherited"
+    },
+    {
+      "name": "metatable_index_func",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "meta",
+      "body": "s = s + mt_fn.anything"
+    },
+    {
+      "name": "setmetatable_in_loop",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "meta",
+      "body": "local u = setmetatable({}, mt) s = s + (u.inherited or 0)"
+    },
+    {
+      "name": "getmetatable",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "meta",
+      "body": "if getmetatable(mt_tbl) then s = s + 1 end"
+    },
+    {
+      "name": "math_floor",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.floor(D[(i % 64) + 1])"
+    },
+    {
+      "name": "math_ceil",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.ceil(D[(i % 64) + 1])"
+    },
+    {
+      "name": "math_abs",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.abs(D[(i % 64) + 1])"
+    },
+    {
+      "name": "math_sqrt",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.sqrt(D[(i % 64) + 1])"
+    },
+    {
+      "name": "math_pow",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.pow(D[(i % 64) + 1], 2)"
+    },
+    {
+      "name": "math_min_max",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.min(i, 5) + math.max(i, 5)"
+    },
+    {
+      "name": "math_sin_cos",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.sin(D[(i % 64) + 1]) + math.cos(D[(i % 64) + 1])"
+    },
+    {
+      "name": "math_random",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.random()"
+    },
+    {
+      "name": "math_randomseed",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: math.randomseed"
+      ],
+      "error": null,
+      "category": "math",
+      "body": "math.randomseed(1) s = s + 1"
+    },
+    {
+      "name": "math_huge_cmp",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "if D[(i % 64) + 1] < math.huge then s = s + 1 end"
+    },
+    {
+      "name": "math_fmod",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: math.mod"
+      ],
+      "error": null,
+      "category": "math",
+      "body": "s = s + math.fmod(i, 7)"
+    },
+    {
+      "name": "math_modf",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "math",
+      "body": "local a, b = math.modf(D[(i % 64) + 1]) s = s + a"
+    },
+    {
+      "name": "os_clock",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: os.clock"
+      ],
+      "error": null,
+      "category": "os",
+      "body": "s = s + os.clock()"
+    },
+    {
+      "name": "os_time",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: os.time"
+      ],
+      "error": null,
+      "category": "os",
+      "body": "s = s + os.time()"
+    },
+    {
+      "name": "os_date",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: os.date"
+      ],
+      "error": null,
+      "category": "os",
+      "body": "s = s + #os.date('%H')"
+    },
+    {
+      "name": "io_write_devnull",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "io",
+      "body": "sink:write('') s = s + 1"
+    },
+    {
+      "name": "global_read",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "global",
+      "body": "s = s + GLOBALNUM"
+    },
+    {
+      "name": "global_write",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "global",
+      "body": "GLOBALNUM = i"
+    },
+    {
+      "name": "global_func_call",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "global",
+      "body": "s = s + globaladd(i)"
+    },
+    {
+      "name": "nested_global_index",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "global",
+      "body": "s = s + db.actor.health"
+    },
+    {
+      "name": "userdata_like_method",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "engine",
+      "body": "s = s + stubobj:position()"
+    },
+    {
+      "name": "concat_accumulator",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIBC: CAT (string concatenation)"
+      ],
+      "error": null,
+      "category": "alao",
+      "body": "acc = acc .. 'x' s = s + #acc"
+    },
+    {
+      "name": "table_insert_in_loop",
+      "status": "compiled",
+      "stops": 6,
+      "aborts": 1,
+      "reasons": [
+        "LINNER"
+      ],
+      "error": null,
+      "category": "alao",
+      "body": "local u = {} for j = 1, 4 do table.insert(u, j) end s = s + #u"
+    },
+    {
+      "name": "append_len_plus_one",
+      "status": "compiled",
+      "stops": 6,
+      "aborts": 1,
+      "reasons": [
+        "LINNER"
+      ],
+      "error": null,
+      "category": "alao",
+      "body": "local u = {} for j = 1, 4 do u[#u + 1] = j end s = s + #u"
+    },
+    {
+      "name": "cached_math_floor",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "alao",
+      "body": "s = s + mfloor(D[(i % 64) + 1])"
+    },
+    {
+      "name": "vector_alloc_in_loop",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "alao",
+      "body": "local v = newvec() v:set(1, 2, 3) s = s + v.x"
+    },
+    {
+      "name": "distance_to_sqr",
+      "status": "compiled",
+      "stops": 1,
+      "aborts": 0,
+      "reasons": [],
+      "error": null,
+      "category": "alao",
+      "body": "s = s + stubobj:distance_to_sqr()"
+    },
+    {
+      "name": "pairs_then_concat",
+      "status": "interpreted",
+      "stops": 0,
+      "aborts": 4,
+      "reasons": [
+        "NYIFF: pairs"
+      ],
+      "error": null,
+      "category": "alao",
+      "body": "for k, v in pairs(t) do s = s + #('a' .. v) end"
+    }
+  ]
+}
