@@ -93,20 +93,26 @@ folds the inner edits into its own replacement text instead.
 twice and demand identical bytes. Anything a second pass still changes is an
 optimization ALAO reported and then threw away.
 
-## What the reports do not tell you
+## What the reports tell you now (I-029 / I-035 / I-037, 2026-09-11)
 
-Worth knowing if you are building a harness on top of ALAO rather than reading
-its output by eye. Both are pinned as strict xfails in `test_cli.py`.
+Three strict xfails in `test_cli.py` were dropped here because the defects they
+documented are fixed. If you are building a harness on top of ALAO:
 
-- **The JSON report carries findings only.** `reporter.py:368` `_save_json`
-  writes `generated`, `summary` and `findings`. Parse failures, timeouts,
-  crashes, per-file edit counts and dropped-edit counts appear nowhere, so
-  anything about *failures* has to be scraped from stdout.
-- **Timeouts are filed as parse errors.** `stalker_lua_lint.py:738` matches
-  `TimeoutError` into the same branch as `SyntaxError` and counts it under
-  "Files with parse errors", printing `[PARSE ERROR]` even with `-v`. A file
-  ALAO simply ran out of time on looks like a file it could not parse.
+- **The JSON report carries failure and edit data**, not just findings.
+  Alongside the original `generated` / `summary` / `findings`:
+  `parse_failures`, `timeouts`, `crashes`, `compile_failures`, `fix_failures`,
+  `findings_by_pattern`, `findings_by_severity`, per-file `edits`
+  (`edits_generated` / `edits_applied` / `edits_dropped_overlap`),
+  `edits_totals`, `alao_version`, `flags` and `run`. Paths are absolute.
+- **A timeout is a timeout.** It has its own counter and its own
+  "Files with timeouts: N" summary line; failure lines print the full path and
+  do not need `-v`.
+- **`--timeout` guards both phases**, and a file that failed analysis is not
+  rewritten by `--fix` at all.
+- **`--verify-compile`** (default on when `lupa` imports) LuaJIT-compiles a
+  rewrite before writing it and refuses the write on failure;
+  `test_transformer.py` injects a deliberately broken rewrite to prove it, and
+  the inverse test proves the guard is what saves the file.
 
-Related: `--timeout` guards only the analyze phase. `transform_file_worker`
-applies no timeout, so a file declared too slow to analyze is still fully
-rewritten by `--fix`.
+One thing the report still cannot tell you: nothing distinguishes a file that
+ALAO analyzed cleanly from one where every finding was suppressed by a guard.

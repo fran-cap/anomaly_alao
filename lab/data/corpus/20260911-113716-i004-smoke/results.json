@@ -1,0 +1,53 @@
+{
+  "analyze_s": 0.38,
+  "fix_s": 0.53,
+  "parse_failures": [],
+  "timeouts": [],
+  "crashes": [],
+  "findings_by_pattern": {
+    "math_pow_simple": 1
+  },
+  "findings_by_severity": {
+    "GREEN": 1,
+    "YELLOW": 0,
+    "RED": 0,
+    "DEBUG": 0
+  },
+  "files_modified": 1,
+  "edits_applied": 1,
+  "edits_dropped_overlap": 0,
+  "compile_failures_after_fix": [],
+  "idempotence_violations": [],
+  "differential_failures": [],
+  "extra": {
+    "analyze_returncode": 0,
+    "stdout_counts": {
+      "files_analyzed": 1,
+      "files_with_issues": 1,
+      "files_skipped": null,
+      "parse_errors": null,
+      "files_modified": null,
+      "edits_applied": null
+    },
+    "report_summary": {
+      "total": 1,
+      "green": 1,
+      "yellow": 0,
+      "red": 0,
+      "debug": 0
+    },
+    "failure_source": "alao-report",
+    "fix_returncode": 0,
+    "fix_stdout_counts": {
+      "files_analyzed": 1,
+      "files_with_issues": 1,
+      "files_skipped": null,
+      "parse_errors": null,
+      "files_modified": 1,
+      "edits_applied": 1
+    },
+    "edits_generated": 1,
+    "diffs_written": 1,
+    "idempotence_second_pass_modified": 0
+  }
+}

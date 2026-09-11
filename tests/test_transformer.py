@@ -420,3 +420,81 @@ def test_a_second_fix_pass_changes_nothing(tmp_path, name):
         f"--- after first ---\n{after_first}\n--- after second ---\n{after_second}"
     )
     assert second_modified is False
+
+
+# ---------------------------------------------------------------------------
+# --verify-compile (I-004): a rewrite that does not compile is never written
+# ---------------------------------------------------------------------------
+
+def _break_the_rewrite(transformer):
+    """Make _apply_edits hand back Lua that LuaJIT will refuse."""
+    original = transformer._apply_edits
+
+    def broken():
+        original()
+        return "function f(x) return x end end end -- unbalanced\n"
+
+    transformer._apply_edits = broken
+    return transformer
+
+
+def test_a_broken_rewrite_is_refused_and_the_original_survives(tmp_path):
+    path = tmp_path / "a.script"
+    path.write_text(FIXABLE, encoding="utf-8")
+
+    t = _break_the_rewrite(ASTTransformer())
+    modified, content, count = t.transform_file(path, backup=True, verify_compile=True)
+
+    assert modified is False, "a rewrite that does not compile must not be reported as applied"
+    assert t.compile_error, "the compile error should be recorded"
+    assert path.read_text(encoding="utf-8") == FIXABLE, "the original must survive untouched"
+    assert not (tmp_path / "a.script.alao-bak").exists()
+
+
+def test_without_verification_the_broken_rewrite_is_written(tmp_path):
+    """The guard is what saves the file - proves the previous test is not vacuous."""
+    path = tmp_path / "a.script"
+    path.write_text(FIXABLE, encoding="utf-8")
+
+    t = _break_the_rewrite(ASTTransformer())
+    modified, content, count = t.transform_file(path, backup=False, verify_compile=False)
+
+    assert modified is True
+    assert t.compile_error is None
+    assert path.read_text(encoding="utf-8") != FIXABLE
+
+
+def test_a_good_rewrite_passes_verification(tmp_path):
+    path = tmp_path / "a.script"
+    path.write_text(FIXABLE, encoding="utf-8")
+
+    t = ASTTransformer()
+    modified, content, count = t.transform_file(path, backup=False, verify_compile=True)
+
+    assert modified is True
+    assert t.compile_error is None
+    assert "x*x" in path.read_text(encoding="utf-8")
+
+
+def test_apply_edits_counts_what_it_dropped():
+    """edits_dropped_overlap is the counter that would have caught I-008."""
+    t = _transformer("aaabbbccc")
+    t.edits = [
+        SourceEdit(0, 6, "low", priority=0),
+        SourceEdit(3, 9, "HIGH", priority=100),
+    ]
+    t._apply_edits()
+    assert t.edits_applied == 1
+    assert t.edits_dropped == 1
+
+
+def test_apply_edits_counts_absorbed_edits_as_applied():
+    t = _transformer("table.insert(t, unpack(x))")
+    t.edits = [
+        SourceEdit(0, 26, "t[#t+1] = unpack(x)", priority=0),
+        SourceEdit(16, 22, "unpack_", priority=0),
+    ]
+    out = t._apply_edits()
+    assert out == "t[#t+1] = unpack_(x)"
+    assert t.edits_applied == 2
+    assert t.edits_dropped == 0

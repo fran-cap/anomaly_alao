@@ -248,6 +248,10 @@ class CallInfo:
     in_loop: bool = False
     loop_depth: int = 0
     if_chain_path: Tuple[Tuple[int, int], ...] = ()
+    # when the call went through a local alias (`local tinsert = table.insert`
+    # then `tinsert(t, v)`), this is the alias name as written. full_name is
+    # already the canonical one. None for a direct call.
+    alias_name: Optional[str] = None
 
 
 @dataclass
@@ -340,6 +344,10 @@ class LocalVarInfo:
     scope: Scope
     is_read: bool = False       # has the variable been read?
     is_function: bool = False   # is it a local function?
+    # how many times the name was actually read. is_read is just (read_count > 0),
+    # kept as-is because a lot of code reads it. The count is what tells us
+    # whether rewriting N uses away would orphan the local (see I-038).
+    read_count: int = 0
     read_lines: List[int] = field(default_factory=list)
     is_loop_var: bool = False   # is it a for loop variable?
     is_param: bool = False      # is it a function parameter?
@@ -434,16 +442,25 @@ class ASTAnalyzer:
         # cleared per-run so a re-used analyzer can't see a stale tree
         self._ast_tree: Optional[Node] = None
 
+        # why the last analyze_file() bailed out, if it did:
+        # (kind, message) with kind in {'encoding', 'parse'}. None on success.
+        # analyze_file() still returns [] in those cases (callers depend on
+        # that), this is just the out-channel so the CLI can tell "clean file"
+        # apart from "could not read/parse it".
+        self.last_error: Optional[Tuple[str, str]] = None
+
     def analyze_file(self, file_path: Path) -> List[Finding]:
         """Analyze a Lua file and return findings."""
         self.reset()
         self.file_path = file_path
+        self.last_error = None
 
         try:
             encoding = detect_file_encoding(file_path)
             self.source = file_path.read_text(encoding=encoding)
             self._file_encoding = encoding
-        except Exception:
+        except Exception as e:
+            self.last_error = ('encoding', f'{type(e).__name__}: {e}')
             return []
 
         self.source_lines = self.source.splitlines()
@@ -456,8 +473,9 @@ class ASTAnalyzer:
                 tree = ast.parse(self.source)
             finally:
                 sys.stderr = old_stderr
-        except Exception:
+        except Exception as e:
             # parse error, skip
+            self.last_error = ('parse', f'{type(e).__name__}: {e}')
             return []
 
         # store AST tree for dead code analysis
@@ -1519,10 +1537,12 @@ class ASTAnalyzer:
         # Check if this is an aliased stdlib call
         # e.g., if 'local tinsert = table.insert' was declared,
         # then 'tinsert(t, v)' should be recognized as 'table.insert(t, v)'
+        alias_name = None
         if full_name and module is None:
             # This is a bare function call - check if it's an alias
             canonical = self._resolve_alias(full_name)
             if canonical:
+                alias_name = full_name
                 full_name = canonical
                 # Also update module/func if it's a module.func pattern
                 if '.' in canonical:
@@ -1530,6 +1550,7 @@ class ASTAnalyzer:
 
         if full_name:
             self.calls.append(CallInfo(
+                alias_name=alias_name,
                 full_name=full_name,
                 module=module,
                 func=func,
@@ -1787,9 +1808,11 @@ class ASTAnalyzer:
                 key = (id(scope), var_name)
                 if key in self.local_vars:
                     self.local_vars[key].is_read = True
+                    self.local_vars[key].read_count += 1
                     break
                 if key in self.local_funcs:
                     self.local_funcs[key].is_read = True
+                    self.local_funcs[key].read_count += 1
                     break
                 # Check if it's in this scope's locals (even if not tracked)
                 if var_name in scope.locals:
@@ -1828,27 +1851,81 @@ class ASTAnalyzer:
         self._analyze_distance_to_comparisons()
         self._analyze_vector_allocations_in_loops()
 
+    def _find_local_var_info(self, scope: Optional[Scope], name: str) -> Optional[LocalVarInfo]:
+        """Walk up the scope chain for the LocalVarInfo a name resolves to."""
+        while scope is not None:
+            info = self.local_vars.get((id(scope), name))
+            if info is not None:
+                return info
+            if name in scope.locals:
+                return None  # declared here but untracked (e.g. _ prefixed)
+            scope = scope.parent
+        return None
+
+    def _aliases_that_would_be_orphaned(self, calls: List[CallInfo]) -> Set[int]:
+        """Which alias locals would end up unused if every call in `calls` was rewritten?
+
+        I-038: `local tinsert = table.insert` + a single `tinsert(t, v)` used to
+        become `local tinsert = table.insert` + `t[#t+1] = v`, i.e. --fix created
+        a brand new `unused_local_variable` finding out of thin air. We refuse to
+        rewrite the last surviving use of an alias instead.
+
+        Returns the set of id(LocalVarInfo) that the rewrite would orphan.
+
+        MERGE CONTRACT: pass the *union* of every pass that rewrites the call
+        away, not just one pass's candidates. The count is per alias, so two
+        passes that each decline in isolation can still orphan an alias between
+        them. Concretely, if an `append_loop_counter`-style pass claims the
+        in-loop appends and this one declines the flat ones, an alias whose uses
+        are *all* in loops dies anyway - on the enabled GAMMA corpus that is
+        `350- Ledge Grabbing - Demonized/.../demonized_ledge_grabbing.script:919`,
+        the one alias of four whose only use is inside a loop.
+        """
+        per_alias: Dict[int, Tuple[LocalVarInfo, int]] = {}
+        for call in calls:
+            if not call.alias_name:
+                continue
+            info = self._find_local_var_info(call.scope, call.alias_name)
+            if info is None or info.is_function:
+                continue
+            prev = per_alias.get(id(info))
+            per_alias[id(info)] = (info, (prev[1] if prev else 0) + 1)
+        return {
+            key for key, (info, rewritten) in per_alias.items()
+            if rewritten >= info.read_count
+        }
+
     def _analyze_table_insert(self):
         """Find table.insert(t, v) that can be t[#t+1] = v."""
-        for call in self.calls:
-            if call.full_name == 'table.insert' and len(call.args) == 2:
-                # 2-arg form: table.insert(t, v)
-                table_name = self._node_to_string(call.args[0])
-                value = self._node_to_string(call.args[1])
+        candidates = [
+            c for c in self.calls
+            if c.full_name == 'table.insert' and len(c.args) == 2
+        ]
+        orphaned = self._aliases_that_would_be_orphaned(candidates)
 
-                self.findings.append(Finding(
-                    pattern_name='table_insert_append',
-                    severity='GREEN',
-                    line_num=call.line,
-                    message=f'table.insert({table_name}, v) -> {table_name}[#{table_name}+1] = v',
-                    details={
-                        'table': table_name,
-                        'value': value,
-                        'full_match': f'table.insert({table_name}, {value})',
-                        'node': call.node,
-                    },
-                    source_line=self._get_source_line(call.line),
-                ))
+        for call in candidates:
+            if call.alias_name:
+                info = self._find_local_var_info(call.scope, call.alias_name)
+                if info is not None and id(info) in orphaned:
+                    # rewriting this would leave a dead `local alias = table.insert`
+                    continue
+            # 2-arg form: table.insert(t, v)
+            table_name = self._node_to_string(call.args[0])
+            value = self._node_to_string(call.args[1])
+
+            self.findings.append(Finding(
+                pattern_name='table_insert_append',
+                severity='GREEN',
+                line_num=call.line,
+                message=f'table.insert({table_name}, v) -> {table_name}[#{table_name}+1] = v',
+                details={
+                    'table': table_name,
+                    'value': value,
+                    'full_match': f'table.insert({table_name}, {value})',
+                    'node': call.node,
+                },
+                source_line=self._get_source_line(call.line),
+            ))
 
     def _analyze_deprecated_funcs(self):
         """Find deprecated functions: table.getn, string.len."""
@@ -2255,6 +2332,23 @@ class ASTAnalyzer:
             scope = scope.parent
         return None
 
+    def _has_unwarned_chained_use(self, func_scope: Scope, name: str) -> bool:
+        """Is `name()`'s result used through a chain we do NOT already warn about?
+
+        `alife():object(id)` is in NIL_RETURNING_FUNCTIONS so it's flagged either
+        way; `alife():create(x)` is not, so caching it into a local would be the
+        only reason a warning appears. See I-038.
+        """
+        receiver = f'{name}()'
+        for call in self.calls:
+            if call.module != receiver:
+                continue
+            if self._find_function_scope(call.scope) is not func_scope:
+                continue
+            if call.full_name not in NIL_RETURNING_FUNCTIONS:
+                return True
+        return False
+
     def _analyze_repeated_calls_in_scope(self):
         """Find repeated expensive calls within function scope."""
         # expensive function calls (need parens) to track
@@ -2282,6 +2376,13 @@ class ASTAnalyzer:
         scope_calls: Dict[Scope, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
 
         for call in self.calls:
+            # Only argument-less calls are cacheable. `alife()` and
+            # `alife(l08_yantar)` are not the same call, and folding them into
+            # one `local sim = alife()` silently drops the argument - which is
+            # exactly what --fix did to operacia_monolith.script (I-038).
+            if call.args:
+                continue
+
             if call.full_name in expensive_calls:
                 func_scope = self._find_function_scope(call.scope)
                 if func_scope:
@@ -2309,6 +2410,23 @@ class ASTAnalyzer:
                 call_count = self._count_calls_branch_aware(calls)
 
                 if call_count >= threshold:
+                    # I-038: caching a call that may return nil turns a hidden
+                    # hazard into a local that the nil pass then flags at every
+                    # use, so --fix manufactured brand new potential_nil_access
+                    # findings (10 on GAMMA, all from `alife()`).
+                    # `alife():object(id)` is fine - that chain is in
+                    # NIL_RETURNING_FUNCTIONS, so it's flagged before and after
+                    # the rewrite. `alife():create(x)` is not in the table, so
+                    # only the rewritten `local sim = alife(); sim:create(x)`
+                    # gets flagged, and --fix ends up creating work for itself.
+                    # Both shapes are equally nil-unsafe; the analyzer just
+                    # can't see the direct one. Until it can, don't cache a
+                    # nil-returning call whose result is used in a way we
+                    # wouldn't have warned about anyway.
+                    if isinstance(calls[0], CallInfo) and name in NIL_RETURNING_FUNCTIONS:
+                        if self._has_unwarned_chained_use(func_scope, name):
+                            continue
+
                     # suggest caching
                     severity = 'GREEN'
 

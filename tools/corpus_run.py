@@ -131,6 +131,68 @@ def _probe_one(args_tuple):
     return analyze_file_worker(args_tuple)
 
 
+def failures_from_report(report_path: Path, work: Path):
+    """Read per-file failures straight out of ALAO's JSON report (I-029).
+
+    Returns (parse_failures, timeouts, crashes) or None when the report predates
+    the failure keys, in which case the caller falls back to the probe pass.
+    Paths in the report are absolute; they get relativised to the working copy
+    so a run stays comparable across machines and worktrees.
+    """
+    if not report_path.is_file():
+        return None
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if "parse_failures" not in data or "timeouts" not in data:
+        return None
+
+    def _rel(p):
+        try:
+            return rel(work, Path(p))
+        except Exception:
+            return str(p)
+
+    parse_failures = [{"file": _rel(e["file"]), "error": e.get("error", "")}
+                      for e in data.get("parse_failures") or []]
+    timeouts = [_rel(p) for p in data.get("timeouts") or []]
+    crashes = [{"file": _rel(e["file"]), "traceback": (e.get("traceback") or "")[-4000:]}
+               for e in data.get("crashes") or []]
+    return parse_failures, timeouts, crashes
+
+
+def edits_from_report(report_path: Path):
+    """The per-file edit accounting ALAO now publishes (I-029). None if absent."""
+    if not report_path.is_file():
+        return None
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data.get("edits_totals")
+
+
+def compile_failures_from_report(report_path: Path, work: Path):
+    """Rewrites ALAO refused to write because they did not compile (I-004)."""
+    if not report_path.is_file():
+        return None
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if "compile_failures" not in data:
+        return None
+    out = []
+    for e in data.get("compile_failures") or []:
+        try:
+            f = rel(work, Path(e["file"]))
+        except Exception:
+            f = str(e.get("file"))
+        out.append({"file": f, "error": e.get("error", "")})
+    return out
+
+
 def probe_failures(work: Path, timeout: float, cache_threshold: int, workers: int):
     """Re-run ALAO's per-file analyzer to attribute failures to concrete files."""
     items = [("probe", p, timeout, cache_threshold, False) for p in sorted(iter_scripts(work))]
@@ -144,14 +206,27 @@ def probe_failures(work: Path, timeout: float, cache_threshold: int, workers: in
                 print(f"\r[probe] {i}/{len(items)}", end="", flush=True)
             if not error:
                 continue
-            first = error.splitlines()[0] if error else ""
+            # Since I-035 the worker returns a (kind, message) pair; older ALAO
+            # returned one string that had to be substring-matched.
+            if isinstance(error, tuple):
+                kind, message = error
+            else:
+                message = error
+                first_line = message.splitlines()[0] if message else ""
+                if "TimeoutError" in first_line:
+                    kind = "timeout"
+                elif "SyntaxError" in first_line or "parse" in message.lower():
+                    kind = "parse"
+                else:
+                    kind = "crash"
+            first = message.splitlines()[0] if message else ""
             entry_file = rel(work, path)
-            if "TimeoutError" in first:
+            if kind == "timeout":
                 timeouts.append(entry_file)
-            elif "SyntaxError" in first or "parse" in error.lower():
+            elif kind in ("parse", "encoding"):
                 parse_failures.append({"file": entry_file, "error": first})
             else:
-                crashes.append({"file": entry_file, "traceback": error[-4000:]})
+                crashes.append({"file": entry_file, "traceback": message[-4000:]})
     print(f"\r[probe] done: {len(parse_failures)} parse, {len(timeouts)} timeout, {len(crashes)} crash")
     return parse_failures, timeouts, crashes
 
@@ -261,7 +336,14 @@ def main():
     ap.add_argument("--use-repo-exclude", action="store_true",
                     help="honour the repo's alao_exclude.txt (default: override it with an empty list, "
                          "so a regression run sees every mod - note it excludes VANILLA_SCRIPTS)")
-    ap.add_argument("--no-probe", action="store_true", help="skip per-file failure attribution")
+    ap.add_argument("--no-probe", action="store_true",
+                    help="skip per-file failure attribution entirely (only relevant "
+                         "for an ALAO older than I-029, which has no failure data in "
+                         "its report)")
+    ap.add_argument("--probe", action="store_true",
+                    help="run the duplicate analyze pass anyway and cross-check it "
+                         "against the report's failure data (slow; off by default "
+                         "since I-029)")
     ap.add_argument("--no-idempotence", action="store_true", help="skip the second fix pass")
     ap.add_argument("--out-root", type=Path, default=DEFAULT_LAB / "data" / "corpus")
     ap.add_argument("--work-root", type=Path, default=None,
@@ -351,17 +433,43 @@ def main():
     results["findings_by_severity"] = by_sev
     results["extra"]["report_summary"] = summary
 
-    # 3. per-file failure attribution
-    if not args.no_probe:
+    # 3. per-file failure attribution. Since I-029 ALAO publishes this in the
+    # report itself, so the duplicate analyze pass this harness used to run over
+    # every file - roughly doubling its runtime - is only needed for an older
+    # ALAO, or as an explicit cross-check with --probe.
+    from_report = failures_from_report(report_json, work)
+    if from_report is not None and not args.probe:
+        results["parse_failures"], results["timeouts"], results["crashes"] = from_report
+        results["extra"]["failure_source"] = "alao-report"
+    elif args.no_probe:
+        notes.append("failure attribution skipped (--no-probe); counts only in extra.stdout_counts")
+        results["extra"]["failure_source"] = "none"
+    else:
         pf, to, cr = probe_failures(work, args.timeout, args.cache_threshold, jobs)
         results["parse_failures"], results["timeouts"], results["crashes"] = pf, to, cr
-    else:
-        notes.append("failure attribution skipped (--no-probe); counts only in extra.stdout_counts")
+        results["extra"]["failure_source"] = "probe"
+        if from_report is not None:
+            # --probe cross-check: the report and the probe must agree
+            rep_pf, rep_to, rep_cr = from_report
+            mismatch = {
+                k: {"report": r, "probe": p}
+                for k, r, p in (
+                    ("parse_failures", len(rep_pf), len(pf)),
+                    ("timeouts", len(rep_to), len(to)),
+                    ("crashes", len(rep_cr), len(cr)),
+                )
+                if r != p
+            }
+            results["extra"]["probe_vs_report"] = mismatch or "agree"
+            if mismatch:
+                notes.append(f"probe and report disagree on failures: {mismatch}")
 
     # 4. fix pass
     if fix_flags:
+        fix_report = out_dir / "alao-fix-report.json"
         fargs = [*fix_flags, "--no-first-time-auto-backup", "--timeout", str(args.timeout),
-                 "--cache-threshold", str(args.cache_threshold), *common_args]
+                 "--cache-threshold", str(args.cache_threshold),
+                 "--report", str(fix_report), *common_args]
         fargs += ["--single-thread"] if args.single_thread else ["-j", str(jobs)]
         try:
             fproc, fix_s = run_alao(work, fargs, args.proc_timeout, out_dir / "fix.log")
@@ -386,15 +494,29 @@ def main():
             if new_path.is_file():
                 pairs.append((new_path, bak))
         results["files_modified"] = len(pairs)
-        notes.append("edits_dropped_overlap is null: ALAO exposes neither the dropped-overlap "
-                     "count nor a per-file edit breakdown in its JSON report or stdout "
-                     "(_apply_edits drops silently in ast_transformer.py).")
 
-        # 5. compile-check the rewrites
+        # edit accounting straight from the fix run's report (I-029). Before it
+        # existed, edits_dropped_overlap was written as null in every run.
+        totals = edits_from_report(fix_report)
+        if totals:
+            results["edits_applied"] = totals.get("edits_applied", results["edits_applied"])
+            results["edits_dropped_overlap"] = totals.get("edits_dropped_overlap")
+            results["extra"]["edits_generated"] = totals.get("edits_generated")
+        else:
+            notes.append("edits_dropped_overlap is null: this ALAO predates I-029 and "
+                         "publishes no per-file edit breakdown.")
+
+        # 5. compile-check the rewrites. ALAO verifies before writing since
+        # I-004, so anything it refused is already in the report; this external
+        # pass stays as the independent check that what DID get written loads.
+        refused = compile_failures_from_report(fix_report, work)
+        if refused:
+            results["extra"]["compile_failures_refused_by_alao"] = refused
+            notes.append(f"ALAO refused to write {len(refused)} rewrite(s) that did not compile")
         failures, skip_note = compile_check(pairs, work)
         if skip_note:
             notes.append(skip_note)
-        results["compile_failures_after_fix"] = failures or []
+        results["compile_failures_after_fix"] = (failures or []) + (refused or [])
 
         # 6. diffs
         written = write_diffs(work, pairs, diff_dir)

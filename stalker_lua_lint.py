@@ -35,9 +35,16 @@ Options:
     --no-first-time-auto-backup
                        Skip automatic backup creation (not recommended)
 
+    --verify-compile / --no-verify-compile
+                       LuaJIT-compile every rewrite before writing it and refuse the
+                       write if it fails (default: on whenever `lupa` is installed;
+                       `pip install lupa` to get it - it bundles LuaJIT 2.0)
+
     # MULTITHREAD processing
     --timeout [seconds]
-                       Timeout per file in seconds (default: 10)
+                       Timeout per file in seconds (default: 10). Applies to both the
+                       analyze and the fix phase; a file that fails analysis is not
+                       rewritten.
     --workers / -j    Number of parallel workers for fixes (default: CPU count)
     --single-thread   Disable multiprocessing (for debugging)
     
@@ -71,16 +78,23 @@ from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed, BrokenExecutor
 
 from discovery import discover_mods, discover_direct
-from ast_analyzer import analyze_file
-from ast_transformer import transform_file
+from ast_analyzer import analyze_file, ASTAnalyzer
+from ast_transformer import (
+    transform_file, ASTTransformer, luajit_available, warn_if_no_luajit,
+)
 from reporter import Reporter
 from models import Finding
 
 
-def analyze_file_with_timeout(file_path: Path, timeout: float, cache_threshold: int = 4, experimental: bool = False):
-    """Analyze a file with a timeout to prevent hanging on problematic files."""
+# Bumped by hand. Lands in the JSON report so a harness can tell which ALAO
+# produced a given run (I-029).
+ALAO_VERSION = "0.9.5"
+
+
+def _run_with_timeout(fn, timeout: float, what: str, file_path: Path):
+    """Run fn() on a helper thread, raising TimeoutError if it overruns."""
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(analyze_file, file_path, cache_threshold=cache_threshold, experimental=experimental)
+    future = executor.submit(fn)
     try:
         result = future.result(timeout=timeout)
         executor.shutdown(wait=False)
@@ -88,30 +102,60 @@ def analyze_file_with_timeout(file_path: Path, timeout: float, cache_threshold: 
     except FuturesTimeoutError:
         future.cancel()
         executor.shutdown(wait=False)
-        raise TimeoutError(f"Analysis timed out for {file_path.name}")
+        raise TimeoutError(f"{what} timed out for {file_path.name}")
+
+
+def analyze_file_with_timeout(file_path: Path, timeout: float, cache_threshold: int = 4, experimental: bool = False):
+    """Analyze a file with a timeout to prevent hanging on problematic files."""
+    return _run_with_timeout(
+        lambda: analyze_file(file_path, cache_threshold=cache_threshold, experimental=experimental),
+        timeout, "Analysis", file_path,
+    )
 
 
 def analyze_file_worker(args_tuple):
-    """Worker function for parallel analyze_file calls."""
+    """Worker function for parallel analyze_file calls.
+
+    Returns (mod_name, script_path, findings, failure) where failure is None or
+    a (kind, message) pair with kind in {'timeout', 'parse', 'encoding', 'crash'}.
+    A timeout and a syntax error are completely different problems (I-035), so
+    the caller gets to tell them apart instead of a substring match on a string.
+    """
     mod_name, script_path, timeout, cache_threshold, experimental = args_tuple
+    analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
     try:
         if timeout and timeout > 0:
-            findings = analyze_file_with_timeout(script_path, timeout, cache_threshold, experimental)
+            findings = _run_with_timeout(
+                lambda: analyzer.analyze_file(script_path), timeout, "Analysis", script_path)
         else:
-            findings = analyze_file(script_path, cache_threshold=cache_threshold, experimental=experimental)
+            findings = analyzer.analyze_file(script_path)
+        # analyze_file() returns [] for an unreadable or unparseable file just
+        # like it does for a clean one; last_error is how we tell them apart.
+        if analyzer.last_error:
+            kind, msg = analyzer.last_error
+            return (mod_name, script_path, [], (kind, msg))
         return (mod_name, script_path, findings, None)
     except TimeoutError as e:
-        return (mod_name, script_path, [], f"TimeoutError: {e}")
+        return (mod_name, script_path, [], ('timeout', str(e)))
     except Exception as e:
         err_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        return (mod_name, script_path, [], err_msg)
+        return (mod_name, script_path, [], ('crash', err_msg))
 
 
 def transform_file_worker(args_tuple):
-    """Worker function for parallel transform_file calls."""
-    script_path, backup, fix_debug, fix_yellow, experimental, fix_nil, remove_dead_code, cache_threshold = args_tuple
-    try:
-        modified, _, edit_count = transform_file(
+    """Worker function for parallel transform_file calls.
+
+    Returns (script_path, modified, edit_count, failure, stats) where failure is
+    None or a (kind, message) pair with kind in
+    {'timeout', 'compile', 'crash'}, and stats is a dict of per-file counters
+    for the JSON report.
+    """
+    (script_path, backup, fix_debug, fix_yellow, experimental, fix_nil,
+     remove_dead_code, cache_threshold, timeout, verify_compile) = args_tuple
+    transformer = ASTTransformer()
+
+    def _do():
+        return transformer.transform_file(
             script_path,
             backup=backup,
             fix_debug=fix_debug,
@@ -120,11 +164,30 @@ def transform_file_worker(args_tuple):
             fix_nil=fix_nil,
             remove_dead_code=remove_dead_code,
             cache_threshold=cache_threshold,
+            verify_compile=verify_compile,
         )
-        return (script_path, modified, edit_count, None)
+
+    try:
+        # I-037: the fix phase used to run with no timeout at all, so a file
+        # ALAO had just declared too slow to analyze was still fully rewritten.
+        if timeout and timeout > 0:
+            modified, _, edit_count = _run_with_timeout(_do, timeout, "Fix", script_path)
+        else:
+            modified, _, edit_count = _do()
+    except TimeoutError as e:
+        return (script_path, False, 0, ('timeout', str(e)), {})
     except Exception as e:
         err_msg = f"{type(e).__name__}: {e}"
-        return (script_path, False, 0, err_msg)
+        return (script_path, False, 0, ('crash', err_msg), {})
+
+    stats = {
+        'edits_generated': edit_count,
+        'edits_applied': transformer.edits_applied,
+        'edits_dropped_overlap': transformer.edits_dropped,
+    }
+    if transformer.compile_error:
+        return (script_path, False, 0, ('compile', transformer.compile_error), stats)
+    return (script_path, modified, edit_count, None, stats)
 
 
 def backup_all_scripts(all_files, output_path=None, mods_root=None, quiet=False):
@@ -341,6 +404,20 @@ def main():
         type=str,
         default=None,
         help="Path to file containing mod names to exclude (one per line)"
+    )
+    parser.add_argument(
+        "--verify-compile",
+        dest="verify_compile",
+        action="store_true",
+        default=None,
+        help="LuaJIT-compile every rewrite before writing it, and refuse the write "
+             "if it fails (default: on whenever lupa is installed)"
+    )
+    parser.add_argument(
+        "--no-verify-compile",
+        dest="verify_compile",
+        action="store_false",
+        help="Write rewrites without compile-checking them first"
     )
 
     args = parser.parse_args()
@@ -624,6 +701,33 @@ def main():
     files_with_issues = 0
     files_skipped = 0
     parse_errors = 0
+    timeouts = 0
+    # paths that failed to analyze, so the fix phase can leave them alone
+    failed_paths = set()
+
+    def record_failure(kind: str, script_path: Path, message: str):
+        """One place for "a file did not make it": counters, board, stdout.
+
+        I-037: these lines print the FULL path and do not need -v. A corpus of
+        1503 files ships a dozen mods that all contain `ui_inventory.script`,
+        so a bare basename cannot be acted on; and -v also dumps every finding,
+        which makes it useless at that scale.
+        """
+        nonlocal parse_errors, timeouts, files_skipped
+        failed_paths.add(script_path)
+        reporter.record_failure(kind, script_path, message)
+        label = {'timeout': 'TIMEOUT', 'parse': 'PARSE ERROR',
+                 'encoding': 'ENCODING ERROR', 'compile': 'COMPILE FAILED'}.get(kind, 'ERROR')
+        if kind == 'timeout':
+            timeouts += 1
+        elif kind in ('parse', 'encoding'):
+            parse_errors += 1
+        else:
+            files_skipped += 1
+        if not args.quiet:
+            first_line = message.splitlines()[0] if message else ''
+            suffix = f": {first_line}" if first_line and kind != 'timeout' else ''
+            print(f"\n  [{label}] {script_path}{suffix}")
 
     # flatten for progress tracking
     all_files = []
@@ -719,9 +823,7 @@ def main():
                 except Exception as e:
                     processed_paths.add(item[1])
                     completed += 1
-                    files_skipped += 1
-                    if args.verbose:
-                        print(f"\n  [ERROR] {item[1].name}: {e}")
+                    record_failure('crash', item[1], f"{type(e).__name__}: {e}")
                     continue
 
                 if not args.quiet:
@@ -735,14 +837,7 @@ def main():
                         f"\r[{progress:5.1f}%] {completed}/{total} | ETA: {eta:.0f}s  ", end="", flush=True)
 
                 if error:
-                    if 'SyntaxError' in error or 'parse' in error.lower() or 'TimeoutError' in error:
-                        parse_errors += 1
-                        if args.verbose:
-                            print(f"\n  [PARSE ERROR] {script_path.name}")
-                    else:
-                        files_skipped += 1
-                        if args.verbose:
-                            print(f"\n  [ERROR] {script_path.name}: {error}")
+                    record_failure(error[0], script_path, error[1])
                 else:
                     files_analyzed += 1
                     if findings:
@@ -780,31 +875,28 @@ def main():
                 # honour --timeout in the single-thread fallback too - without
                 # this a single bad file can hang the whole run after a worker
                 # crash forced us off the process pool.
+                _fallback_analyzer = ASTAnalyzer(
+                    cache_threshold=args.cache_threshold, experimental=args.experimental)
                 if args.timeout and args.timeout > 0:
-                    findings = analyze_file_with_timeout(
-                        script_path, args.timeout,
-                        cache_threshold=args.cache_threshold,
-                        experimental=args.experimental,
+                    findings = _run_with_timeout(
+                        lambda: _fallback_analyzer.analyze_file(script_path),
+                        args.timeout, "Analysis", script_path,
                     )
                 else:
-                    findings = analyze_file(
-                        script_path,
-                        cache_threshold=args.cache_threshold,
-                        experimental=args.experimental,
-                    )
+                    findings = _fallback_analyzer.analyze_file(script_path)
+                if _fallback_analyzer.last_error:
+                    kind, msg = _fallback_analyzer.last_error
+                    record_failure(kind, script_path, msg)
+                    continue
                 files_analyzed += 1
                 if findings:
                     files_with_issues += 1
                     for finding in findings:
                         reporter.add_finding(mod_name, script_path, finding)
-            except TimeoutError:
-                parse_errors += 1
-                if args.verbose:
-                    print(f"\n  [TIMEOUT] {script_path.name}")
+            except TimeoutError as e:
+                record_failure('timeout', script_path, str(e))
             except Exception as e:
-                files_skipped += 1
-                if args.verbose:
-                    print(f"\n  [ERROR] {script_path.name}: {e}")
+                record_failure('crash', script_path, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
     # clear progress line
     if not args.quiet:
@@ -813,6 +905,29 @@ def main():
     # apply fixes if requested
     files_modified = 0
     total_edits = 0
+    compile_failures = 0
+    fix_errors = 0
+
+    def record_fix_failure(script_path: Path, error):
+        """A file the fix phase refused to (or could not) write.
+
+        A compile failure is the interesting one: --verify-compile caught a
+        rewrite that would not load under LuaJIT 2.0 and kept the original.
+        """
+        nonlocal compile_failures, fix_errors
+        kind, message = error
+        reporter.record_failure('fix_' + kind, script_path, message)
+        if kind == 'compile':
+            compile_failures += 1
+            label = 'COMPILE FAILED'
+        else:
+            fix_errors += 1
+            label = 'FIX TIMEOUT' if kind == 'timeout' else 'FIX ERROR'
+        if not args.quiet:
+            first_line = message.splitlines()[0] if message else ''
+            print(f"\n  [{label}] {script_path}" + (f": {first_line}" if first_line else ''))
+            if kind == 'compile':
+                print(f"            original kept, nothing was written")
 
     if args.fix or args.fix_debug or args.fix_yellow or args.experimental or args.fix_nil or args.remove_dead_code:
         # proceed with fixes (auto-backup already handled before analysis)
@@ -832,20 +947,40 @@ def main():
             fix_types.append("DEAD-CODE")
         print(f"{fix_msg} ({', '.join(fix_types)}) with {num_workers} workers...")
 
+        verify_compile = args.verify_compile
+        if verify_compile is None:
+            verify_compile = luajit_available()
+        if verify_compile and not warn_if_no_luajit(args.quiet):
+            verify_compile = False
+        elif args.verify_compile is False and not args.quiet:
+            print("Compile verification disabled (--no-verify-compile).")
+
         # prepare work items, skip files that already have .alao-bak (prevent double-fix)
         work_items = []
         skipped_has_backup = 0
+        skipped_failed_analysis = 0
         for mod_name, script_path in all_files:
             bak_path = script_path.with_suffix(script_path.suffix + '.alao-bak')
+            if script_path in failed_paths:
+                # I-037: a file we just declared too slow (or impossible) to
+                # analyze has no business being rewritten - that is exactly the
+                # file where a runaway transform is most likely.
+                skipped_failed_analysis += 1
+                continue
             if bak_path.exists():
                 skipped_has_backup += 1
                 if args.verbose:
                     print(f"  [SKIP] {script_path.name} - backup already exists")
             else:
                 work_items.append(
-                    (script_path, args.backup, args.fix_debug, args.fix_yellow, args.experimental, args.fix_nil, args.remove_dead_code, args.cache_threshold)
+                    (script_path, args.backup, args.fix_debug, args.fix_yellow,
+                     args.experimental, args.fix_nil, args.remove_dead_code,
+                     args.cache_threshold, args.timeout, verify_compile)
                 )
-        
+
+        if skipped_failed_analysis > 0 and not args.quiet:
+            print(f"Skipping {skipped_failed_analysis} files that failed analysis (timeout/parse/crash)")
+
         if skipped_has_backup > 0 and not args.quiet:
             print(f"Skipping {skipped_has_backup} files with existing backups (already processed)")
             print(f"Tip: Use --revert first if you want to re-process, or --clean-backups to remove old backups\n")
@@ -866,17 +1001,17 @@ def main():
                     print(f"\r[{progress:5.1f}%] Fixing {completed}/{len(work_items)}...", end="", flush=True)
                 
                 try:
-                    script_path, modified, edit_count, error = transform_file_worker(item)
+                    script_path, modified, edit_count, error, stats = transform_file_worker(item)
                     if error:
-                        if args.verbose:
-                            print(f"\n  [FIX ERROR] {script_path.name}: {error}")
+                        record_fix_failure(script_path, error)
                     elif modified:
                         files_modified += 1
                         total_edits += edit_count
+                        reporter.record_edits(script_path, stats)
                         if args.verbose:
                             print(f"\n  [FIXED] {script_path.name} ({edit_count} edits)")
                 except Exception as e:
-                    print(f"\n  [ERROR] {script_path.name}: {e}")
+                    record_fix_failure(script_path, ('crash', f"{type(e).__name__}: {e}"))
             
             if not args.quiet:
                 print()
@@ -901,22 +1036,21 @@ def main():
                                 f"\r[{progress:5.1f}%] Fixing {completed}/{len(work_items)}...", end="", flush=True)
 
                         try:
-                            script_path, modified, edit_count, error = future.result()
+                            script_path, modified, edit_count, error, stats = future.result()
                             processed_paths.add(futures[future][0])
                         except BrokenExecutor:
                             pool_crashed = True
                             break
                         except Exception as e:
-                            if args.verbose:
-                                print(f"\n  [ERROR] {e}")
+                            record_fix_failure(futures[future][0], ('crash', f"{type(e).__name__}: {e}"))
                             continue
 
                         if error:
-                            if args.verbose:
-                                print(f"\n  [FIX ERROR] {script_path.name}: {error}")
+                            record_fix_failure(script_path, error)
                         elif modified:
                             files_modified += 1
                             total_edits += edit_count
+                            reporter.record_edits(script_path, stats)
                             if args.verbose:
                                 print(f"\n  [FIXED] {script_path.name} ({edit_count} edits)")
             except BrokenExecutor:
@@ -941,24 +1075,17 @@ def main():
                             f"\r[{progress:5.1f}%] Fixing {completed}/{len(work_items)}...", end="", flush=True)
 
                     try:
-                        modified, _, edit_count = transform_file(
-                            script_path,
-                            backup=args.backup,
-                            fix_debug=args.fix_debug,
-                            fix_yellow=args.fix_yellow,
-                            experimental=args.experimental,
-                            fix_nil=args.fix_nil,
-                            remove_dead_code=args.remove_dead_code,
-                            cache_threshold=args.cache_threshold,
-                        )
-                        if modified:
+                        script_path, modified, edit_count, error, stats = transform_file_worker(item)
+                        if error:
+                            record_fix_failure(script_path, error)
+                        elif modified:
                             files_modified += 1
                             total_edits += edit_count
+                            reporter.record_edits(script_path, stats)
                             if args.verbose:
                                 print(f"\n  [FIXED] {script_path.name} ({edit_count} edits)")
                     except Exception as e:
-                        if args.verbose:
-                            print(f"\n  [FIX ERROR] {script_path.name}: {e}")
+                        record_fix_failure(script_path, ('crash', f"{type(e).__name__}: {e}"))
 
             if not args.quiet:
                 print("\r" + " " * 60 + "\r", end="")
@@ -973,6 +1100,16 @@ def main():
     # save report if requested
     if args.report:
         report_path = Path(args.report)
+        reporter.set_run_info(
+            alao_version=ALAO_VERSION,
+            flags=sys.argv[1:],
+            files_analyzed=files_analyzed,
+            files_with_issues=files_with_issues,
+            files_modified=files_modified,
+            mods=len(mods),
+            cache_threshold=args.cache_threshold,
+            timeout=args.timeout,
+        )
         print(f"\nGenerating report: {report_path.name}...")
         reporter.save(report_path, verbose=not args.quiet)
         print(f"Report saved to: {report_path}")
@@ -982,12 +1119,23 @@ def main():
     print(f"Files analyzed: {files_analyzed}")
     print(f"Files with issues: {files_with_issues}")
     if files_skipped > 0:
-        print(f"Files skipped (timeout/error): {files_skipped}")
+        print(f"Files skipped (error): {files_skipped}")
     if parse_errors > 0:
         print(f"Files with parse errors: {parse_errors}")
+    # I-035: a file that ran out of time and a file that will not parse are
+    # completely different problems; they used to share one counter.
+    if timeouts > 0:
+        print(f"Files with timeouts: {timeouts}")
     if (args.fix or args.fix_debug or args.fix_yellow or args.experimental or args.fix_nil or args.remove_dead_code):
         print(f"Files modified: {files_modified}")
         print(f"Total edits applied: {total_edits}")
+        dropped = reporter.total_edits_dropped()
+        if dropped:
+            print(f"Edits dropped (overlap): {dropped}")
+        if compile_failures > 0:
+            print(f"Files NOT written (compile check failed): {compile_failures}")
+        if fix_errors > 0:
+            print(f"Files NOT written (fix error/timeout): {fix_errors}")
 
     green_count = reporter.count_by_severity("GREEN")
     yellow_count = reporter.count_by_severity("YELLOW")

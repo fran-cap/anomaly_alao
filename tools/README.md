@@ -63,10 +63,20 @@ What a run does:
 1. copies the corpus to `extracted/_work/<run_id>/work` (the corpus is never modified)
 2. runs `stalker_lua_lint.py <work> --report <run>/alao-report.json` as a subprocess, timing it -> `analyze_s`
 3. folds the report JSON into `findings_by_pattern` / `findings_by_severity`
-4. **failure attribution**: re-runs the repo's own `analyze_file_worker` in a process pool to get *which* file failed and why -> `parse_failures`, `timeouts`, `crashes`
-5. if `--fix-flags` is set, re-runs ALAO with those flags on the same working copy
-6. `files_modified` = files that got a sibling `.alao-bak`; `edits_applied` is scraped from the "Total edits applied" line
-7. compile-checks every rewritten file with LuaJIT 2.0 via lupa -> `compile_failures_after_fix`
+4. **failure attribution**: reads `parse_failures` / `timeouts` / `crashes` straight
+   out of `alao-report.json` (ALAO publishes them since I-029). Only falls back to
+   re-running `analyze_file_worker` over every file when the report has no failure
+   keys, i.e. against an older ALAO. `--probe` forces that duplicate pass anyway and
+   cross-checks the two, recording the result in `extra.probe_vs_report`.
+5. if `--fix-flags` is set, re-runs ALAO with those flags on the same working copy,
+   with its own `--report alao-fix-report.json`
+6. `files_modified` = files that got a sibling `.alao-bak`; `edits_applied` and
+   `edits_dropped_overlap` come from that report's `edits_totals`
+7. compile-checks every rewritten file with LuaJIT 2.0 via lupa -> `compile_failures_after_fix`.
+   ALAO verifies before writing since I-004, so rewrites it *refused* to write show up
+   in the fix report's `compile_failures` and are folded into the same list (and into
+   `extra.compile_failures_refused_by_alao`). This external pass stays as the
+   independent check on what did get written.
 8. copies the fixed tree, deletes the `.alao-bak` files, fixes again, and compares bytes -> `idempotence_violations`
 9. writes `manifest.json`, `results.json`, `diffs/` (unified diffs of the first 50 modified files), `alao-report.json`, and `analyze.log` / `fix.log` / `fix-pass2.log`
 
@@ -87,21 +97,32 @@ What a run does:
 | `--keep-work` | keep the working copies (needed to inspect a violation afterwards) |
 | `--out-root PATH` | default `C:\code\GIT\anomaly_alao\lab\data\corpus` |
 
-### Why step 4 exists (ALAO gaps this harness works around)
+### Why step 4 used to re-run the whole analyzer (closed by I-029)
 
-- The JSON report contains **only findings**. No parse failures, no timeouts, no
-  crashes, no per-file edit counts. So they can't be read out of the report.
-- ALAO's stdout prints only totals (`Files with parse errors: N`). The per-file
-  lines need `-v`, which on a big corpus also dumps every finding - unusable.
-  And even with `-v` it prints `script_path.name`, not the path, so files with
-  the same basename in different mods can't be told apart.
-- `Files with parse errors` lumps timeouts in with syntax errors
-  (`stalker_lua_lint.py:738` matches `TimeoutError` into the parse bucket).
-- Nothing anywhere reports how many edits `_apply_edits` dropped for overlap, so
-  `edits_dropped_overlap` is written as `null` with a note in the manifest.
+All four gaps below are fixed; the probe pass survives only as `--probe`, for
+cross-checking and for running against an older ALAO.
+
+- ~~The JSON report contains **only findings**.~~ It now carries `parse_failures`,
+  `timeouts`, `crashes`, `compile_failures`, `findings_by_pattern`,
+  `findings_by_severity`, per-file `edits` and `edits_totals`, plus
+  `alao_version` and `flags`.
+- ~~ALAO's stdout prints only totals; the per-file lines need `-v`~~ - failure
+  lines print unconditionally now, with the **full path**, so the dozen mods that
+  all ship `ui_inventory.script` can be told apart (I-037).
+- ~~`Files with parse errors` lumps timeouts in with syntax errors~~ - a timeout
+  has its own counter and its own summary line (I-035).
+- ~~Nothing reports how many edits `_apply_edits` dropped for overlap~~ -
+  `edits_dropped_overlap` is a real number now, per file and in total.
+
+One gap is *newly visible* rather than closed: ALAO used to return `[]` for a
+file it could not parse, indistinguishable from a clean file, so the probe saw
+nothing either. With `ASTAnalyzer.last_error` wired up, the enabled GAMMA corpus
+turns out to have **3 files that do not parse** - they were being counted as
+successfully analyzed all along.
 
 The raw stdout counts are kept in `results.extra.stdout_counts` /
-`extra.fix_stdout_counts` as a cross-check against the probe.
+`extra.fix_stdout_counts` as a cross-check, and `extra.failure_source` records
+whether the failures came from the report or the probe.
 
 ---
 

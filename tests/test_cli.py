@@ -84,7 +84,14 @@ def test_json_report_has_the_expected_shape(tree, run_cli, tmp_path, read_json):
 
     assert out.exists()
     data = read_json(out)
-    assert set(data) == {"generated", "summary", "findings"}
+    # the three original keys are the contract the HTML/txt paths and
+    # tools/corpus_run.py read; I-029 added failure and edit data alongside them
+    assert {"generated", "summary", "findings"} <= set(data)
+    assert {
+        "parse_failures", "timeouts", "crashes", "compile_failures",
+        "findings_by_pattern", "findings_by_severity", "edits", "edits_totals",
+        "alao_version", "flags",
+    } <= set(data)
     assert set(data["summary"]) == {"total", "green", "yellow", "red", "debug"}
     assert data["summary"]["green"] == 2
     assert data["summary"]["red"] == 1
@@ -97,6 +104,32 @@ def test_json_report_has_the_expected_shape(tree, run_cli, tmp_path, read_json):
         for f in entries
     }
     assert {"math_pow_simple", "table_insert_append", "global_write"} <= patterns
+
+
+def test_json_report_carries_edit_accounting_after_a_fix(tree, run_cli, tmp_path, read_json):
+    out = tmp_path / "report.json"
+    run_cli(tree, "--fix", "--single-thread", "--no-first-time-auto-backup",
+            "--report", out, "-q", check=True)
+
+    data = read_json(out)
+    totals = data["edits_totals"]
+    assert totals["files_modified"] == 2
+    assert totals["edits_applied"] >= 2
+    assert totals["edits_dropped_overlap"] == 0
+    # per-file entries are keyed by FULL path, not basename
+    for path, stats in data["edits"].items():
+        assert Path(path).is_absolute(), path
+        assert set(stats) == {"edits_generated", "edits_applied", "edits_dropped_overlap"}
+    assert data["compile_failures"] == []
+    assert data["alao_version"]
+    assert "--fix" in data["flags"]
+
+
+def test_no_verify_compile_is_accepted(tree, run_cli):
+    proc = run_cli(tree, "--fix", "--single-thread", "--no-verify-compile",
+                   "--no-first-time-auto-backup", check=True)
+    _assert_no_traceback(proc)
+    assert "Compile verification disabled" in proc.stdout
 
 
 def test_txt_report_is_written(tree, run_cli, tmp_path):
@@ -330,18 +363,12 @@ def test_a_tiny_timeout_is_reported_and_does_not_crash(mods_tree, run_cli):
 
     assert proc.returncode == 0
     _assert_no_traceback(proc)
-    assert "Files with parse errors: 1" in proc.stdout
+    # a timeout has its own counter since I-035; it is not a parse error
+    assert "Files with timeouts: 1" in proc.stdout
+    assert "Files with parse errors" not in proc.stdout
     assert "Files analyzed: 0" in proc.stdout
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="stalker_lua_lint.py:738 buckets TimeoutError together with SyntaxError "
-           "under the 'Files with parse errors' counter, and even -v prints it as "
-           "[PARSE ERROR]. A file ALAO ran out of time on is reported as a file it "
-           "could not parse, which sends anyone debugging a corpus after the wrong "
-           "problem.",
-)
 def test_a_timeout_is_reported_as_a_timeout_not_a_parse_error(mods_tree, run_cli):
     root = mods_tree({"ModSlow": {"heavy.script": _pathological_source()}})
 
@@ -351,13 +378,6 @@ def test_a_timeout_is_reported_as_a_timeout_not_a_parse_error(mods_tree, run_cli
     assert "timeout" in proc.stdout.lower()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="reporter.py:368 _save_json writes only 'generated', 'summary' and "
-           "'findings'. Parse failures, timeouts, crashes, per-file edit counts and "
-           "dropped-edit counts never reach the JSON report, so a regression "
-           "harness has to scrape stdout for everything about failures.",
-)
 def test_the_json_report_records_files_that_failed(mods_tree, run_cli, tmp_path, read_json):
     root = mods_tree({"ModSlow": {"heavy.script": _pathological_source()}})
     out = tmp_path / "report.json"
@@ -379,14 +399,6 @@ def test_the_same_file_analyzes_fine_with_a_generous_timeout(mods_tree, run_cli)
     assert "Files analyzed: 1" in proc.stdout
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="--timeout only guards the analyze phase. transform_file_worker "
-           "(stalker_lua_lint.py:110) calls transform_file with no timeout at all, "
-           "so a file ALAO just declared too slow to analyze is still fully "
-           "rewritten by --fix - exactly the file where a runaway transform is "
-           "most likely.",
-)
 def test_a_timed_out_file_is_left_untouched_by_fix(mods_tree, run_cli):
     root = mods_tree({"ModSlow": {"heavy.script": _pathological_source()}})
     path = root / "ModSlow" / "gamedata" / "scripts" / "heavy.script"

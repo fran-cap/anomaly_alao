@@ -130,7 +130,7 @@ Use `py -3.12` on this machine (it has `luaparser` 4.2.0, `jinja2`, `pytest`, `l
 LuaJIT 2.0 and is the compile-checker / executor for rewritten Lua; import it as `lupa.luajit20`.
 
 ```bash
-py -3.12 -m pytest -q                 # unit + CLI tests: 182 passed, 4 skipped, 8 xfailed (2026-09-10)
+py -3.12 -m pytest -q                 # unit + CLI tests: 198 passed, 4 skipped, 5 xfailed (2026-09-11)
 py -3.12 -m pytest -q --corpus        # also analyzes the 66 vanilla scripts in the game install, read-only
 py -3.12 -m pytest -q -rx             # print the xfail reasons: each one names a real, unfixed ALAO bug
 py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
@@ -151,8 +151,13 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   - `ast_analyzer.py:2514` `_walk_for_dead_after_terminator` never descends into `do` blocks, so
     `dead_code_after_return` / `dead_code_after_break` cannot fire on parseable Lua 5.1.
   - Nil-guard detection is line-based: a one-line `if o then ... end` is not seen as a guard.
-  - `stalker_lua_lint.py:738` reports timeouts as parse errors; `transform_file_worker` (~line 110)
-    applies no timeout at all; the JSON report (`reporter.py:368`) has no failure data.
+  - ~~`stalker_lua_lint.py:738` reports timeouts as parse errors; `transform_file_worker`
+    applies no timeout; the JSON report has no failure data.~~ Fixed 2026-09-11 (I-035 / I-037 /
+    I-029), three strict xfails dropped. Timeouts have their own counter, failure lines print
+    full paths without `-v`, the fix phase honours `--timeout` and skips files that failed
+    analysis, and the JSON report carries `parse_failures` / `timeouts` / `crashes` /
+    `compile_failures` / `findings_by_*` / per-file `edits`. `--verify-compile` (on whenever
+    `lupa` imports) LuaJIT-compiles each rewrite and refuses the write on failure (I-004).
 - `tools/microbench.py` + `bench/*.lua`: paired-snippet LuaJIT 2.0 microbenchmarks, one pair per
   `Finding.pattern_name`, with the beam's section-2 protocol baked in and no opt-out (fresh
   `LuaRuntime` per arm/mode, `jit.off(f, true)` on the chunk plus a self-check that the interpreter
