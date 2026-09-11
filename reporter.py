@@ -41,6 +41,10 @@ PERFORMANCE_IMPACT = {
     # so flagging all 205 of them 'critical' was misinforming the reader.
     'string_concat_in_loop': 'medium',
     'append_loop_counter': 'high',
+    # I-005: 3.3x-6x on a compiled trace, and only emitted GREEN when the
+    # body actually compiles once the pairs calls are gone. The RED variant
+    # of the same pattern is a census row, not a fix.
+    'pairs_to_ipairs': 'high',
     'math_pow_simple': 'high',
     'string_format_in_loop': 'high',
     # I-013: a per-frame body that cannot be JIT-compiled pays the

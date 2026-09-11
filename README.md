@@ -107,6 +107,7 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 | Repeated `get_hud()` | `local hud = get_hud()` | Medium - cached singleton |
 | Repeated `:section()` | `local sec = obj:section()` | Medium - immutable property |
 | Repeated `:id()` | `local id = obj:id()` | Medium - immutable property |
+| `pairs(t)` over a provable sequence | `ipairs(t)` | High - 3.3x-6.0x on a compiled trace, but 0.28x-0.70x interpreted, so it only fires when the body provably compiles once its `pairs` calls are gone. On the GAMMA and vanilla corpora that is zero sites; see below |
 
 
 ### YELLOW (may cause CTDs, fix with `--fix-yellow`)
@@ -127,6 +128,7 @@ Pay attention some of this fixes requires `--experimental` flag.
 | Global variable writes | Writing to global scope (potential pollution) |
 | Per-frame callback warnings | Performance issues in `actor_on_update`, `CFoo:update`, etc. |
 | `jit_mode` | A per-frame body LuaJIT 2.0 cannot compile into a trace, with the constructs that abort it (`..`, `pairs`, `string.format`, engine calls, closures). See `lab/reports/luajit20-nyi.md` |
+| `pairs_to_ipairs` (RED half) | A `for ... in pairs(t)` whose table IS a provable sequence, reported but never fixed because the body does not compile: `interpreted` / `mixed` (something else aborts the trace, where `ipairs` is ~3x slower) or `undecidable` (the intra-procedural classifier cannot see through a call in the body) |
 | `vector()` in hot loop | Allocates new vector each iteration. The `vector():set(...)` subset that provably can't escape its iteration is YELLOW and fixable with `--fix-yellow`; everything else stays here |
 | Constant conditions | `if true then` / `if false then` |
 | Unnecessary else | `if x then return end else ...` |
