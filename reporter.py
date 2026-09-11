@@ -28,10 +28,15 @@ PERFORMANCE_IMPACT = {
     'per_frame_callback': 'critical',
     'vector_alloc_in_loop': 'critical',
     'expensive_in_hotpath': 'critical',
-    'string_concat_in_loop': 'critical',
 
     # HIGH - moderate to high impact in tight loops
     'distance_to_comparison': 'high',
+    # was 'critical'. It is O(n^2), but only when n is large: agent-I039
+    # measured the table.concat rewrite at 0.53x (i.e. a regression) for a
+    # 5-iteration loop, breaking even around 30. Every one of the rewritable
+    # sites in the enabled GAMMA corpus is a 3-10 element UI string builder,
+    # so flagging all 205 of them 'critical' was misinforming the reader.
+    'string_concat_in_loop': 'medium',
     'table_insert_append': 'high',
     'math_pow_simple': 'high',
     'string_format_in_loop': 'high',

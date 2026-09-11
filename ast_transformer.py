@@ -998,11 +998,17 @@ class ASTTransformer:
             end
             
         After:
-            local _result_parts = {}
+            local _result_parts, _result_n = {}, 0
             for i = 1, 10 do
-                _result_parts[#_result_parts+1] = get_part(i)
+                _result_n = _result_n + 1; _result_parts[_result_n] = get_part(i)
             end
-            local result = table.concat(_result_parts)
+            local result = table.concat(_result_parts, "", 1, _result_n)
+
+        Counter form rather than `parts[#parts+1]` for two reasons, both
+        measured by agent-I039 on 2026-09-11: it is faster (it moves the
+        interpreted breakeven from ~100 iterations down to ~30), and the
+        explicit 1..n range keeps a nil operand an error instead of silently
+        truncating the result.
         """
         details = finding.details
         var = details.get('variable')
@@ -1041,7 +1047,8 @@ class ASTTransformer:
                     return  # embedded in for header
         
         parts_var = f'_{var}_parts'
-        
+        count_var = f'_{var}_n'
+
         # SAFETY: check if the variable is referenced on any lines between init and loop_end
         # that aren't the concat_lines we're converting. If so, the optimization would
         # break those references (since local var = "" becomes local _var_parts = {})
@@ -1092,27 +1099,21 @@ class ASTTransformer:
             
             expr = match.group(2).rstrip()
             
-            # Bug #31 fix: check if expr references the variable itself
-            # e.g. (var == "" and "" or ", ") - this would break after transformation
-            # because 'var' won't exist until after table.concat
+            # The accumulator must not be readable inside the loop: after the
+            # rewrite it does not exist until table.concat runs.
+            #
+            # There used to be a rescue here that turned `var == ""` into
+            # `#parts == 0` and carried on. That is WRONG and agent-I039
+            # demonstrated it under lupa.luajit20: if any appended piece is
+            # itself the empty string, `var == ""` is still true while
+            # `#parts == 0` is already false. `s = s .. (s == "" and "" or ",")
+            # .. t[i]` over {"", "a", "b"} gives "a,b" originally and ",a,b"
+            # rewritten. No corpus site needed the rescue, so it's gone - if
+            # the expression mentions the accumulator at all, abort.
             if re.search(rf'\b{re.escape(var)}\b', expr):
-                # try to replace common patterns like (var == "" and X or Y) with (#parts == 0 and X or Y)
-                empty_check = re.compile(
-                    rf'\(\s*{re.escape(var)}\s*==\s*""\s+and\s+',
-                    re.IGNORECASE
-                )
-                if empty_check.search(expr):
-                    # replace var == "" with #parts_var == 0
-                    expr = re.sub(
-                        rf'\b{re.escape(var)}\s*==\s*""',
-                        f'#{parts_var} == 0',
-                        expr
-                    )
-                else:
-                    # can't safely transform, abort
-                    return
-            
-            new_line = f'{line_indent}{parts_var}[#{parts_var}+1] = {expr}\n'
+                return
+
+            new_line = f'{line_indent}{count_var} = {count_var} + 1; {parts_var}[{count_var}] = {expr}\n'
             concat_replacements.append((line_start, line_end, new_line))
         
         # validate loop end line
@@ -1125,9 +1126,9 @@ class ASTTransformer:
         # step 1: replace initialization line
         stripped = init_text.strip()
         if stripped.startswith('local '):
-            new_init = f'{indent}local {parts_var} = {{}}\n'
+            new_init = f'{indent}local {parts_var}, {count_var} = {{}}, 0\n'
         else:
-            new_init = f'{indent}{parts_var} = {{}}\n'
+            new_init = f'{indent}{parts_var}, {count_var} = {{}}, 0\n'
         
         self.edits.append(SourceEdit(
             start_char=init_start,
@@ -1146,7 +1147,13 @@ class ASTTransformer:
             ))
         
         # step 3: add table.concat after loop ends
-        concat_decl = f'\n{indent}local {var} = table.concat({parts_var})'
+        # Explicit 1..n range, not bare table.concat(parts): with the counter
+        # form a nil operand leaves a hole, and concat over an explicit range
+        # raises "invalid value (nil) at index k" exactly where the original
+        # `..` would have raised "attempt to concatenate a nil value". Bare
+        # table.concat would use #parts, stop at the hole and silently return a
+        # truncated string - turning a crash into a wrong answer.
+        concat_decl = f'\n{indent}local {var} = table.concat({parts_var}, "", 1, {count_var})'
         
         self.edits.append(SourceEdit(
             start_char=end_line_end,
