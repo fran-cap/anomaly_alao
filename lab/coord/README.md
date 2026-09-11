@@ -19,7 +19,7 @@ py -3.12 C:\code\GIT\anomaly_alao\lab\coord\coord.py board
 | Resource | Why it is contested | Lock |
 |---|---|---|
 | The game: `ModOrganizer.exe`, `AnomalyDX11AVX.exe`, PresentMon's ETW session, `user.ltx`, `GAMMA/profiles/aalo-*`, `GAMMA/mods/aalo-rewrite-*` | one game process at a time; the harness edits and restores config around each run | `game` (held only by `fps_runner.py`) |
-| Timed corpus runs (`tools/corpus_run.py`) | G6 timing is meaningless if two 8-worker runs overlap; run ids are second-resolution | `corpus` |
+| Timed corpus runs (`tools/corpus_run.py`) | G6 timing is meaningless if two 8-worker runs overlap; run ids are second-resolution. **Also waits while `game` is held**: an 8-worker run on the same box as a frametime capture wrecks both | `corpus` |
 | `lab/data/ideas.json`, `lab/docs/beam-ideas.md` | one writer; they are tracked in git and would merge-conflict across worktrees | `ideas` (organizer only) |
 | `extracted/gamma`, `extracted/vanilla` (read-only shared corpus source) | regenerating it under someone's run | `extract` (only if you must re-extract; you should not need to) |
 

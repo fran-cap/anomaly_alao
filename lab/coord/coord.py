@@ -64,6 +64,10 @@ QUEUE = COORD_ROOT / "queue"
 STATUS = COORD_ROOT / "status"
 QUEUE_STATES = ("pending", "running", "done", "failed")
 KNOWN_LOCKS = ("game", "corpus", "ideas", "extract")
+# Taking the left lock also waits until every lock on the right is free. A timed
+# corpus run (8 workers) on the same box as a frametime capture wrecks both,
+# so corpus work yields to the game.
+CONFLICTS = {"corpus": ("game",), "extract": ("game", "corpus")}
 
 
 def _now() -> float:
@@ -126,6 +130,13 @@ def lock_acquire(name: str, owner: str, ttl: float = 900, wait: float = 0, note:
     deadline = _now() + wait
     token = uuid.uuid4().hex[:12]
     while True:
+        busy = [c for c in CONFLICTS.get(name, ()) if (ci := lock_info(c)) and not ci.get("stale")]
+        if busy:
+            if _now() >= deadline:
+                raise LockHeld(f"lock {name!r} must wait for {busy}: " + "; ".join(
+                    f"{c} held by {lock_info(c).get('owner')} until {_iso(lock_info(c).get('expires'))}" for c in busy))
+            time.sleep(min(15.0, max(1.0, deadline - _now())))
+            continue
         try:
             d.mkdir()
         except FileExistsError:
