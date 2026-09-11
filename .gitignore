@@ -143,8 +143,12 @@ val/
 # ALAO lab (tests/tools/dashboard live in lab/; regenerable run data stays out)
 lab/data/runs/
 lab/data/snapshots/
+# per corpus run only manifest.json + results.json (the contract) are tracked;
+# logs, the exclude stub, the full ALAO reports and diffs are regenerable
 lab/data/corpus/*/diffs/
-lab/data/corpus/*/alao-report.json
+lab/data/corpus/*/alao-*report.json
+lab/data/corpus/*/*.log
+lab/data/corpus/*/empty-exclude.txt
 lab/**/__pycache__/
 
 # lab coordination runtime state (locks, queue, status board, built overlays)
