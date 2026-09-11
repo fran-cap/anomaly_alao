@@ -379,6 +379,10 @@ def _cmd_run(a) -> int:
     cmd = list(a.cmd)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
+    # CreateProcess won't find 'py' the way a shell does; resolve it ourselves
+    exe = shutil.which(cmd[0])
+    if exe:
+        cmd[0] = exe
     with held(a.lock, a.owner, a.ttl, a.wait, a.note or " ".join(cmd)[:120]):
         proc = subprocess.run(cmd)
         return proc.returncode
