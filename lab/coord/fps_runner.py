@@ -6,10 +6,14 @@ ETW session; see lab/framework/README.md "Elevation caveat").  Close RTSS /
 Afterburner first.  Agents never call this; they `coord queue submit` a request
 and the organizer (or whoever holds the elevated shell) runs:
 
-    py -3.12 C:\\code\\GIT\\anomaly_alao\\lab\\coord\\fps_runner.py            # drain until empty
-    py -3.12 ...\\fps_runner.py --once                                           # one item
+    py -3.12 C:\\code\\GIT\\anomaly_alao\\lab\\coord\\fps_runner.py            # wait for work, run it, keep waiting
+    py -3.12 ...\\fps_runner.py --once                                           # one item, then exit
+    py -3.12 ...\\fps_runner.py --exit-when-empty                                # old drain-and-exit behaviour
     py -3.12 ...\\fps_runner.py --dry-run                                        # harness dry-run, no game
-    py -3.12 ...\\fps_runner.py --watch 60                                       # poll every 60 s forever
+    py -3.12 ...\\fps_runner.py --poll 30                                        # poll interval (default 60 s)
+
+The game is only ever launched for a claimed queue item. With nothing queued the
+runner idles, printing a heartbeat every few minutes, until Ctrl+C.
 
 Request JSON an agent submits (all paths absolute):
 
@@ -218,16 +222,34 @@ def process(item: dict, dry_run: bool, keep: bool) -> dict:
                 toml.unlink()
 
 
-def drain(once: bool, dry_run: bool, keep: bool, watch: float | None) -> int:
+def drain(once: bool, dry_run: bool, keep: bool, poll: float, exit_when_empty: bool) -> int:
     n = 0
+    idle_since = None
+    last_beat = 0.0
     while True:
         item = coord.queue_claim(RUNNER_OWNER)
         if item is None:
-            if watch:
-                time.sleep(watch)
-                continue
-            print(f"[fps-runner] queue empty ({n} processed)")
-            return 0
+            if exit_when_empty:
+                print(f"[fps-runner] queue empty ({n} processed)")
+                return 0
+            now = time.time()
+            if idle_since is None:
+                idle_since = now
+                print(f"[fps-runner] {datetime.now():%H:%M:%S} queue empty, waiting (poll {poll:g} s, Ctrl+C to stop)",
+                      flush=True)
+                coord.post_status(RUNNER_OWNER, "", "idle", "waiting for queue items")
+            elif now - last_beat >= 300:
+                print(f"[fps-runner] {datetime.now():%H:%M:%S} still waiting, idle {int((now - idle_since) / 60)} min, "
+                      f"{n} processed this session", flush=True)
+            last_beat = now
+            try:
+                time.sleep(poll)
+            except KeyboardInterrupt:
+                print("\n[fps-runner] stopped while idle")
+                coord.post_status(RUNNER_OWNER, "", "stopped", "runner exited while idle")
+                return 0
+            continue
+        idle_since = None
         print(f"[fps-runner] {datetime.now():%H:%M:%S} claimed {item['id']} (idea {item['idea']}, {item['agent']})",
               flush=True)
         coord.post_status(RUNNER_OWNER, item["idea"], "fps-run", f"running {item['id']}")
@@ -237,6 +259,12 @@ def drain(once: bool, dry_run: bool, keep: bool, watch: float | None) -> int:
             coord.queue_finish(item["id"], True, result)
             coord.post_status(RUNNER_OWNER, item["idea"], "fps-done", result["summary"])
             print(f"[fps-runner] done {item['id']}: {result['summary']}", flush=True)
+        except KeyboardInterrupt:
+            # process()'s finally has already removed the overlays/profile/toml
+            coord.queue_finish(item["id"], False, error="interrupted (Ctrl+C) by the runner operator")
+            coord.post_status(RUNNER_OWNER, item["idea"], "fps-failed", f"{item['id']} interrupted by Ctrl+C")
+            print(f"\n[fps-runner] interrupted during {item['id']}; item marked failed, cleanup done", flush=True)
+            return 130
         except Exception:
             err = traceback.format_exc()
             coord.queue_finish(item["id"], False, error=err[-2000:])
@@ -249,17 +277,21 @@ def drain(once: bool, dry_run: bool, keep: bool, watch: float | None) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--once", action="store_true", help="process one item (waiting for it if needed), then exit")
+    ap.add_argument("--exit-when-empty", action="store_true", help="drain the queue and exit instead of waiting")
+    ap.add_argument("--poll", type=float, default=60.0, help="seconds between queue checks while idle (default 60)")
     ap.add_argument("--dry-run", action="store_true", help="harness dry-run: no game launch, synthetic samples")
     ap.add_argument("--keep", action="store_true", help="leave overlay mods / profile / toml in place afterwards")
-    ap.add_argument("--watch", type=float, help="poll interval seconds; keep draining forever")
+    ap.add_argument("--watch", type=float, help=argparse.SUPPRESS)  # old spelling of --poll
     ap.add_argument("--no-admin-check", action="store_true")
     a = ap.parse_args(argv)
+    if a.watch:
+        a.poll = a.watch
     if not a.dry_run and not a.no_admin_check and not is_admin():
         print("fps_runner: this terminal is not elevated; MO2 launch will fail. "
               "Open an elevated shell, or use --dry-run.", file=sys.stderr)
         return 2
-    return drain(a.once, a.dry_run, a.keep, a.watch)
+    return drain(a.once, a.dry_run, a.keep, max(5.0, a.poll), a.exit_when_empty)
 
 
 if __name__ == "__main__":

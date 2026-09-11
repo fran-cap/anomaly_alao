@@ -108,10 +108,14 @@ the `game` lock; you will see the result on the board and in the queue item.
 ## Draining the queue (organizer / whoever has the elevated shell)
 
 ```
-py -3.12 C:\code\GIT\anomaly_alao\lab\coord\fps_runner.py --dry-run --once   # pipeline check, no game
-py -3.12 C:\code\GIT\anomaly_alao\lab\coord\fps_runner.py                    # elevated: drain until empty
-py -3.12 C:\code\GIT\anomaly_alao\lab\coord\fps_runner.py --watch 120        # elevated: keep polling
+py -3.12 C:\code\GIT\anomaly_alao\lab\coord\fps_runner.py --dry-run --exit-when-empty   # pipeline check, no game
+py -3.12 C:\code\GIT\anomaly_alao\lab\coord\fps_runner.py                              # elevated: wait for items, run them, keep waiting
+py -3.12 C:\code\GIT\anomaly_alao\lab\coord\fps_runner.py --once                       # elevated: one item, then exit
 ```
+The runner never launches the game unless it has claimed a queue item. With nothing queued it idles
+with a heartbeat line every 5 minutes until Ctrl+C. Ctrl+C during a run marks the item failed and
+removes the overlay mods, the `aalo-src` profile and the TOML on the way out.
+
 Close RTSS / Afterburner first (both hook the game and fight PresentMon). The runner refuses to
 start un-elevated unless `--dry-run`.
 
