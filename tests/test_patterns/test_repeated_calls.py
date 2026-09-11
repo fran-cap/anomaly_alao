@@ -352,6 +352,57 @@ end
 """
 
 
+# the name collision that matters in the wild: the throttle state is a
+# MODULE-level local called tg, which the body reads as an upvalue. Shadowing
+# it turns the guard into `tg == tg` and the function returns on its first
+# line for ever (real site: drx_da_main_artefacts_movement.script).
+TIME_GLOBAL_MODULE_STATE = """
+local tg = 0
+
+function f()
+    if time_global() == tg then return "skipped" end
+    tg = time_global()
+    return "ran"
+end
+"""
+
+
+def test_time_global_cache_does_not_shadow_module_state(transform, run_both, compiles):
+    out = transform(TIME_GLOBAL_MODULE_STATE)
+    assert "local tg = 0" in out
+    assert "local tg = time_global()" not in out
+    assert "tg == tg" not in out
+    compiles(out)
+    run_both(TIME_GLOBAL_MODULE_STATE, out, "f")
+
+
+# same hole, same fix, older pattern: an upvalue the cache name would capture
+DB_ACTOR_MODULE_LOCAL = """
+local actor = "a string, not the actor"
+
+function f()
+    local a = db.actor.health
+    local b = db.actor.health
+    local c = db.actor.health
+    local d = db.actor.health
+    return actor, a == b, c == d
+end
+"""
+
+
+def test_db_actor_cache_does_not_shadow_a_module_local(transform, run_both):
+    """Predates I-040 and applies to the whole repeated_* family.
+
+    `_collect_function_locals` only walked the body and its descendants, so a
+    module-level local of the same name was invisible and the cache captured
+    it.
+    """
+    out = transform(DB_ACTOR_MODULE_LOCAL)
+    assert 'local actor = "a string, not the actor"' in out
+    assert "local actor = db.actor" not in out
+    run_both(DB_ACTOR_MODULE_LOCAL, out, "f")
+
+
 def test_time_global_cache_name_does_not_shadow(transform, run_both, compiles):
     out = transform(TIME_GLOBAL_NAME_TAKEN)
     assert 'local tg = "not a time at all"' in out
