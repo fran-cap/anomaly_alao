@@ -21,6 +21,8 @@ Request JSON an agent submits (all paths absolute):
       "label": "counter-append",                 # short slug, [a-z0-9-]
       "variant_overlay":  "C:/.../overlay-b",    # dir with gamedata/scripts/... (build_overlay.py output)
       "baseline_overlay": null,                  # null = stock game; or another overlay dir
+      "variant_overlay_bottom": null,            # optional: a LOWEST-priority overlay (rewritten vanilla
+      "baseline_overlay_bottom": null,           #   scripts: every mod still overrides it), same for baseline
       "repeats": 3, "duration_s": 300, "warmup_s": 30, "save": "gammabaseline",
       "notes": "ALAO --fix with I-001 counter append, 1503-file corpus"
     }
@@ -94,18 +96,48 @@ def remove_overlay(cfg, name: str) -> None:
         shutil.rmtree(dst)
 
 
-def make_source_profile(m: _mo2.MO2, qid: str, mod_names: list[str]) -> str:
-    """Clone the live profile and put our overlay mods at the top, disabled."""
+def restore_selected_profile(cfg, wanted: str) -> bool:
+    """MO2 persists the `-p <profile>` we launch with into ModOrganizer.ini, so
+    after a run its selected profile points at an aalo-* copy we then delete.
+    Put the live profile back (a one-line byte-exact edit, nothing else touched)."""
+    import re
+    ini = cfg.mo2_root / "ModOrganizer.ini" if hasattr(cfg, "mo2_root") else cfg.mo2_exe.parent / "ModOrganizer.ini"
+    if not ini.is_file():
+        return False
+    raw = ini.read_bytes()
+    m = re.search(rb"^selected_profile=.*$", raw, re.M)
+    if not m:
+        return False
+    line = m.group()
+    current = line.split(b"=", 1)[1]
+    if current.startswith(b"@ByteArray(") and current.endswith(b")"):
+        current = current[len(b"@ByteArray("):-1]
+    if current.decode("utf-8", "replace") == wanted:
+        return False
+    newline = b"selected_profile=@ByteArray(" + wanted.encode("utf-8") + b")"
+    ini.write_bytes(raw[:m.start()] + newline + raw[m.end():])
+    return True
+
+
+def make_source_profile(m: _mo2.MO2, qid: str, top: list[str], bottom: list[str] = ()) -> str:
+    """Clone the live profile; *top* mods go first (highest priority, they win),
+    *bottom* mods go last (lowest priority, every other mod overrides them - the
+    place for a rewritten-vanilla-scripts mod). All inserted disabled."""
     prof = m.copy_profile(SRC_PREFIX + qid, source=m.cfg.profile, overwrite=True)
     ml = m.modlist(prof)
-    for name in reversed(mod_names):
+    for name in reversed(top):
         if ml.find(name) is None:
             ml.entries.insert(0, _mo2.ModEntry(_mo2.DISABLED, name))
+    for name in bottom:
+        if ml.find(name) is None:
+            ml.entries.append(_mo2.ModEntry(_mo2.DISABLED, name))
     ml.save()
     return prof
 
 
-def write_experiment(cfg, qid: str, req: dict, prof: str, mod_a: str | None, mod_b: str) -> Path:
+def write_experiment(cfg, qid: str, req: dict, prof: str, arm_mods: dict) -> Path:
+    """*arm_mods* = {"baseline": [mod names], "variant": [mod names]}; each arm
+    enables its own mods and disables the other arm's."""
     exp_dir = cfg.experiments_dir
     exp_dir.mkdir(parents=True, exist_ok=True)
     p = exp_dir / f"{REWRITE_PREFIX}{qid}.toml"
@@ -119,17 +151,12 @@ def write_experiment(cfg, qid: str, req: dict, prof: str, mod_a: str | None, mod
         f'profile = "{prof}"',
         f'save = "{req.get("save", "gammabaseline")}"',
         f'notes = "{label}"',
-        "",
-        "[baseline]",
-        f'notes = "{"overlay " + mod_a if mod_a else "stock"}"',
-        "[baseline.mods]",
     ]
-    if mod_a:
-        lines.append(f'"{mod_a}" = true')
-    lines.append(f'"{mod_b}" = false')
-    lines += ["", "[variant]", f'notes = "overlay {mod_b}"', "[variant.mods]", f'"{mod_b}" = true']
-    if mod_a:
-        lines.append(f'"{mod_a}" = false')
+    for arm in ("baseline", "variant"):
+        mine = arm_mods.get(arm, [])
+        others = [n for a, ns in arm_mods.items() if a != arm for n in ns]
+        lines += ["", f"[{arm}]", f'notes = "{("overlay " + " ".join(mine)) if mine else "stock"}"', f"[{arm}.mods]"]
+        lines += [f'"{n}" = true' for n in mine] + [f'"{n}" = false' for n in others]
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return p
 
@@ -158,13 +185,22 @@ def summarize_runs(cfg, exp_name: str) -> dict:
         return round(statistics.fmean(vals), 2) if vals else None
 
     per_arm = {}
+    capped_runs = []
     for arm, runs in arms.items():
+        # a round pinned to a refresh rate measured the cap, not the scripts:
+        # keep it in the record, keep it out of the means
+        capped = [r for r in runs if (r.get("extra") or {}).get("capped")]
+        capped_runs += [r["run_id"] for r in capped]
+        good = [r for r in runs if r not in capped] or runs
         per_arm[arm] = {
-            "n": len(runs),
-            "fps_avg": mean(r.get("fps_avg") for r in runs),
-            "fps_1pct_low": mean(r.get("fps_1pct_low") for r in runs),
-            "frametime_p99_ms": mean(r.get("frametime_p99_ms") for r in runs),
+            "n": len(good),
+            "n_all": len(runs),
+            "fps_avg": mean(r.get("fps_avg") for r in good),
+            "fps_1pct_low": mean(r.get("fps_1pct_low") for r in good),
+            "frametime_p99_ms": mean(r.get("frametime_p99_ms") for r in good),
+            "fps_avg_all_rounds": mean(r.get("fps_avg") for r in runs),
             "crashed": sum(1 for r in runs if r.get("crashed")),
+            "capped": [r["run_id"] for r in capped],
             "runs": [r["run_id"] for r in runs],
         }
     b, v = per_arm.get("baseline", {}), per_arm.get("variant", {})
@@ -176,7 +212,10 @@ def summarize_runs(cfg, exp_name: str) -> dict:
     summary = (f"baseline fps {b.get('fps_avg')} / 1%low {b.get('fps_1pct_low')}  ->  "
                f"variant fps {v.get('fps_avg')} / 1%low {v.get('fps_1pct_low')}  "
                f"(delta avg {delta.get('fps_avg_pct')}%, 1%low {delta.get('fps_1pct_low_pct')}%)")
-    return {"experiment": exp_name, "arms": per_arm, "delta": delta, "run_dirs": run_dirs, "summary": summary}
+    if capped_runs:
+        summary += f"  [{len(capped_runs)} capped round(s) excluded]"
+    return {"experiment": exp_name, "arms": per_arm, "delta": delta, "run_dirs": run_dirs,
+            "capped_runs": capped_runs, "summary": summary}
 
 
 def process(item: dict, dry_run: bool, keep: bool) -> dict:
@@ -185,17 +224,29 @@ def process(item: dict, dry_run: bool, keep: bool) -> dict:
     req = item["request"]
     req.setdefault("idea", item.get("idea", ""))
     qid = _slug(item["id"])
-    mod_b = f"{REWRITE_PREFIX}{qid}-b"
-    mod_a = f"{REWRITE_PREFIX}{qid}-a" if req.get("baseline_overlay") else None
-    installed, prof, toml = [], None, None
+    # (request key, arm, suffix, position)
+    slots = [
+        ("variant_overlay", "variant", "b", "top"),
+        ("baseline_overlay", "baseline", "a", "top"),
+        ("variant_overlay_bottom", "variant", "b2", "bottom"),
+        ("baseline_overlay_bottom", "baseline", "a2", "bottom"),
+    ]
+    installed, top, bottom, prof, toml = [], [], [], None, None
+    arm_mods: dict = {"baseline": [], "variant": []}
     try:
-        install_overlay(cfg, mod_b, Path(req["variant_overlay"]))
-        installed.append(mod_b)
-        if mod_a:
-            install_overlay(cfg, mod_a, Path(req["baseline_overlay"]))
-            installed.append(mod_a)
-        prof = make_source_profile(m, qid, installed)
-        toml = write_experiment(cfg, qid, req, prof, mod_a, mod_b)
+        for key, arm, suffix, pos in slots:
+            src = req.get(key)
+            if not src:
+                continue
+            name = f"{REWRITE_PREFIX}{qid}-{suffix}"
+            install_overlay(cfg, name, Path(src))
+            installed.append(name)
+            (top if pos == "top" else bottom).append(name)
+            arm_mods[arm].append(name)
+        if not arm_mods["variant"]:
+            raise ValueError("request has no variant_overlay / variant_overlay_bottom")
+        prof = make_source_profile(m, qid, top, bottom)
+        toml = write_experiment(cfg, qid, req, prof, arm_mods)
         cmd = [sys.executable, "-m", "aalo", "run", "--experiment", str(toml)]
         if req.get("save"):
             cmd += ["--save", req["save"]]
@@ -207,7 +258,7 @@ def process(item: dict, dry_run: bool, keep: bool) -> dict:
         result = summarize_runs(cfg, toml.stem)
         result["harness_rc"] = proc.returncode
         result["wall_s"] = round(time.time() - t0, 1)
-        result["overlay_mods"] = installed
+        result["overlay_mods"] = {"top": top, "bottom": bottom}
         result["dry_run"] = dry_run
         if proc.returncode != 0:
             raise RuntimeError(f"aalo run exited {proc.returncode}: {result['summary']}")
@@ -218,6 +269,8 @@ def process(item: dict, dry_run: bool, keep: bool) -> dict:
                 remove_overlay(cfg, name)
             if prof:
                 m.delete_profile(prof)
+        if restore_selected_profile(cfg, cfg.profile):
+            print(f"[fps-runner] restored MO2 selected profile to {cfg.profile}", flush=True)
             if toml and toml.is_file():
                 toml.unlink()
 

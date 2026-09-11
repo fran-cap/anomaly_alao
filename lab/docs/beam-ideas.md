@@ -642,6 +642,15 @@ Corrections to earlier sections:
   measurable difference.** That is the expected result given that the rewrites live in menu, UI and
   event code a standing-still capture never runs; it also confirms ALAO's rewrites cost nothing.
 
+**Vanilla `scripts.db0` corpus (2026-09-11, run `20260911-141502-vanilla-db`).** The 413 packed vanilla
+scripts (unpacked with the install's `converter.exe -unpack -dir` into `extracted/vanilla_db`, nothing
+written in the install) were put through the same gate: 176 of 413 rewritten, 2238 edits, 0 compile
+failures, 1 parse failure (`lua_help.script`, documentation, not Lua), 1 idempotence violation
+(`xr_logic.script:741`, a nested `string_find_plain` under a `table_insert_append`; strict xfail added).
+At the bottom of the GAMMA load order 111 of the 176 rewritten files are live; 65 are shipped by a mod.
+This is the README's "Vanilla Anomaly Scripts Optimized" mod, measured in-game as queue item
+`vanilla-db-plus-mods` (stock vs mods-overlay-on-top + vanilla-overlay-at-bottom).
+
 What generation 2 should chase, given the above: `time_global()`-guarded per-frame bodies (186 abort sites)
 and engine-call hoisting in the 183 interpreted per-frame bodies; `pairs`->`ipairs` (I-005) must be gated by
 the I-013 classifier because it is 0.29x interpreted on 78% of per-frame `pairs` sites.

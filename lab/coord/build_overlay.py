@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_MODLIST = Path(r"D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA\GAMMA\profiles\G.A.M.M.A\modlist.txt")
+DEFAULT_MODS_DIR = Path(r"D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA\GAMMA\mods")
 BAK = ".alao-bak"
 
 
@@ -109,20 +110,78 @@ def build(work: Path, out: Path, modlist: Path, manifest_only: bool = False) -> 
     return manifest
 
 
+def build_bottom(work: Path, out: Path, modlist: Path, mods_dir: Path, manifest_only: bool = False) -> dict:
+    """Overlay meant for the BOTTOM of the load order: rewritten vanilla scripts.
+
+    The tree is a single pseudo-mod (VANILLA_DB or VANILLA_SCRIPTS) that is not
+    in the modlist. At lowest priority a file is live only if NO enabled mod
+    ships the same gamedata-relative path, so scan the real mods dir (read-only)
+    for what the enabled mods ship and take rewritten files outside that set.
+    """
+    order = read_modlist(modlist)
+    shipped: set[str] = set()
+    for mod in order:
+        gd = mods_dir / mod / "gamedata"
+        if gd.is_dir():
+            for f in gd.rglob("*.script"):
+                shipped.add(f.relative_to(gd).as_posix().lower())
+    trees = [p for p in work.iterdir() if p.is_dir() and (p / "gamedata").is_dir()]
+    taken, shadowed, untouched = [], [], 0
+    for tree in trees:
+        gd = tree / "gamedata"
+        for f in gd.rglob("*"):
+            if not f.is_file() or f.name.endswith(BAK):
+                continue
+            rel = f.relative_to(gd).as_posix()
+            rewritten = (f.parent / (f.name + BAK)).is_file()
+            if not rewritten:
+                untouched += 1
+                continue
+            if rel.lower() in shipped:
+                shadowed.append({"rel": rel, "mod": tree.name})
+            else:
+                taken.append({"rel": rel, "mod": tree.name, "sha256": sha256(f)})
+    manifest = {
+        "work": str(work), "modlist": str(modlist), "mods_dir": str(mods_dir), "position": "bottom",
+        "enabled_mods_in_modlist": len(order), "files_shipped_by_enabled_mods": len(shipped),
+        "files_taken": len(taken), "rewritten_but_shadowed": len(shadowed), "winners_not_rewritten": untouched,
+        "taken": taken, "shadowed": shadowed, "mods_not_in_modlist": [],
+    }
+    if manifest_only:
+        return manifest
+    if out.exists():
+        shutil.rmtree(out)
+    for t in taken:
+        dst = out / "gamedata" / t["rel"]
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(work / t["mod"] / "gamedata" / t["rel"], dst)
+    (out / "overlay_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (out / "meta.ini").write_text(
+        "[General]\ncategory=\ncomments=ALAO rewritten vanilla scripts overlay (lab/coord/build_overlay.py --bottom). "
+        "Load it LOWEST. Safe to delete.\n", encoding="utf-8")
+    return manifest
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work", type=Path, required=True)
     ap.add_argument("--out", type=Path)
     ap.add_argument("--modlist", type=Path, default=DEFAULT_MODLIST)
     ap.add_argument("--manifest-only", action="store_true")
+    ap.add_argument("--bottom", action="store_true",
+                    help="overlay for the bottom of the load order (rewritten vanilla scripts): take rewritten files no enabled mod ships")
+    ap.add_argument("--mods-dir", type=Path, default=DEFAULT_MODS_DIR)
     a = ap.parse_args(argv)
     if not a.work.is_dir():
         print(f"no such work tree: {a.work}", file=sys.stderr)
         return 2
     if not a.manifest_only and a.out is None:
         ap.error("--out is required unless --manifest-only")
-    m = build(a.work.resolve(), a.out.resolve() if a.out else Path("."), a.modlist, a.manifest_only)
-    print(f"overlay: {m['files_taken']} rewritten winners taken, "
+    if a.bottom:
+        m = build_bottom(a.work.resolve(), a.out.resolve() if a.out else Path("."), a.modlist, a.mods_dir, a.manifest_only)
+    else:
+        m = build(a.work.resolve(), a.out.resolve() if a.out else Path("."), a.modlist, a.manifest_only)
+    print(f"overlay ({m.get('position', 'top')}): {m['files_taken']} rewritten winners taken, "
           f"{m['rewritten_but_shadowed']} rewrites shadowed by a higher-priority mod, "
           f"{m['winners_not_rewritten']} winners untouched, "
           f"{len(m['mods_not_in_modlist'])} tree mods absent from modlist")

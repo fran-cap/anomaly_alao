@@ -302,6 +302,57 @@ def _low_percent_mean(fps_values, pct: float = 1.0) -> float | None:
     return sum(worst) / len(worst)
 
 
+# Refresh rates and limiter values a run can silently pin itself to. A round that
+# sits flat on one of these in every window measured the cap, not the config.
+COMMON_CAPS = (30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 175, 180, 240, 360)
+
+
+def window_fps(samples, window_s: float = 30.0) -> list[float]:
+    """Harmonic-mean fps per consecutive *window_s* slice, in order."""
+    samples = [s for s in samples if s.frametime_ms and s.frametime_ms > 0]
+    if not samples:
+        return []
+    out = []
+    t0 = samples[0].t_s
+    bucket: list[float] = []
+    edge = t0 + window_s
+    for smp in samples:
+        while smp.t_s >= edge:
+            if bucket:
+                out.append(1000.0 / (sum(bucket) / len(bucket)))
+                bucket = []
+            edge += window_s
+        bucket.append(smp.frametime_ms)
+    if bucket:
+        out.append(1000.0 / (sum(bucket) / len(bucket)))
+    return out
+
+
+def detect_frame_cap(samples, window_s: float = 30.0, tolerance: float = 1.0) -> dict:
+    """Flag a round whose fps sat flat on a refresh rate / limiter the whole time.
+
+    Every window within *tolerance* fps of the same value, and that value within
+    *tolerance* of a known cap. Real gameplay drifts by several fps between
+    windows even when standing still; a cap does not. The first clean reference
+    run (2026-09-11) had one round at exactly 144.0 in all ten windows next to
+    five rounds at 205-212, and a three-round mean swallowed it whole.
+    """
+    wins = window_fps(samples, window_s)
+    info = {"capped": False, "cap_fps": None, "window_fps": [round(w, 1) for w in wins]}
+    if len(wins) < 3:
+        return info
+    lo, hi = min(wins), max(wins)
+    if hi - lo > 2 * tolerance:
+        return info
+    mid = (lo + hi) / 2
+    for cap in COMMON_CAPS:
+        if abs(mid - cap) <= tolerance:
+            info["capped"] = True
+            info["cap_fps"] = cap
+            return info
+    return info
+
+
 def compute_metrics(samples, duration_s: float | None = None, crashed: bool = False, load_time_s=None, extra=None) -> dict:
     """Build the contract's ``metrics.json`` dict from samples."""
     samples = list(samples)
@@ -323,9 +374,13 @@ def compute_metrics(samples, duration_s: float | None = None, crashed: bool = Fa
     ram_peak = max((s.rss_mb for s in samples if s.rss_mb is not None), default=None)
     cpu_values = [s.cpu_pct for s in samples if s.cpu_pct is not None]
 
+    cap = detect_frame_cap(samples)
     ex = {
         "samples": len(samples),
         "frames": len(frametimes),
+        "capped": cap["capped"],
+        "cap_fps": cap["cap_fps"],
+        "window_fps": cap["window_fps"],
         "cpu_pct_avg": round(sum(cpu_values) / len(cpu_values), 2) if cpu_values else None,
         "cpu_pct_peak": round(max(cpu_values), 2) if cpu_values else None,
         "frametime_p95_ms": _round(percentile(frametimes, 95)),

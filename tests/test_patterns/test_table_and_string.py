@@ -213,3 +213,22 @@ def test_an_alias_that_survives_the_rewrite_is_still_fixed(analyze):
 
 def test_a_plain_table_insert_is_unaffected_by_the_alias_guard(analyze):
     assert "table_insert_append" in pattern_names(analyze(TABLE_INSERT))
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "ALAO bug found on the vanilla scripts.db0 corpus (xr_logic.script:741, run "
+    "20260911-141502-vanilla-db): a string_find_plain edit nested inside the value "
+    "of a table.insert that table_insert_append also rewrites is dropped on pass 1 "
+    "and only lands on pass 2, so --fix is not a fixpoint. _apply_edits containment "
+    "folds contained edits, but the append rewrite rebuilds the value from text "
+    "(_extract_table_insert_value, I-019) so the inner edit has nothing to fold into."))
+def test_string_find_inside_an_appended_constructor_lands_in_one_pass(transform):
+    src = """
+function f(lst, infop)
+    table.insert(lst, {infop, 1, (string.find(infop, "npcx_"))})
+    return lst
+end
+"""
+    once = transform(src)
+    assert "lst[#lst+1]" in once
+    assert 'string.find(infop, "npcx_", 1, true)' in once, "inner edit must land on the first pass"
