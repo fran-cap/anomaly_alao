@@ -438,3 +438,50 @@ def test_cp1251_scripts_survive_a_full_fix_revert_cycle(mods_tree, run_cli):
 
     run_cli(root, "--revert", "-q", stdin="y\n", check=True)
     assert path.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# I-031: global write reporting
+# ---------------------------------------------------------------------------
+
+GLOBALS_MOD = """
+settings = {}
+enabled = true
+
+function apply()
+    enabled = true
+    leaked = 1
+    leaked = 2
+end
+"""
+
+
+def _globals_report(run_cli, read_json, mods_tree, tmp_path, *flags):
+    root = mods_tree({"ModG": {"g.script": GLOBALS_MOD}}, root_name="mods_globals")
+    out = tmp_path / ("globals%d.json" % len(flags))
+    run_cli(root, "--report", out, "-q", *flags, check=True)
+    return read_json(out)["findings_by_pattern"]
+
+
+def test_module_level_globals_are_not_reported_by_default(
+        run_cli, read_json, mods_tree, tmp_path):
+    by_pattern = _globals_report(run_cli, read_json, mods_tree, tmp_path)
+    # `leaked` written twice in one body collapses into a single finding
+    assert by_pattern.get("global_write") == 1
+    assert "module_global_write" not in by_pattern
+
+
+def test_show_globals_adds_the_module_level_family(
+        run_cli, read_json, mods_tree, tmp_path):
+    by_pattern = _globals_report(run_cli, read_json, mods_tree, tmp_path, "--show-globals")
+    assert by_pattern.get("global_write") == 1
+    # settings + enabled
+    assert by_pattern.get("module_global_write") == 2
+
+
+def test_no_global_writes_drops_the_whole_family(
+        run_cli, read_json, mods_tree, tmp_path):
+    by_pattern = _globals_report(run_cli, read_json, mods_tree, tmp_path,
+                                 "--show-globals", "--no-global-writes")
+    assert "global_write" not in by_pattern
+    assert "module_global_write" not in by_pattern

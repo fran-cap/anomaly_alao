@@ -135,8 +135,29 @@ def compare(base_id, new_id, base, new, limit):
         for p, b, n in changed[:limit]:
             A(f"| `{p}` | {b} | {n} | {delta_str(b, n)} |")
         if len(changed) > limit:
-            A(f"\n_{len(changed) - limit} more patterns changed (raise `--limit`)._")
+            hidden = sum(n - b for _p, b, n in changed[limit:])
+            A(f"\n_{len(changed) - limit} more patterns changed (raise `--limit`); "
+              f"they account for {hidden:+d} of the findings delta._")
         A("")
+
+    # I-031 housekeeping: the note in next-session.md said the severity totals
+    # did not reconcile with the per-pattern deltas. The underlying numbers do
+    # reconcile; what never added up is the *printed* pattern table, which lists
+    # only changed patterns and only the top `--limit` of those. Say so here, and
+    # shout if the stored totals ever really disagree.
+    for _label, _res in (("base", bres), ("new", nres)):
+        pat_total = sum((_res.get("findings_by_pattern") or {}).values())
+        sev_total = sum((_res.get("findings_by_severity") or {}).values())
+        if pat_total != sev_total:
+            A(f"> **Warning:** {_label} run: findings_by_pattern sums to "
+              f"{pat_total} but findings_by_severity sums to {sev_total}.\n")
+    shown_delta = sum(n - b for _p, b, n in changed[:limit])
+    total_delta = (sum((nres.get("findings_by_pattern") or {}).values())
+                   - sum((bres.get("findings_by_pattern") or {}).values()))
+    if changed and shown_delta != total_delta:
+        A(f"_Pattern rows shown account for {shown_delta:+d} of the "
+          f"{total_delta:+d} total findings delta; the rest is in patterns "
+          f"below the --limit cut._\n")
 
     for title, key in (("Parse failures", "parse_failures"), ("Timeouts", "timeouts"),
                        ("Crashes", "crashes"), ("Compile failures after fix", "compile_failures_after_fix"),

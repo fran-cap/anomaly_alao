@@ -20,6 +20,16 @@ Options:
                        Minimum function call count to trigger caching (default: 4)
                        Hot callbacks use N-1. Lower = more aggressive caching.
 
+    # REPORT NOISE
+    --show-globals    Also report module-level global writes (module_global_write).
+                      Off by default: an Anomaly `.script` IS a module, so its
+                      top-level globals are the convention, not a defect. Only the
+                      forgotten-`local` case (a write inside a function body to a
+                      name the file never defines at module level) is reported as
+                      `global_write`, grouped one finding per file+name (I-031).
+    --no-global-writes
+                      Do not report global writes at all.
+
     # IMPORTANT
     --backup-all-scripts [path]
                        Backup ALL scripts to a zip archive before modifications
@@ -133,8 +143,11 @@ def analyze_file_worker(args_tuple):
     A timeout and a syntax error are completely different problems (I-035), so
     the caller gets to tell them apart instead of a substring match on a string.
     """
-    mod_name, script_path, timeout, cache_threshold, experimental = args_tuple
-    analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
+    (mod_name, script_path, timeout, cache_threshold, experimental,
+     show_globals, report_global_writes) = args_tuple
+    analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental,
+                           show_globals=show_globals,
+                           report_global_writes=report_global_writes)
     try:
         if timeout and timeout > 0:
             findings = _run_with_timeout(
@@ -308,6 +321,21 @@ def main():
         "--experimental",
         action="store_true",
         help="Enable experimental features: string concat in loops auto-fix"
+    )
+    parser.add_argument(
+        "--show-globals",
+        action="store_true",
+        dest="show_globals",
+        help="Also report module-level global writes (module_global_write). "
+             "Off by default: an Anomaly script IS a module, so its top-level "
+             "globals are the convention, not a defect (I-031)."
+    )
+    parser.add_argument(
+        "--no-global-writes",
+        action="store_true",
+        dest="no_global_writes",
+        help="Do not report global writes at all (neither global_write nor "
+             "module_global_write)."
     )
     parser.add_argument(
         "--cache-threshold",
@@ -809,7 +837,8 @@ def main():
 
     # prepare work items for parallel analysis
     work_items = [
-        (mod_name, script_path, args.timeout, args.cache_threshold, args.experimental)
+        (mod_name, script_path, args.timeout, args.cache_threshold, args.experimental,
+         args.show_globals, not args.no_global_writes)
         for mod_name, script_path in all_files
     ]
 
@@ -888,7 +917,9 @@ def main():
                 # this a single bad file can hang the whole run after a worker
                 # crash forced us off the process pool.
                 _fallback_analyzer = ASTAnalyzer(
-                    cache_threshold=args.cache_threshold, experimental=args.experimental)
+                    cache_threshold=args.cache_threshold, experimental=args.experimental,
+                    show_globals=args.show_globals,
+                    report_global_writes=not args.no_global_writes)
                 if args.timeout and args.timeout > 0:
                     findings = _run_with_timeout(
                         lambda: _fallback_analyzer.analyze_file(script_path),
