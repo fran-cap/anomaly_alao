@@ -45,13 +45,37 @@ HOT_CALLBACKS = frozenset({
     'actor_on_item_use',
 })
 
-# Per-frame callbacks detection
+# Per-frame callbacks detection.
+#
+# I-010: this used to be four names and caught roughly a quarter of the real
+# per-frame bodies in the corpus. The engine fires `*_on_update` on every
+# frame for every registered script, and every binder / UI class does its
+# per-frame work in an `:update` (or `:Update`) method. Both are now covered,
+# see PER_FRAME_METHOD_NAMES and _is_per_frame_callback_name below.
+#
+# `*_on_first_update` is deliberately NOT here: it runs once.
 PER_FRAME_CALLBACKS = frozenset({
     'actor_on_update',
     'npc_on_update',
     'monster_on_update',
     'physic_object_on_update',
+    'squad_on_update',
+    'hud_update',
 })
+
+# Method names that mean "this body runs every frame". `update` is the binder
+# convention (`object_binder:update(delta)`), `Update` the UI/MCM one.
+PER_FRAME_METHOD_NAMES = frozenset({'update', 'Update'})
+
+
+def _is_per_frame_callback_name(name: str) -> bool:
+    """True for engine callbacks the engine calls once per frame."""
+    if not name:
+        return False
+    if name in PER_FRAME_CALLBACKS:
+        return True
+    # e.g. `bas_actor_on_update`, a mod's own prefixed copy of the callback
+    return name.endswith('_on_update') and 'first_update' not in name
 
 # Bare globals that benefit from caching
 CACHEABLE_BARE_GLOBALS = frozenset({
@@ -101,6 +125,130 @@ DIRECT_REPLACEMENT_FUNCS = frozenset({
 # a local once is a real win in hot code. The repeated-call analysis treats
 # entries here equivalently to function calls in expensive_calls
 EXPENSIVE_INDEXES = frozenset({'db.actor'})
+
+# ---------------------------------------------------------------------------
+# LuaJIT 2.0 trace-abort awareness (I-013)
+#
+# Everything in here was MEASURED, not recalled: lab/tools/nyi_probe.py runs
+# each construct in a hot loop under lupa.luajit20 (the same 2.0 VM the game
+# ships) with jit.attach's trace hook attached, and records whether a trace
+# stopped or aborted and why. The full table lives in
+# lab/reports/luajit20-nyi.md. Do NOT "correct" this from the LuaJIT wiki's
+# NYI page - that page documents 2.1 and is wrong for our target.
+#
+# Why we care: a trace that aborts means the enclosing loop/function runs in
+# the interpreter. ALAO's transforms measure 1.00-1.03x on a compiled trace
+# and 1.05-1.63x interpreted, and the ones it does not ship yet split
+# violently by mode. So the mode decides which rewrite is worth applying.
+
+# Called anywhere -> the trace aborts. `oerr` in the probe named the builtin.
+LUAJIT20_NYI_FUNCS = {
+    # base
+    'pairs': 'NYIFF: pairs',
+    'next': 'NYIFF: next',
+    'unpack': 'NYIFF: unpack',
+    'error': 'NYIFF: error',
+    'newproxy': 'NYIFF: newproxy',
+    'loadstring': 'NYIFF: loadstring',
+    'dofile': 'NYIFF: dofile',
+    'collectgarbage': 'NYIFF: collectgarbage',
+    'print': 'NYIFF: print',
+    # string - sub/byte/len DO compile, the pattern-matching half does not
+    'string.format': 'NYIFF: string.format',
+    'string.find': 'NYIFF: string.find',
+    'string.match': 'NYIFF: string.match',
+    'string.gmatch': 'NYIFF: string.gmatch',
+    'string.gfind': 'NYIFF: string.gfind',
+    'string.gsub': 'NYIFF: string.gsub',
+    'string.rep': 'NYIFF: string.rep',
+    'string.upper': 'NYIFF: string.upper',
+    'string.lower': 'NYIFF: string.lower',
+    'string.reverse': 'NYIFF: string.reverse',
+    'string.char': 'NYIFF: string.char',
+    # table - insert/remove are conditional, see LUAJIT20_NYI_VARIANTS
+    'table.concat': 'NYIFF: table.concat',
+    'table.sort': 'NYIFF: table.sort',
+    'table.foreach': 'NYIFF: table.foreach',
+    'table.foreachi': 'NYIFF: table.foreachi',
+    # math - everything else in math compiles, including random()
+    'math.fmod': 'NYIFF: math.fmod',
+    'math.randomseed': 'NYIFF: math.randomseed',
+    # os / io
+    'os.clock': 'NYIFF: os.clock',
+    'os.time': 'NYIFF: os.time',
+    'os.date': 'NYIFF: os.date',
+    'os.getenv': 'NYIFF: os.getenv',
+    'io.open': 'NYIFF: io.open',
+    'io.lines': 'NYIFF: io.lines',
+    # coroutines
+    'coroutine.create': 'NYIFF: coroutine.create',
+    'coroutine.resume': 'NYIFF: coroutine.resume',
+    'coroutine.yield': 'NYIFF: coroutine.yield',
+    'coroutine.wrap': 'NYIFF: coroutine.wrap',
+}
+
+# Fastfuncs that DO compile in their common shape and abort only in another.
+# name -> (predicate on the arg count that means "this call aborts", reason)
+LUAJIT20_NYI_VARIANTS = {
+    # table.insert(t, v) compiles; the 3-arg positional insert does not
+    'table.insert': (lambda argc: argc >= 3, 'NYIFFU: table.insert (positional form)'),
+    # table.remove(t) compiles; table.remove(t, pos) does not
+    'table.remove': (lambda argc: argc >= 2, 'NYIFFU: table.remove (positional form)'),
+}
+
+# `tostring(number)` compiles, `tostring(table)` aborts NYIFFU. We cannot know
+# the runtime type from the AST, so tostring is left out of both tables above
+# and only counted when it feeds a concat (which aborts anyway).
+
+# Bytecodes LuaJIT 2.0 cannot record at all.
+LUAJIT20_NYI_BYTECODE = {
+    'concat': 'NYIBC: BC_CAT (string concatenation)',
+    'closure_in_loop': 'NYIBC: BC_FNEW (closure creation)',
+}
+
+# Engine API. LuaJIT aborts with NYICF on ANY C function that is not one of
+# its own fastfuncs, and every function the Anomaly engine registers through
+# LuaBind is exactly that. Confirmed by probing a non-fastfunc C function
+# directly: abort code 13, `oerr` a bare function pointer.
+#
+# These are the module-style namespaces. Method calls on engine userdata are
+# handled by ENGINE_NYI_METHODS.
+ENGINE_NYI_NAMESPACES = frozenset({
+    'level', 'game', 'alife', 'device', 'relation_registry', 'game_graph',
+    'actor_stats', 'main_menu', 'utils_xml', 'ui_events',
+})
+
+# Bare engine globals (C functions) that abort a trace when called.
+ENGINE_NYI_GLOBALS = frozenset({
+    'time_global', 'alife', 'get_console', 'get_hud', 'device',
+    'level_object_by_id', 'system_ini', 'game_ini', 'create_ini_file',
+    'alife_object', 'alife_create', 'alife_release',
+    'get_safe_sound_object', 'sound_object', 'vector', 'vector2',
+    'CScriptXmlInit', 'GetARGB', 'GetFontLetterica16Russian',
+})
+
+# Method names that only exist on engine userdata. A `:name()` invoke with one
+# of these is an engine C call. Deliberately conservative: an unknown method
+# name is assumed to be Lua (and therefore compilable), so the classifier
+# under-reports rather than over-reports "interpreted".
+ENGINE_NYI_METHODS = frozenset({
+    'position', 'direction', 'health', 'set_health', 'id', 'section',
+    'clsid', 'name', 'alive', 'parent', 'level_vertex_id', 'game_vertex_id',
+    'object', 'best_enemy', 'best_danger', 'best_item', 'active_item',
+    'active_detector', 'active_slot', 'item_in_slot', 'get_enemy',
+    'get_current_outfit', 'character_community', 'character_rank',
+    'inventory_for_each', 'iterate_inventory', 'give_info_portion',
+    'has_info', 'disable_info_portion', 'transfer_item', 'transfer_money',
+    'r_string', 'r_float', 'r_u32', 'r_s32', 'r_bool', 'r_line',
+    'line_count', 'section_exists', 'line_exists',
+    'distance_to', 'distance_to_sqr', 'distance_to_xz', 'distance_to_center',
+    'set', 'add', 'sub', 'mul', 'div', 'normalize', 'magnitude',
+    'execute', 'get_float', 'get_integer', 'get_bool',
+    'story_object', 'story_id', 'clear_abuse', 'accessible',
+})
+
+# Abort codes 6 (LINNER, inner loop in root trace) and 7 (LUNROLL) are trace
+# shaping, not NYI, and are deliberately absent from all of the above.
 
 # Functions/properties that can return nil - calling methods on these without
 # nil checks can cause CTD (crash to desktop)
@@ -372,6 +520,39 @@ class DistanceComparisonInfo:
 
 
 @dataclass
+class NyiSiteInfo:
+    """One construct LuaJIT 2.0 cannot record into a trace (I-013)."""
+    kind: str               # 'fastfunc' | 'variant' | 'bytecode' | 'cfunc'
+    name: str               # 'pairs', '..', 'level.object_by_id', ...
+    reason: str             # the abort as the probe reported it
+    line: int
+    scope: Scope
+    in_loop: bool = False
+    if_chain_path: Tuple[Tuple[int, int], ...] = ()
+
+
+@dataclass
+class JitModeInfo:
+    """How a single function body behaves under LuaJIT 2.0's trace compiler."""
+    mode: str               # 'compiled' | 'mixed' | 'interpreted'
+    func_name: str
+    start_line: int
+    sites: List[NyiSiteInfo] = field(default_factory=list)
+
+    @property
+    def reasons(self) -> List[str]:
+        """Distinct abort reasons, most common first."""
+        counts = defaultdict(int)
+        for s in self.sites:
+            counts[s.reason] += 1
+        return [r for r, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    @property
+    def lines(self) -> List[int]:
+        return sorted({s.line for s in self.sites})
+
+
+@dataclass
 class VectorAllocationInfo:
     """Information about vector() allocation in a loop."""
     line: int
@@ -414,6 +595,12 @@ class ASTAnalyzer:
         self.local_funcs: Dict[Tuple[int, str], LocalVarInfo] = {}
         self.callback_registrations: Set[str] = set()
         self.per_frame_callbacks: List[PerFrameCallbackInfo] = []
+        # I-013: constructs LuaJIT 2.0 cannot trace, and the per-function
+        # verdict derived from them. `jit_modes` is keyed by id(function scope)
+        # so any later pass can ask "what mode is the body I'm editing in?".
+        self.nyi_sites: List[NyiSiteInfo] = []
+        self.jit_modes: Dict[int, JitModeInfo] = {}
+        self._in_concat: bool = False
         self.distance_comparisons: List[DistanceComparisonInfo] = []
         self.vector_allocations: List[VectorAllocationInfo] = []
         self.assignment_target_ids: Set[int] = set()
@@ -740,19 +927,21 @@ class ASTAnalyzer:
         func_name = self._node_to_string(node.name) if node.name else '<anon>'
 
         is_hot = func_name in HOT_CALLBACKS
-        is_per_frame = func_name in PER_FRAME_CALLBACKS
+        is_per_frame = _is_per_frame_callback_name(func_name)
 
         self.function_depth += 1
         self._enter_scope(func_name, line, 'function', is_hot, node=node)
 
         # Track per-frame callback for performance analysis
+        pf_info = None
         if is_per_frame:
-            self.per_frame_callbacks.append(PerFrameCallbackInfo(
+            pf_info = PerFrameCallbackInfo(
                 name=func_name,
                 start_line=line,
                 end_line=-1,  # Will be set on scope exit
                 scope=self.current_scope,
-            ))
+            )
+            self.per_frame_callbacks.append(pf_info)
 
         # register parameters as locals
         if hasattr(node, 'args') and node.args:
@@ -765,9 +954,9 @@ class ASTAnalyzer:
         end_line = self._get_end_line(node)
         
         # Update end_line for per-frame callback
-        if is_per_frame and self.per_frame_callbacks:
-            self.per_frame_callbacks[-1].end_line = end_line
-        
+        if pf_info is not None:
+            pf_info.end_line = end_line
+
         self._exit_scope(end_line)
         self.function_depth -= 1
 
@@ -821,6 +1010,19 @@ class ASTAnalyzer:
         """
         line = self._get_line(node)
 
+        # I-013: BC_FNEW is NYI, so building a closure aborts the enclosing
+        # trace. Not only in a loop: a per-frame body is itself the hot thing
+        # LuaJIT tries to trace (the engine calls it from C, so there is no
+        # Lua loop around it), and a closure anywhere in the body kills that
+        # trace. Confirmed on gunslinger_controller.script:541 by
+        # lab/tools/nyi_crosscheck.py, which saw abort 5:49 (BC_FNEW) on a
+        # body whose closure is not inside any loop.
+        if self.function_depth > 0:
+            self._record_nyi('bytecode', 'function()',
+                             LUAJIT20_NYI_BYTECODE['closure_in_loop'], line)
+
+        was_in_concat = self._in_concat
+        self._in_concat = False
         self.function_depth += 1
         self._enter_scope('<anon>', line, 'function', is_hot=False, node=node)
 
@@ -834,6 +1036,7 @@ class ASTAnalyzer:
         end_line = self._get_end_line(node)
         self._exit_scope(end_line)
         self.function_depth -= 1
+        self._in_concat = was_in_concat
 
     def _visit_Method(self, node: Method):
         """Handle method definition."""
@@ -847,8 +1050,31 @@ class ASTAnalyzer:
 
         is_hot = func_name in HOT_CALLBACKS
 
+        # I-010: every binder and UI class does its per-frame work in an
+        # `:update` / `:Update` method, and those were previously invisible -
+        # PER_FRAME_CALLBACKS listed four engine callback names and caught
+        # roughly a quarter of the real per-frame bodies in the corpus.
+        method_name = func_name.rsplit('.', 1)[-1]
+        is_per_frame = (method_name in PER_FRAME_METHOD_NAMES
+                        or _is_per_frame_callback_name(method_name))
+        if is_per_frame:
+            owner = self._node_to_string(node.source) if getattr(node, 'source', None) else ''
+            display_name = f'{owner}:{method_name}' if owner else method_name
+        else:
+            display_name = func_name
+
         self.function_depth += 1
         self._enter_scope(func_name, line, 'function', is_hot, node=node)
+
+        pf_info = None
+        if is_per_frame:
+            pf_info = PerFrameCallbackInfo(
+                name=display_name,
+                start_line=line,
+                end_line=-1,
+                scope=self.current_scope,
+            )
+            self.per_frame_callbacks.append(pf_info)
 
         # 'self' is implicit first param
         self.current_scope.locals.add('self')
@@ -861,6 +1087,8 @@ class ASTAnalyzer:
         self._visit(node.body)
 
         end_line = self._get_end_line(node)
+        if pf_info is not None:
+            pf_info.end_line = end_line
         self._exit_scope(end_line)
         self.function_depth -= 1
 
@@ -1541,7 +1769,10 @@ class ASTAnalyzer:
                 loop_depth=self.loop_depth,
                 if_chain_path=tuple(self.if_chain_stack),
             ))
-            
+
+            # I-013: does this call abort a LuaJIT 2.0 trace?
+            self._record_nyi_call(full_name, module, len(node.args), line)
+
             # Track RegisterScriptCallback for unused variable/function detection
             if full_name == 'RegisterScriptCallback' and len(node.args) >= 2:
                 callback_func = self._node_to_string(node.args[1])
@@ -1602,6 +1833,17 @@ class ASTAnalyzer:
             if_chain_path=tuple(self.if_chain_stack),
         ))
 
+        # I-013: `obj:method()` on engine userdata is a C call and aborts the
+        # trace. We can only go on the method name, so ENGINE_NYI_METHODS is
+        # deliberately a whitelist: an unrecognized method is assumed to be
+        # plain Lua, which makes the classifier under-report "interpreted".
+        if func in ENGINE_NYI_METHODS:
+            self._record_nyi('cfunc', full_name,
+                             'NYICF: :%s() (engine C function)' % func, line)
+        elif source in ENGINE_NYI_NAMESPACES:
+            self._record_nyi('cfunc', full_name,
+                             'NYICF: %s (engine C function)' % full_name, line)
+
         # Check for potential nil access
         self._check_nil_access(node.source, source, full_name, line, 'method')
 
@@ -1615,9 +1857,52 @@ class ASTAnalyzer:
         for arg in node.args:
             self._visit(arg)
 
+    # --- I-013: recording constructs LuaJIT 2.0 cannot trace ---------------
+
+    def _record_nyi(self, kind: str, name: str, reason: str, line: int):
+        self.nyi_sites.append(NyiSiteInfo(
+            kind=kind,
+            name=name,
+            reason=reason,
+            line=line,
+            scope=self.current_scope,
+            in_loop=self.loop_depth > 0,
+            if_chain_path=tuple(self.if_chain_stack),
+        ))
+
+    def _record_nyi_call(self, full_name: str, module: Optional[str],
+                         argc: int, line: int):
+        """Classify one call site against the measured NYI tables."""
+        reason = LUAJIT20_NYI_FUNCS.get(full_name)
+        if reason:
+            self._record_nyi('fastfunc', full_name, reason, line)
+            return
+        variant = LUAJIT20_NYI_VARIANTS.get(full_name)
+        if variant:
+            aborts, vreason = variant
+            if aborts(argc):
+                self._record_nyi('variant', full_name, vreason, line)
+            return
+        # engine C functions: `level.foo(...)`, `alife()`, `time_global()`
+        if module and module in ENGINE_NYI_NAMESPACES:
+            self._record_nyi('cfunc', full_name,
+                             'NYICF: %s (engine C function)' % full_name, line)
+            return
+        if module is None and full_name in ENGINE_NYI_GLOBALS:
+            self._record_nyi('cfunc', full_name,
+                             'NYICF: %s (engine C function)' % full_name, line)
+
     def _visit_Concat(self, node: Concat):
         """Handle concatenation operator."""
         line = self._get_line(node)
+
+        # BC_CAT is NYI in LuaJIT 2.0 - measured, see lab/reports/luajit20-nyi.md.
+        # Even `'a' .. n` with two operands aborts the trace, so every concat
+        # anywhere in a body makes that body interpreted. `a .. b .. c` is a
+        # nest of Concat nodes but one BC_CAT, so only the outermost counts.
+        if not self._in_concat:
+            self._record_nyi('bytecode', '..',
+                             LUAJIT20_NYI_BYTECODE['concat'], line)
 
         left_var = None
         if isinstance(node.left, Name):
@@ -1634,8 +1919,11 @@ class ASTAnalyzer:
                 loop_depth=self.loop_depth,
             ))
 
+        was_in_concat = self._in_concat
+        self._in_concat = True
         self._visit(node.left)
         self._visit(node.right)
+        self._in_concat = was_in_concat
 
     # visitor pass-through for other nodes
     def _visit_Index(self, node: Index):
@@ -1810,6 +2098,8 @@ class ASTAnalyzer:
 
     def _analyze_patterns(self):
         """Analyze collected data and generate findings."""
+        # must run first: later passes read self.jit_modes
+        self._analyze_trace_aborts()
         self._analyze_table_insert()
         self._analyze_deprecated_funcs()
         self._analyze_math_pow()
@@ -1827,6 +2117,92 @@ class ASTAnalyzer:
         self._analyze_per_frame_callbacks()
         self._analyze_distance_to_comparisons()
         self._analyze_vector_allocations_in_loops()
+
+    # ------------------------------------------------------------------
+    # I-013: which bodies actually run on a compiled trace
+    # ------------------------------------------------------------------
+
+    def _analyze_trace_aborts(self):
+        """Classify every function body as compiled / mixed / interpreted.
+
+        The rule, straight off the measurements in lab/reports/luajit20-nyi.md:
+
+        * a construct in LUAJIT20_NYI_* aborts trace recording, so the loop or
+          function containing it runs in the interpreter;
+        * a site on the unconditional path (`if_chain_path` empty) aborts every
+          time, so the body is `interpreted`;
+        * a site that only exists inside an `if` branch aborts on some paths
+          and not others -> `mixed`: there is a compiled path, but LuaJIT will
+          blacklist the bytecode once it has aborted enough times;
+        * no sites at all -> `compiled`.
+
+        A site belongs to the nearest enclosing FUNCTION scope. Sites inside a
+        nested closure belong to that closure, not to us - the closure gets its
+        own trace, and its own verdict.
+
+        Results land in `self.jit_modes`, keyed by `id(function_scope)`, plus a
+        `jit_mode` finding for each per-frame body that is not fully compiled.
+        This generation is report-only: nothing here changes what --fix does.
+        """
+        sites_by_func: Dict[int, List[NyiSiteInfo]] = defaultdict(list)
+        for site in self.nyi_sites:
+            func_scope = self._find_function_scope(site.scope)
+            if func_scope is None:
+                continue  # module level; not a hot body, nobody asks about it
+            sites_by_func[id(func_scope)].append(site)
+
+        for scope in self.scopes:
+            if scope.scope_type != 'function':
+                continue
+            sites = sites_by_func.get(id(scope), [])
+            if not sites:
+                mode = 'compiled'
+            elif any(not s.if_chain_path for s in sites):
+                mode = 'interpreted'
+            else:
+                mode = 'mixed'
+            self.jit_modes[id(scope)] = JitModeInfo(
+                mode=mode,
+                func_name=scope.name,
+                start_line=scope.start_line,
+                sites=sites,
+            )
+
+        # report the per-frame bodies that cannot be compiled - those are the
+        # ones where the choice of transform actually changes with the mode
+        for cb in self.per_frame_callbacks:
+            info = self.jit_modes.get(id(cb.scope))
+            if info is None or info.mode == 'compiled':
+                continue
+            reasons = info.reasons
+            self.findings.append(Finding(
+                pattern_name='jit_mode',
+                severity='RED',  # informational: never auto-fixed
+                line_num=cb.start_line,
+                message=(
+                    f'Per-frame body {cb.name} runs {info.mode} under LuaJIT 2.0 '
+                    f'({len(info.sites)} trace-aborting construct(s)): '
+                    + ', '.join(reasons[:3])
+                ),
+                details={
+                    'jit_mode': info.mode,
+                    'callback_name': cb.name,
+                    'abort_reasons': reasons,
+                    'abort_lines': info.lines,
+                    'abort_count': len(info.sites),
+                    'start_line': cb.start_line,
+                    'end_line': cb.end_line,
+                },
+                source_line=self._get_source_line(cb.start_line),
+            ))
+
+    def _jit_mode_for_scope(self, scope: Optional[Scope]) -> str:
+        """Mode of the function body enclosing `scope` ('unknown' at module level)."""
+        func_scope = self._find_function_scope(scope) if scope else None
+        if func_scope is None:
+            return 'unknown'
+        info = self.jit_modes.get(id(func_scope))
+        return info.mode if info else 'unknown'
 
     def _analyze_table_insert(self):
         """Find table.insert(t, v) that can be t[#t+1] = v."""
@@ -1846,6 +2222,10 @@ class ASTAnalyzer:
                         'value': value,
                         'full_match': f'table.insert({table_name}, {value})',
                         'node': call.node,
+                        # I-002/I-013: table.insert(t, v) compiles fine on a
+                        # trace, so this rewrite is worth ~1.00x there and
+                        # 1.2-1.5x in the interpreter. The mode says which.
+                        'jit_mode': self._jit_mode_for_scope(call.scope),
                     },
                     source_line=self._get_source_line(call.line),
                 ))
@@ -2237,6 +2617,10 @@ class ASTAnalyzer:
                         'function': func_scope.name,
                         'is_hot': func_scope.is_hot_callback,
                         'scope': func_scope,
+                        # I-013: caching a global is an interpreter win
+                        # (1.23x) and a no-op on a compiled trace (1.00x).
+                        'jit_mode': (self.jit_modes[id(func_scope)].mode
+                                     if id(func_scope) in self.jit_modes else 'unknown'),
                     },
                     source_line='\n'.join(example_lines),
                 ))
@@ -3043,6 +3427,14 @@ class ASTAnalyzer:
             else:
                 severity = 'DEBUG'
             
+            # I-013: say whether the body can even be JIT-compiled. On a
+            # compiled trace ALAO's caching transforms are worth ~nothing; in
+            # the interpreter they are worth 1.05-1.63x. The mode is the
+            # difference between "worth doing" and "noise".
+            jit_info = self.jit_modes.get(id(scope))
+            if jit_info and jit_info.mode != 'compiled':
+                issues.append(f"{jit_info.mode} (LuaJIT 2.0)")
+
             # always report per-frame callbacks
             message = f"Per-frame callback: {callback_info.name} (lines {callback_info.start_line}-{callback_info.end_line})"
             if issues:
@@ -3061,6 +3453,9 @@ class ASTAnalyzer:
                     'expensive_calls': expensive_calls,
                     'uncached_globals': uncached_globals,
                     'total_calls': len(calls_in_scope),
+                    'jit_mode': jit_info.mode if jit_info else 'unknown',
+                    'jit_abort_reasons': jit_info.reasons if jit_info else [],
+                    'jit_abort_lines': jit_info.lines if jit_info else [],
                 },
                 source_line=self._get_source_line(callback_info.start_line),
             ))
