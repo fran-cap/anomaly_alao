@@ -601,3 +601,40 @@ Representative files worth using as fixtures:
 | `11- Preblowout Murder - Ethylia/.../surge_manager.script` | `CSurgeManager:update` with `db.actor`, `vector()` and `object_by_id` in loops |
 | `156- No Exos in the South - Grokitach/.../grok_nes.script` | `ini_file:r_*` inside `npc_on_update` |
 | `410- 3DSS for GAMMA .../zzz_mspizza_Godis_ZoomCalc.script` (disabled mod) | genuinely invalid Lua, good negative fixture |
+
+---
+
+## 8. Generation-1 results (2026-09-11, six parallel agents)
+
+Six Opus agents each took a queued idea in its own worktree, coordinated through `lab/coord/`
+(locks, FPS queue, status board). Verdicts and the single fact that decided each:
+
+| Idea | Verdict | Deciding fact |
+|---|---|---|
+| I-003 microbench | **kept** | reproduces section 2; adds loop-length sweeps and a jitter column. `math.floor` 0.90x is noise (0.82-1.21x). |
+| I-013 JIT classifier (+I-010) | **kept** | 183 of 262 per-frame bodies run interpreted, 22 mixed, 57 compiled. Every engine C call aborts the trace; `..` is NYI. `time_global()` is the top trace killer. |
+| I-004/029/035/037 | **kept** | compile check costs ~4% of the fix phase; JSON report now carries failures and `edits_dropped_overlap` (0). |
+| I-038 | **kept** | root cause was a **real bug**: `alife(arg):create()` was cached as `local sim = alife()` and the argument dropped. Not string concat. |
+| I-009 scratch vector | kept, **no gain** | 5 of 78 sites pass escape analysis, 0 per-frame, 3 live in-game. Score 8.0 -> 4.0. |
+| I-039 concat promotion | **pruned** | 0.43x at K=3, break-even ~100 interpreted; 15 of 18 corpus sites are K=3-10. Stays `--experimental`. |
+| I-001 counter append | kept as **YELLOW** | never a regression (1.05x floor) but 0 of 254 sites per-frame; only menu/inventory files differ in-game. Score 9.4 -> 6.5. |
+
+Corrections to earlier sections:
+
+- **"0 parse failures" was wrong.** `analyze_file()` returned `[]` for unparseable files, so 3 enabled-corpus
+  files (`zzz_mspizza_Godis_ZoomCalc.script`, `zzz_mspizza_Godis_Zoom_control.script`, `despawn_guns.script`)
+  were counted clean in every run. Now reported (I-029).
+- **The JIT-on column of section 2 is moot for per-frame code.** `..` is NYI and every engine call aborts, so
+  the "8.69x JIT on" concat number was interpreter-vs-interpreter. The interpreted column is the operative one.
+- **Speedups that depend on loop length must be quoted with K.** `string_concat_in_loop` and `counter_append`
+  both go from a regression or ~1.0x at K=5 to >9x at K=2000. The corpus mass is at small K.
+- **Only 290 of ALAO's 513 rewritten files are loaded by the live profile**; 223 are shadowed by a
+  higher-priority mod (`lab/coord/build_overlay.py`). Corpus counts overstate in-game reach by ~43%.
+- **In-game FPS is the wrong instrument for these patterns.** A standing-still capture executes none of the
+  menu/UI/event code the rewrites touch. The reference stock-vs-ALAO experiment (queue item
+  `20260911-111301-REF-15707b`) read +4.9% avg / +7.5% 1% low but was confounded by concurrent corpus
+  jobs; the rerun (`20260911-120033-REF-8e18cc`) is the number to cite.
+
+What generation 2 should chase, given the above: `time_global()`-guarded per-frame bodies (186 abort sites)
+and engine-call hoisting in the 183 interpreted per-frame bodies; `pairs`->`ipairs` (I-005) must be gated by
+the I-013 classifier because it is 0.29x interpreted on 78% of per-frame `pairs` sites.

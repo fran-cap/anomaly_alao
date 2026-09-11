@@ -9,11 +9,11 @@
       "measure": "tools/microbench.py (I-003) speedup >= 1.15x in both JIT modes, plus differential tests over tables with holes and early break, plus gates G4-G7 clean on a full corpus run.",
       "expected_gain": "high",
       "risk": "high",
-      "status": "queued",
-      "score": 9.4,
+      "status": "kept",
+      "score": 6.5,
       "parent": null,
       "generation": 1,
-      "notes": "Enabled GAMMA corpus: 232 table.insert calls inside loops out of 682 total, and the same transform applies to the 701 sites ALAO already rewrites to t[#t+1]. Promoted above I-002 on the team lead's recommendation after the corrected benchmark. The aliasing proof is the whole idea and is where this can fail."
+      "notes": "Enabled GAMMA corpus: 232 table.insert calls inside loops out of 682 total, and the same transform applies to the 701 sites ALAO already rewrites to t[#t+1]. Promoted above I-002 on the team lead's recommendation after the corrected benchmark. The aliasing proof is the whole idea and is where this can fail.\nDONE 2026-09-11 (agent-I001 @8c53a76) as KEEP-AS-YELLOW. Never a regression (floor 1.05x at K=5, 1.63x K=20, 3.7x K=100, 9.8x K=2000). Gates G4-G8 clean, run 20260911-115604-i001c. 254 sites (55 GREEN / 199 YELLOW), 245 with unknown bound, 0 per-frame; only 21 live files differ in-game, all menus/inventory UI, so no FPS delta reachable. Fixed two real bugs on the way (YELLOW claims suppressed table_insert_append in 52 files; aliased-insert idempotence). Recommend severity YELLOW unconditionally before merge. Score 9.4 -> 6.5."
     },
     {
       "id": "I-002",
@@ -24,11 +24,11 @@
       "measure": "tools/microbench.py under the section-2 protocol (warm-up, collectgarbage per run, best of 9) reproducing 1.00x compiled and 1.2-1.5x interpreted; then the I-013 mode census over the 701 sites.",
       "expected_gain": "low",
       "risk": "low",
-      "status": "proposed",
+      "status": "kept",
       "score": 5.5,
       "parent": null,
       "generation": 1,
-      "notes": "Do NOT touch the transform before the mode classification exists. Enabled GAMMA: 682 call sites, 701 findings, still the largest GREEN pattern. Retained in the beam so the retraction stays on the record next to the original claim."
+      "notes": "Do NOT touch the transform before the mode classification exists. Enabled GAMMA: 682 call sites, 701 findings, still the largest GREEN pattern. Retained in the beam so the retraction stays on the record next to the original claim.\nAnswered by I-013: 168 of 701 table_insert_append sites (24%) are in compiled bodies where the rewrite is ~1.00x; 65% interpreted. Keep the transform; PERFORMANCE_IMPACT demoted high -> medium."
     },
     {
       "id": "I-003",
@@ -39,11 +39,11 @@
       "measure": "Reproduces the corrected section-2 table within 10%; every GREEN pattern must clear gate G2.",
       "expected_gain": "high",
       "risk": "low",
-      "status": "queued",
+      "status": "kept",
       "score": 9.5,
       "parent": null,
       "generation": 1,
-      "notes": "lupa 2.8 ships lupa.luajit20 = LuaJIT 2.0 on x64 Windows, the exact target VM. Note that jit.off(true,true) does not affect already-loaded chunks: JIT-off mode must use jit.off(f,true) on the chunk itself, or the harness silently measures JIT-on numbers twice. Enabler for I-001, I-005, I-009, I-012, I-039."
+      "notes": "lupa 2.8 ships lupa.luajit20 = LuaJIT 2.0 on x64 Windows, the exact target VM. Note that jit.off(true,true) does not affect already-loaded chunks: JIT-off mode must use jit.off(f,true) on the chunk itself, or the harness silently measures JIT-on numbers twice. Enabler for I-001, I-005, I-009, I-012, I-039.\nDONE 2026-09-11 (agent-I003, branch worktree-agent-a7ec3c0be70d0c99c @79b0302). tools/microbench.py + bench/*.lua (24 pairs), section-2 protocol mandatory, records jit.version/flags, @iters loop-length sweeps, jitter column. Reproduced the s.2 table; cached math.floor 0.90x is noise (0.82-1.21x across runs). Pitfall: timing @setup collapses ratios; the chunk now returns a closure."
     },
     {
       "id": "I-004",
@@ -54,11 +54,11 @@
       "measure": "compile_failures_after_fix stays empty on a full corpus --fix, and a deliberately corrupted transform is caught by a unit test.",
       "expected_gain": "high",
       "risk": "low",
-      "status": "queued",
+      "status": "kept",
       "score": 8.5,
       "parent": null,
       "generation": 1,
-      "notes": "The flag must degrade cleanly when lupa is absent, since lupa is not in requirements.txt. Baseline: 0 failures of 513 rewritten files."
+      "notes": "The flag must degrade cleanly when lupa is absent, since lupa is not in requirements.txt. Baseline: 0 failures of 513 rewritten files.\nDONE 2026-09-11 (agent-I004, branch agent-I004 @86e938d). --verify-compile default on when lupa imports; refused writes counted and printed with full path. Cost ~1.2 s (~4%) of the fix phase."
     },
     {
       "id": "I-005",
@@ -129,11 +129,11 @@
       "measure": "Microbench both modes plus differential tests; the escape analysis must be proven by fixtures where the vector is stored or returned.",
       "expected_gain": "high",
       "risk": "high",
-      "status": "proposed",
-      "score": 8.0,
+      "status": "kept",
+      "score": 4.0,
       "parent": null,
       "generation": 1,
-      "notes": "Enabled GAMMA: 1081 vector() constructions, 1007 of them vector():set(...), 52 inside loops, 27 inside per-frame bodies. Unsafe whenever the vector escapes the iteration."
+      "notes": "Enabled GAMMA: 1081 vector() constructions, 1007 of them vector():set(...), 52 inside loops, 27 inside per-frame bodies. Unsafe whenever the vector escapes the iteration.\nDONE 2026-09-11 (agent-I009 @811cbf2), gates clean, but NO WIN: only 5 of 78 sites pass escape analysis, 0 per-frame, 3 live after MO2 shadowing, all event-driven. Kept for the escape-analysis machinery (VECTOR_ARG_SAFE_METHODS / VECTOR_SELF_METHODS). Bench floor 1.3-2.9x interpreted with Lua stubs; compiled column moot (0 sites compile). No FPS run: delta structurally zero. Score demoted 8.0 -> 4.0."
     },
     {
       "id": "I-010",
@@ -144,11 +144,11 @@
       "measure": "per_frame_callback finding count rises from 88 toward a number consistent with the measured per-frame construct census.",
       "expected_gain": "med",
       "risk": "low",
-      "status": "proposed",
+      "status": "kept",
       "score": 6.9,
       "parent": null,
       "generation": 1,
-      "notes": "Measured inside the 325 per-frame bodies: 306 db.actor, 145 concats, 50 pairs, 27 vector(), 18 alife(), 15 game.translate_string, 11 level.object_by_id, 5 tostring, 3 ini_file r_* reads. Report-only, so risk is low."
+      "notes": "Measured inside the 325 per-frame bodies: 306 db.actor, 145 concats, 50 pairs, 27 vector(), 18 alife(), 15 game.translate_string, 11 level.object_by_id, 5 tostring, 3 ini_file r_* reads. Report-only, so risk is low.\nDelivered inside I-013: PER_FRAME_CALLBACKS widened to *_on_update and :update methods; 88 -> 262 per-frame bodies."
     },
     {
       "id": "I-011",
@@ -189,11 +189,11 @@
       "measure": "Classify all 325 per-frame bodies; cross-check a sample against jit.dumpon trace output run under lupa.luajit20.",
       "expected_gain": "high",
       "risk": "med",
-      "status": "queued",
+      "status": "kept",
       "score": 8.4,
       "parent": null,
       "generation": 1,
-      "notes": "The NYI list must be verified against the bundled LuaJIT 2.0 build rather than recalled - that verification is part of the work. Gates I-002, I-005, I-009."
+      "notes": "The NYI list must be verified against the bundled LuaJIT 2.0 build rather than recalled - that verification is part of the work. Gates I-002, I-005, I-009.\nDONE 2026-09-11 (agent-I013 @4b8e82a). Empirical NYI table lab/reports/luajit20-nyi.md (96 constructs): BC_CAT, pairs/next, string.format/find/gsub, table.concat/sort/unpack, closure creation and EVERY non-fastfunc C call (all engine exports) abort; table.insert(t,v) compiles. Corpus (run 20260911-114408-i013-rerun): 262 per-frame bodies = 183 interpreted / 22 mixed / 57 compiled; time_global() is the top trace killer. Report-only jit_mode finding + details['jit_mode']. Verified 18/25 real bodies against the VM."
     },
     {
       "id": "I-014",
@@ -429,11 +429,11 @@
       "measure": "The corpus harness drops its duplicate analyze pass and full-run wall time roughly halves; the reported counters match a manual count.",
       "expected_gain": "high",
       "risk": "low",
-      "status": "queued",
+      "status": "kept",
       "score": 8.3,
       "parent": null,
       "generation": 1,
-      "notes": "Pairs with I-035 and I-037, which are the other two reporting gaps the harness had to work around."
+      "notes": "Pairs with I-035 and I-037, which are the other two reporting gaps the harness had to work around.\nDONE 2026-09-11 (agent-I004). JSON report now carries parse_failures/timeouts/crashes/compile_failures, findings_by_*, per-file edits and edits_dropped_overlap (0 on GAMMA). corpus_run.py reads them; probe is --probe opt-in, saves ~15% not 50%. Surfaced 3 enabled-corpus files that never parsed and were counted clean."
     },
     {
       "id": "I-030",
@@ -519,11 +519,11 @@
       "measure": "A deliberately slow fixture increments the timeout counter and leaves the parse-error counter at zero.",
       "expected_gain": "low",
       "risk": "low",
-      "status": "proposed",
+      "status": "kept",
       "score": 6.3,
       "parent": null,
       "generation": 1,
-      "notes": "Zero of each on the current corpus, which is why nobody has noticed. Pairs with I-029."
+      "notes": "Zero of each on the current corpus, which is why nobody has noticed. Pairs with I-029.\nDONE 2026-09-11 (agent-I004): timeouts counted separately; 3 strict xfails dropped legitimately."
     },
     {
       "id": "I-036",
@@ -549,11 +549,11 @@
       "measure": "A corpus run can list every failing file by path without printing the finding dump.",
       "expected_gain": "low",
       "risk": "low",
-      "status": "proposed",
+      "status": "kept",
       "score": 6.1,
       "parent": null,
       "generation": 1,
-      "notes": "Third of the three reporting gaps the corpus harness had to work around, alongside I-029 and I-035."
+      "notes": "Third of the three reporting gaps the corpus harness had to work around, alongside I-029 and I-035.\nDONE 2026-09-11 (agent-I004): full paths in failure lines without -v; transform_file_worker honours --timeout."
     },
     {
       "id": "I-038",
@@ -564,11 +564,11 @@
       "measure": "Gate G7: the post-fix finding set must be a subset of the pre-fix finding set.",
       "expected_gain": "med",
       "risk": "low",
-      "status": "proposed",
+      "status": "kept",
       "score": 7.5,
       "parent": null,
       "generation": 1,
-      "notes": "Found by the corpus harness's re-analysis pass. Cheap to investigate since the exact run record is on disk."
+      "notes": "Found by the corpus harness's re-analysis pass. Cheap to investigate since the exact run record is on disk.\nDONE 2026-09-11 (agent-I004). Root cause was NOT string_concat_in_loop: (a) _analyze_repeated_calls_in_scope folded alife(arg):create(...) into local sim = alife() and DROPPED THE ARGUMENT - a real shipped correctness bug, now guarded (if call.args: continue); (b) orphaned local tinsert = table.insert aliases; (c) nil-guard on rewritten chains. G7 now exact subset. Cost -28 GREEN of 2023."
     },
     {
       "id": "I-039",
@@ -579,11 +579,11 @@
       "measure": "tools/microbench.py in both modes, differential tests on the accumulator shape including early break and nested loops, and gates G4-G7 clean on a full corpus run with the flag promoted.",
       "expected_gain": "high",
       "risk": "med",
-      "status": "queued",
-      "score": 9.0,
+      "status": "pruned",
+      "score": 3.0,
       "parent": null,
       "generation": 1,
-      "notes": "Corpus: 205 GAMMA findings, 15 vanilla. It is the most structurally invasive rewrite ALAO has, which is presumably why it was gated, so I-017 should land alongside it. Cheapest large win available because the code already exists."
+      "notes": "Corpus: 205 GAMMA findings, 15 vanilla. It is the most structurally invasive rewrite ALAO has, which is presumably why it was gated, so I-017 should land alongside it. Cheapest large win available because the code already exists.\nPRUNED 2026-09-11 (agent-I039 @c4b5516). The 8.69x/7.89x was a property of loop length: table.concat is 0.43x at K=3, break-even ~30 JIT / ~100 interp, 14.7x at K=2000 (two harnesses agree). 15 of the 18 rewritable corpus sites are K=3-10; the 3 that win are cold injury-message padding loops at K=68. Stays behind --experimental. Analyzer preconditions tightened + differential tests kept (branch)."
     }
   ]
 }
