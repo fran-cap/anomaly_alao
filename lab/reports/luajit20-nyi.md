@@ -184,3 +184,62 @@ whether a particular engine call is unexpectedly cheap or expensive once interpr
 | `vector_alloc_in_loop` | alao | **compiled** | - |
 | `distance_to_sqr` | alao | **compiled** | - |
 | `pairs_then_concat` | alao | **interpreted** | `NYIFF: pairs` |
+
+## Corpus census (enabled GAMMA, 1503 files)
+
+`py -3.12 lab/tools/jit_mode_census.py --corpus ...\extracted\gamma`, run
+2026-09-11 against the classifier in `ast_analyzer._analyze_trace_aborts`.
+
+**Per-frame bodies (262 found after the I-010 widening, up from 88):**
+
+| mode | bodies | share |
+|---|---:|---:|
+| interpreted | 183 | 69.8% |
+| mixed | 22 | 8.4% |
+| compiled | 57 | 21.8% |
+
+Across *all* 22006 function bodies in the corpus: 53.0% compiled, 36.8%
+interpreted, 10.1% mixed. Per-frame bodies are much worse than average, which
+is the opposite of what you would want.
+
+**Top abort reasons inside per-frame bodies** (1213 sites):
+
+| reason | sites | share |
+|---|---:|---:|
+| `NYICF: time_global` | 186 | 15.3% |
+| `NYIBC: BC_CAT` (`..`) | 97 | 8.0% |
+| `NYICF: :id()` | 96 | 7.9% |
+| `NYIFF: pairs` | 78 | 6.4% |
+| `NYICF: :section()` | 56 | 4.6% |
+| `NYICF: :set()` | 54 | 4.5% |
+| `NYICF: :sub()` (vector) | 45 | 3.7% |
+| `NYICF: :position()` | 41 | 3.4% |
+| `NYICF: game.translate_string` | 40 | 3.3% |
+| `NYICF: device` | 37 | 3.1% |
+
+Engine C calls are ~80% of all aborts. `time_global()` alone - the idiom every
+mod uses to rate-limit its own per-frame work - is the single most common
+trace killer in the corpus.
+
+**Where each pattern's sites live** (the number that decides whether a
+transform is worth shipping):
+
+| pattern | sites | in compiled bodies | interpreted | mixed |
+|---|---:|---:|---:|---:|
+| `table_insert_append` (I-001, I-002) | 701 | **168 (24%)** | 457 (65%) | 52 (7%) |
+| `uncached_globals_summary` | 280 | 26 (9%) | 201 (72%) | 53 (19%) |
+| `string_concat_in_loop` (I-039) | 205 | **0** | 120 (59%) | 82 (40%) |
+| `vector_alloc_in_loop` (I-009) | 78 | **0** | 62 (80%) | 16 (20%) |
+| `string_find_plain` | 441 | 0 | 397 (90%) | 43 (10%) |
+| `distance_to_comparison` | 57 | 0 | 47 (82%) | 10 (18%) |
+
+(24 `table_insert_append` and a few others are at module level, counted as
+`unknown` and left out of the percentages.)
+
+**G6.** Analyze wall time 14.25 s for 1503 files at 8 workers, against a
+13.34 s back-to-back measurement of the same corpus on the pre-change
+analyzer and a 13.5 s published baseline: +5.5%, inside the 10% gate. An
+earlier run of the same code measured 16.37 s while other agents were busy on
+the machine; an A/B of the analyzer alone over 300 files, old code versus new,
+found the new one marginally *faster*, so the 16.37 s was contention. Run ids
+`20260911-114408-i013-rerun` (new) and `20260911-1140xx-i013-baseline` (old).
