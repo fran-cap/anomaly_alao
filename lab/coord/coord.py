@@ -373,12 +373,10 @@ def _cmd_lock(a) -> int:
 
 
 def _cmd_run(a) -> int:
-    if not a.cmd:
+    if not a.wrapped:
         print("coord run: nothing to run after '--'", file=sys.stderr)
         return 2
-    cmd = list(a.cmd)
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
+    cmd = list(a.wrapped)
     # CreateProcess won't find 'py' the way a shell does; resolve it ourselves
     exe = shutil.which(cmd[0])
     if exe:
@@ -437,7 +435,7 @@ def main(argv=None) -> int:
     rn.add_argument("--ttl", type=float, default=900)
     rn.add_argument("--wait", type=float, default=1800)
     rn.add_argument("--note")
-    rn.add_argument("cmd", nargs=argparse.REMAINDER)
+    rn.set_defaults(wrapped=[])
     rn.set_defaults(fn=_cmd_run)
 
     q = sub.add_parser("queue")
@@ -464,7 +462,16 @@ def main(argv=None) -> int:
     bd = sub.add_parser("board")
     bd.set_defaults(fn=lambda _a: (print(board()), 0)[1])
 
+    # `run` takes the wrapped command after a literal '--'. argparse.REMAINDER
+    # would swallow our own --note/--ttl into it, so split it off by hand.
+    argv = list(sys.argv[1:] if argv is None else argv)
+    tail: list[str] = []
+    if argv and argv[0] == "run" and "--" in argv:
+        i = argv.index("--")
+        argv, tail = argv[:i], argv[i + 1:]
     a = ap.parse_args(argv)
+    if a.cmd == "run":
+        a.wrapped = tail
     if a.cmd == "queue" and a.op == "submit" and not a.idea:
         ap.error("queue submit needs --idea")
     if a.cmd == "lock" and a.op != "status" and not a.name:
