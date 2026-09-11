@@ -666,7 +666,19 @@ the I-013 classifier because it is 0.29x interpreted on 78% of per-frame `pairs`
 
 Six Opus agents, one idea each, own worktree, coordinated through `lab/coord/`. Every in-game request
 was a delta against the locked full-ALAO baseline (5 repeats, 300 s, `gammabaseline` save, standing
-still). Merged on `integrate/gen2`; suite 470 passed / 7 skipped / 4 xfailed (one strict xfail fixed).
+still). Merged on `integrate/gen2` (head after gates: see git log); suite 472 passed / 7 skipped /
+4 xfailed (one strict xfail fixed). Integration corpus gate, quiet machine, runs
+`20260911-175058-gamma-integ-gen2` and `20260911-175201-vanilla-integ-gen2` vs the i019 baselines:
+
+| | GAMMA | vanilla `scripts.db0` |
+|---|---|---|
+| G4 compile failures | 0 | 0 |
+| G5 idempotence violations | 0 | 0 |
+| G6 analyze / fix | 12.1 s / 22.4 s vs 11.9 / 21.8 (+2% / +3%, with 38% more edits) | 5.7 s / 11.0 s vs 5.4 / 10.6 |
+| G7 patterns that moved | `global_write` -4747, `repeated_db_actor` +211, `repeated_time_global` +97, `pairs_to_ipairs` +24 (report-only), `repeated_db_*` +24, `pow_op_sqrt` +10, `repeated_*name()` +11, `repeated_wpn_section()` -2 (rebound fix); DEBUG / YELLOW unchanged | same families: -740 / +106 / +37 / +23 / +69 / +1 / +27 |
+| findings total | 15060 -> 10688 | 5141 -> 4665 |
+| files modified / edits | 513 -> 571 / 4708 -> 6493 | 176 -> 217 / 2240 -> 3620 |
+| parse failures | 3 (known, unchanged) | 1 (`lua_help.script`, unchanged) |
 
 | Idea | Verdict | Deciding fact |
 |---|---|---|
