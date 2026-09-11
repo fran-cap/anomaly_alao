@@ -119,6 +119,7 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 | Repeated `system_ini()` | `local ini = system_ini()` | Medium - cached singleton |
 | Repeated `get_console()` | `local console = get_console()` | Medium - cached singleton |
 | Repeated `get_hud()` | `local hud = get_hud()` | Medium - cached singleton |
+| Repeated `time_global()` (2+) | `local tg = time_global()` | Medium - `Device.dwTimeGlobal` is written once per frame, so every read inside one body returns the same number. Threshold 2, not 4: each read is an engine C call that also aborts the LuaJIT trace. Skipped when the body has a `while`/`repeat` or a `coroutine.yield`, when it times itself (`local t0 = time_global()` ... `time_global() - t0`), when no read runs unconditionally (so the hoist would add a call on some path), and when a hoisted declaration would land above an early `return` |
 | Repeated `:section()` | `local obj_sec = obj:section()` | Medium - immutable property |
 | Repeated `:id()` | `local obj_id = obj:id()` | Medium - immutable property |
 | Repeated `:clsid()`, `:story_id()` | `local obj_cls = obj:clsid()` | Medium - immutable property |
