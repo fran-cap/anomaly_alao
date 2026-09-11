@@ -29,6 +29,7 @@ PERFORMANCE_IMPACT = {
     'vector_alloc_in_loop': 'critical',
     'expensive_in_hotpath': 'critical',
     'string_concat_in_loop': 'critical',
+    'append_loop_counter': 'critical',
 
     # HIGH - moderate to high impact in tight loops
     'distance_to_comparison': 'high',
