@@ -42,7 +42,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from models import detect_file_encoding  # noqa: E402
 
-DEFAULT_LAB = Path(__file__).resolve().parent.parent / "lab"  # <repo>/lab
+# The lab data is shared state: runs from every git worktree must land in the
+# main checkout so corpus_compare can diff across agents. Override with
+# ALAO_LAB or --out-root. Falls back to <this repo>/lab when the main
+# checkout is not where we expect it (another machine).
+_MAIN_LAB = Path(r"C:\code\GITnomaly_alao\lab")
+DEFAULT_LAB = Path(os.environ.get("ALAO_LAB") or (_MAIN_LAB if _MAIN_LAB.is_dir() else REPO_ROOT / "lab"))
 DEFAULT_INSTALL = Path(r"D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA")
 BAK_SUFFIX = ".alao-bak"
 MAX_DIFFS = 50
