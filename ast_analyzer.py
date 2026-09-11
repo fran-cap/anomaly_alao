@@ -1979,6 +1979,17 @@ class ASTAnalyzer:
             # rewrite that --fix *would* have done and leave the call untouched.
             # Under --fix-yellow the transformer does the same suppression for
             # the YELLOW ones, where the counter rewrite really does happen.
+            #
+            # MERGE CONTRACT with agent-I004's I-038 guard (branch agent-I004,
+            # commits f42c0ec + 86e938d). Their _aliases_that_would_be_orphaned
+            # declines to rewrite the last surviving use of a
+            # `local tinsert = table.insert` alias, so the fix doesn't invent an
+            # unused_local_variable. It only looks at table_insert_append's
+            # candidates, and this pattern claims calls away from that list, so
+            # whoever merges the two branches must feed our claimed calls into
+            # the same check. I-004 measured the damage without it: exactly one
+            # site, demonized_ledge_grabbing.script:919 `tinsert`, whose only
+            # use is inside a loop we claim.
             if severity == 'GREEN':
                 for kind, node, value in loop_sites:
                     if kind == 'insert':
