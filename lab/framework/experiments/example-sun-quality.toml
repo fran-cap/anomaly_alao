@@ -1,0 +1,30 @@
+# Example A/B experiment: does lowering sun shadow quality buy frames?
+#
+#   py -3.12 -m aalo run --experiment example-sun-quality --dry-run
+#
+# Arms run alternating baseline/variant for `repeats` rounds, so any thermal or
+# background drift hits both arms equally.
+
+name = "example-sun-quality"
+idea_id = "I-001"
+repeats = 3
+duration_s = 300      # seconds of gameplay to measure per run
+timeout_s = 900       # hard stop if the game never exits
+
+[baseline]
+notes = "stock GAMMA settings"
+
+[baseline.user_ltx]
+r2_sun_quality = "st_opt_medium"
+r2_sun_tsm = "on"
+
+[variant]
+notes = "cheaper sun shadows"
+
+[variant.user_ltx]
+r2_sun_quality = "st_opt_low"
+r2_sun_tsm = "off"
+
+# Mods can be toggled the same way; keys are modlist.txt names.
+# [variant.mods]
+# "Jaku's Improved Shaders" = false

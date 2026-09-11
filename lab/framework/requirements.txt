@@ -1,0 +1,10 @@
+# Framework dependencies.  The package itself is stdlib-only; everything below
+# is optional or test-time.
+#
+#   py -3.12 -m pip install -r framework/requirements.txt
+
+psutil>=5.9   ; optional - CPU/RSS fallback sampler when PresentMon is absent
+pytest>=8.0   ; test runner only
+
+# Not installable via pip, install separately if you want real frame data:
+#   winget install Intel.PresentMon

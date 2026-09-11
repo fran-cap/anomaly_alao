@@ -1,0 +1,30 @@
+# AALO framework configuration.
+# All paths are absolute. Edit here, never hardcode paths in code.
+
+[paths]
+game_root = 'D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA'
+anomaly   = 'D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA\Anomaly'
+mo2_root  = 'D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA\GAMMA'
+lab       = 'C:\code\GIT\anomaly_alao\lab'
+# Optional overrides; derived from the above when omitted:
+#   appdata  = <anomaly>\appdata
+#   user_ltx = <appdata>\user.ltx
+#   logs_dir = <appdata>\logs
+#   data     = <lab>\data
+
+[mo2]
+profile = 'G.A.M.M.A'
+shortcut = 'Anomaly (DX11-AVX)'
+exe = 'AnomalyDX11AVX.exe'
+
+[run]
+# Seconds to wait for the game process before giving up.
+timeout_s = 900
+# Seconds to wait after launching MO2 before looking for the game process.
+launch_grace_s = 60
+# Sampler cadence for the psutil fallback.
+sample_hz = 1.0
+# Seconds to wait after the level-load marker before sampling starts.
+# alife.ltx has auto_switch=true: switch_distance drops from 1250 m to 450 m
+# about 10 s after load, so early frames measure the transient, not the config.
+warmup_s = 30.0

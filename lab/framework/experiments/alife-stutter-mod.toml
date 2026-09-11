@@ -1,0 +1,33 @@
+# The ready-made A/B that ships with G.A.M.M.A.
+#
+#   py -3.12 -m aalo run --experiment alife-stutter-mod --dry-run
+#   py -3.12 -m aalo run --experiment alife-stutter-mod          (elevated)
+#
+# "Turn this on if you stutter" sits at higher priority than
+# "G.A.M.M.A. Alife optimization" in the load order and is shipped disabled, so
+# enabling it overrides the stock A-Life tuning.  That is exactly a two-arm
+# experiment: the vendor already wrote both configurations.
+#
+# Runs that toggle mods get their own profile copy, profiles/aalo-<run_id>.
+# The live G.A.M.M.A profile is never edited.
+
+name = "alife-stutter-mod"
+idea_id = "I-005"
+repeats = 3
+duration_s = 300      # seconds of gameplay measured per run
+warmup_s = 30         # after the level-load marker; A-Life auto_switch settles first
+timeout_s = 900
+
+[baseline]
+notes = "stock load order, vendor A-Life optimization only"
+
+[baseline.mods]
+"G.A.M.M.A. Alife optimization" = true
+"Turn this on if you stutter" = false
+
+[variant]
+notes = "vendor anti-stutter override enabled at higher priority"
+
+[variant.mods]
+"G.A.M.M.A. Alife optimization" = true
+"Turn this on if you stutter" = true

@@ -1,0 +1,34 @@
+{
+  "ideas": [
+    {
+      "id": "I-001",
+      "title": "Trim offline A-Life simulation radius",
+      "category": "alife",
+      "hypothesis": "Most CPU cost in Zaton comes from offline squads far outside the player's awareness radius; shrinking it should raise 1% lows.",
+      "change": "alife.ltx: switch_distance 150 -> 110, process_time 200 -> 140",
+      "measure": "fps_1pct_low and frametime_p99_ms over a 5 minute Zaton walk",
+      "expected_gain": "high",
+      "risk": "med",
+      "status": "kept",
+      "score": 0.72,
+      "parent": null,
+      "generation": 1,
+      "notes": "Watch for squads popping in at the edge of the trimmed radius."
+    },
+    {
+      "id": "I-002",
+      "title": "Drop sun shadow cascade count to 3",
+      "category": "render",
+      "hypothesis": "The fourth cascade costs frametime but is barely visible at GAMMA's default draw distance.",
+      "change": "user.ltx: r__sun_cascades 4 -> 3",
+      "measure": "fps_avg and frametime_p99_ms on the Rostok bar loop",
+      "expected_gain": "med",
+      "risk": "low",
+      "status": "running",
+      "score": null,
+      "parent": "I-001",
+      "generation": 2,
+      "notes": "First attempt crashed on load; retry queued."
+    }
+  ]
+}

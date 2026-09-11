@@ -1,0 +1,40 @@
+{
+  "analyze_s": 298.4,
+  "fix_s": 161.9,
+  "parse_failures": [
+    {
+      "file": "mods/Boomsticks and Sharpsticks/gamedata/scripts/bas_ui_mcm.script",
+      "error": "luaparser: unexpected symbol near 'goto' at line 412"
+    }
+  ],
+  "timeouts": [],
+  "crashes": [],
+  "findings_by_pattern": {
+    "global-lookup-in-hot-fn": 1190,
+    "table-concat-in-loop": 388,
+    "string-format-in-loop": 309,
+    "ipairs-to-numeric-for": 271,
+    "redundant-level-object": 164,
+    "math-lib-localize": 158,
+    "unused-local": 95,
+    "table-insert-index": 63,
+    "pcall-in-update": 21,
+    "nil-guard-before-alive": 37
+  },
+  "findings_by_severity": {
+    "RED": 71,
+    "YELLOW": 1402,
+    "GREEN": 1160,
+    "DEBUG": 63
+  },
+  "files_modified": 628,
+  "edits_applied": 2401,
+  "edits_dropped_overlap": 29,
+  "compile_failures_after_fix": [],
+  "idempotence_violations": [],
+  "differential_failures": [],
+  "extra": {
+    "python": "3.12.4",
+    "luaparser": "4.2.0"
+  }
+}

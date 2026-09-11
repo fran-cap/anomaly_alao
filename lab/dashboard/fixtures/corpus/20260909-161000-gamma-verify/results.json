@@ -1,0 +1,36 @@
+{
+  "analyze_s": 276.1,
+  "fix_s": 154.3,
+  "parse_failures": [],
+  "timeouts": [],
+  "crashes": [],
+  "findings_by_pattern": {
+    "global-lookup-in-hot-fn": 1197,
+    "table-concat-in-loop": 385,
+    "string-format-in-loop": 309,
+    "ipairs-to-numeric-for": 274,
+    "redundant-level-object": 166,
+    "math-lib-localize": 158,
+    "unused-local": 95,
+    "table-insert-index": 64,
+    "pcall-in-update": 21,
+    "nil-guard-before-alive": 41
+  },
+  "findings_by_severity": {
+    "RED": 66,
+    "YELLOW": 1411,
+    "GREEN": 1169,
+    "DEBUG": 64
+  },
+  "files_modified": 634,
+  "edits_applied": 2447,
+  "edits_dropped_overlap": 27,
+  "compile_failures_after_fix": [],
+  "idempotence_violations": [],
+  "differential_failures": [],
+  "extra": {
+    "python": "3.12.4",
+    "luaparser": "4.2.0",
+    "lupa": "2.2"
+  }
+}

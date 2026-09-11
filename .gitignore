@@ -140,3 +140,9 @@ extracted
 test
 origin_backup/
 val/
+# ALAO lab (tests/tools/dashboard live in lab/; regenerable run data stays out)
+lab/data/runs/
+lab/data/snapshots/
+lab/data/corpus/*/diffs/
+lab/data/corpus/*/alao-report.json
+lab/**/__pycache__/

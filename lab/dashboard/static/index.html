@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AALO Lab</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>AALO Lab <span class="sub">ALAO corpus regression &amp; idea beam</span></h1>
+  <nav class="tabs" id="tabs">
+    <button type="button" data-view="corpus" class="tab active">Corpus</button>
+    <button type="button" data-view="ideas" class="tab">Ideas</button>
+    <button type="button" data-view="runs" class="tab">FPS runs</button>
+    <button type="button" data-view="archive" class="tab">Archived knobs</button>
+  </nav>
+  <div class="status">
+    <span id="refresh-state" class="dot" title="auto-refresh"></span>
+    <span id="last-updated">never</span>
+    <button id="refresh-now" type="button">Refresh</button>
+  </div>
+</header>
+
+<!-- ------------------------------------------------------------ corpus -->
+<div class="view" id="view-corpus">
+  <section id="corpus-tiles" class="tiles" aria-label="corpus summary"></section>
+
+  <section class="panel">
+    <h2>Trend <span class="badge">findings &amp; failures across runs</span></h2>
+    <div id="corpus-trend"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Corpus runs <span id="corpus-count" class="badge"></span></h2>
+    <div class="tablewrap">
+      <table id="corpus-table">
+        <thead>
+          <tr>
+            <th data-sort="started">Started</th>
+            <th data-sort="run_id">Run</th>
+            <th data-sort="alao_commit_short">Commit</th>
+            <th data-sort="corpus">Corpus</th>
+            <th data-sort="corpus_files" class="num">Files</th>
+            <th data-sort="findings_total" class="num">Findings</th>
+            <th data-sort="parse_failures" class="num">Parse fail</th>
+            <th data-sort="compile_failures_after_fix" class="num">Compile fail</th>
+            <th data-sort="idempotence_violations" class="num">Idem viol</th>
+            <th data-sort="analyze_s" class="num">Analyze s</th>
+            <th data-sort="fix_s" class="num">Fix s</th>
+            <th data-sort="health">Health</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="corpus-empty" class="empty" hidden>No corpus runs yet.</p>
+  </section>
+
+  <section class="panel" id="corpus-detail-panel" hidden>
+    <h2>Run detail <span id="corpus-detail-id" class="badge"></span>
+      <button id="corpus-detail-close" type="button" class="close">close</button>
+    </h2>
+    <div id="corpus-detail-body"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Compare
+      <select id="cmp-a" title="run A (newer)"></select>
+      <span class="vs">vs</span>
+      <select id="cmp-b" title="run B (older)"></select>
+      <span id="cmp-note" class="badge"></span>
+    </h2>
+    <div id="cmp-body"></div>
+  </section>
+</div>
+
+<!-- ------------------------------------------------------------- ideas -->
+<div class="view" id="view-ideas" hidden>
+  <section id="tiles" class="tiles" aria-label="summary"></section>
+
+  <section class="panel">
+    <h2>Ideas beam <span id="ideas-count" class="badge"></span>
+      <label class="filter">category
+        <select id="ideas-category"></select>
+      </label>
+    </h2>
+    <div class="tablewrap">
+      <table id="ideas-table">
+        <thead>
+          <tr>
+            <th data-sort="generation" class="num">Gen</th>
+            <th data-sort="id">ID</th>
+            <th data-sort="title">Title</th>
+            <th data-sort="category">Category</th>
+            <th data-sort="expected_gain">Gain</th>
+            <th data-sort="risk">Risk</th>
+            <th data-sort="status">Status</th>
+            <th data-sort="score" class="num">Score</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="ideas-empty" class="empty" hidden>No ideas yet.</p>
+  </section>
+</div>
+
+<!-- -------------------------------------------------------------- runs -->
+<div class="view" id="view-runs" hidden>
+  <section class="panel">
+    <h2>FPS runs <span id="runs-count" class="badge"></span></h2>
+    <div class="tablewrap">
+      <table id="runs-table">
+        <thead>
+          <tr>
+            <th data-sort="run_id">Run</th>
+            <th data-sort="idea_id">Idea</th>
+            <th data-sort="status">Status</th>
+            <th data-sort="started">Started</th>
+            <th data-sort="duration_s" class="num">Dur (s)</th>
+            <th data-sort="fps_avg" class="num">FPS avg</th>
+            <th data-sort="fps_1pct_low" class="num">1% low</th>
+            <th data-sort="frametime_p99_ms" class="num">p99 ms</th>
+            <th data-sort="crashed">Crashed</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="runs-empty" class="empty" hidden>No runs yet.</p>
+  </section>
+
+  <section class="panel" id="detail-panel" hidden>
+    <h2>Run detail <span id="detail-id" class="badge"></span>
+      <button id="detail-close" type="button" class="close">close</button>
+    </h2>
+    <div id="detail-body"></div>
+  </section>
+</div>
+
+<!-- ----------------------------------------------------------- archive -->
+<div class="view" id="view-archive" hidden>
+  <section class="panel">
+    <h2>Archived game-knob ideas <span id="archive-count" class="badge"></span></h2>
+    <p class="empty">Read-only. Superseded by CONTRACT v2: the beam now targets ALAO itself.</p>
+    <div class="tablewrap">
+      <table id="archive-table">
+        <thead>
+          <tr>
+            <th>ID</th><th>Title</th><th>Category</th><th>Gain</th>
+            <th>Risk</th><th>Status</th><th class="num">Score</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="archive-empty" class="empty" hidden>No archived ideas file.</p>
+  </section>
+</div>
+
+<footer class="foot">
+  Data schema: <code>CONTRACT.md</code> &middot; served from <span id="data-dir">?</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

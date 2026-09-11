@@ -1,0 +1,17 @@
+{
+  "run_id": "20260908-101500-gamma-base",
+  "alao_commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  "alao_dirty": false,
+  "corpus": "gamma-0.9.4",
+  "corpus_files": 2079,
+  "flags": [
+    "--analyze",
+    "--fix",
+    "--check-compile",
+    "--idempotence"
+  ],
+  "started": "2026-09-08T10:15:00",
+  "finished": "2026-09-08T10:23:41",
+  "status": "done",
+  "notes": "baseline sweep before the pattern work"
+}

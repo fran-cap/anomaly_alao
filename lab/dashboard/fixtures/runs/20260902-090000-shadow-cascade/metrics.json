@@ -1,0 +1,13 @@
+{
+  "fps_avg": 55.1,
+  "fps_1pct_low": 21.0,
+  "frametime_p99_ms": 61.4,
+  "load_time_s": null,
+  "ram_peak_mb": 7400.0,
+  "vram_peak_mb": null,
+  "crashed": true,
+  "duration_s": 104.0,
+  "extra": {
+    "crash_reason": "xrRender shader cache"
+  }
+}

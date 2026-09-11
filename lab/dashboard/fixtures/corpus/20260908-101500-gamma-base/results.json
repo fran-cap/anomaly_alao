@@ -1,0 +1,66 @@
+{
+  "analyze_s": 341.7,
+  "fix_s": 178.2,
+  "parse_failures": [
+    {
+      "file": "mods/Boomsticks and Sharpsticks/gamedata/scripts/bas_ui_mcm.script",
+      "error": "luaparser: unexpected symbol near 'goto' at line 412"
+    },
+    {
+      "file": "mods/JSRS Sound Mod/gamedata/scripts/jsrs_env.script",
+      "error": "UnicodeDecodeError: cp1251 codec cannot decode byte 0x98 in position 2231"
+    },
+    {
+      "file": "Anomaly/gamedata/scripts/xr_effects.script",
+      "error": "luaparser: expected '=' near '#' at line 1907"
+    }
+  ],
+  "timeouts": [
+    "mods/Dynamic Anomalies Overhaul/gamedata/scripts/dao_main.script"
+  ],
+  "crashes": [],
+  "findings_by_pattern": {
+    "global-lookup-in-hot-fn": 1184,
+    "table-concat-in-loop": 402,
+    "string-format-in-loop": 311,
+    "ipairs-to-numeric-for": 268,
+    "redundant-level-object": 164,
+    "math-lib-localize": 151,
+    "unused-local": 97,
+    "table-insert-index": 63,
+    "pcall-in-update": 22
+  },
+  "findings_by_severity": {
+    "RED": 88,
+    "YELLOW": 1391,
+    "GREEN": 1120,
+    "DEBUG": 63
+  },
+  "files_modified": 611,
+  "edits_applied": 2318,
+  "edits_dropped_overlap": 44,
+  "compile_failures_after_fix": [
+    {
+      "file": "mods/Trader Overhaul/gamedata/scripts/trade_manager.script",
+      "error": "lupa: '=' expected near 'end' at line 88"
+    },
+    {
+      "file": "mods/Arrival Overhaul/gamedata/scripts/ao_spawn.script",
+      "error": "lupa: unexpected symbol near ')' at line 233"
+    }
+  ],
+  "idempotence_violations": [
+    "mods/Food Drug Drink Animations/gamedata/scripts/fdda_main.script",
+    "mods/Grok Body Health Realism/gamedata/scripts/grok_bhr.script"
+  ],
+  "differential_failures": [
+    {
+      "file": "mods/Trader Overhaul/gamedata/scripts/trade_manager.script",
+      "detail": "rewritten module returns nil for get_price(8) where the original returns 1400"
+    }
+  ],
+  "extra": {
+    "python": "3.12.4",
+    "luaparser": "4.2.0"
+  }
+}

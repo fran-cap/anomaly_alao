@@ -1,0 +1,34 @@
+{
+  "ideas": [
+    {
+      "id": "G-001",
+      "title": "Narrow the online switch radius",
+      "category": "alife",
+      "hypothesis": "Fewer online objects means less per-frame AI work.",
+      "change": "alife.ltx [alife]: switch_distance 450 -> 300",
+      "measure": "fps_1pct_low at Rostok",
+      "expected_gain": "high",
+      "risk": "med",
+      "status": "pruned",
+      "score": 0.31,
+      "parent": null,
+      "generation": 0,
+      "notes": "archived: game knobs are out of scope under CONTRACT v2"
+    },
+    {
+      "id": "G-002",
+      "title": "Drop shadow cascade count",
+      "category": "render",
+      "hypothesis": "Cascade 4 costs a full extra depth pass.",
+      "change": "user.ltx: r4_sun_cascades 4 -> 3",
+      "measure": "frametime_p99_ms",
+      "expected_gain": "med",
+      "risk": "low",
+      "status": "pruned",
+      "score": null,
+      "parent": null,
+      "generation": 0,
+      "notes": "archived"
+    }
+  ]
+}

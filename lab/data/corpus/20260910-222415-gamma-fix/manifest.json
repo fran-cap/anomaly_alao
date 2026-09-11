@@ -1,0 +1,23 @@
+{
+  "run_id": "20260910-222415-gamma-fix",
+  "alao_commit": "22bdcbbc0f0cd7c7566ede0634f96c08533d2ddd",
+  "alao_dirty": true,
+  "corpus": "gamma-0.9.4",
+  "corpus_files": 1503,
+  "flags": [
+    "--report",
+    "D:\\GOG_Games\\Gamma\\aalo-lab\\data\\corpus\\20260910-222415-gamma-fix\\alao-report.json",
+    "--timeout",
+    "10.0",
+    "--cache-threshold",
+    "4",
+    "--exclude",
+    "D:\\GOG_Games\\Gamma\\aalo-lab\\data\\corpus\\20260910-222415-gamma-fix\\empty-exclude.txt",
+    "|",
+    "--fix"
+  ],
+  "started": "2026-09-10T22:24:15",
+  "finished": "2026-09-10T22:25:36",
+  "status": "done",
+  "notes": "edits_dropped_overlap is null: ALAO exposes neither the dropped-overlap count nor a per-file edit breakdown in its JSON report or stdout (_apply_edits drops silently in ast_transformer.py)."
+}

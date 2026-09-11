@@ -1,0 +1,4 @@
+{
+  "extraPaths": ["framework", "dashboard"],
+  "pythonVersion": "3.12"
+}

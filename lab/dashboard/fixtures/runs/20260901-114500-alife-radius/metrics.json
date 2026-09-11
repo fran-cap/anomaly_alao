@@ -1,0 +1,13 @@
+{
+  "fps_avg": 58.9,
+  "fps_1pct_low": 39.4,
+  "frametime_p99_ms": 27.6,
+  "load_time_s": 58.9,
+  "ram_peak_mb": 8730.0,
+  "vram_peak_mb": 6210.0,
+  "crashed": false,
+  "duration_s": 320.0,
+  "extra": {
+    "route": "A"
+  }
+}
