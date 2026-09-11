@@ -694,9 +694,11 @@ Cross-cutting facts this generation established:
   edits see a hoisted local and silently flipped an unrelated overlap in `gamemode_azazel.script`.
   Do not reorder that loop; defer specific edits instead. `ASTAnalyzer.find_visible_alias()` is the
   reusable helper it left behind.
-- **Two silent-miscompile bugs in shipped GREEN caching were found by agents auditing their own
-  output**, not by the corpus gates: the receiver-rebind bucket (I-021) and the enclosing-scope
-  cache-name capture (I-040). Both pass G4 (it compiles) and G5 (it is idempotent). The differential
+- **Three silent-miscompile bugs in shipped GREEN caching were found by agents auditing their own
+  output**, not by the corpus gates: the Invoke-receiver suppression and the receiver-rebind bucket
+  (I-021) and the enclosing-scope cache-name capture (I-040). I-021 scanned all 772 rewritten files
+  of its runs for the capture and found zero occurrences; `tg` is a module-scope name mod authors
+  use, `actor` is not. Both pass G4 (it compiles) and G5 (it is idempotent). The differential
   harness (`run_both`) only catches what a test author thought to write. A corpus-scale differential
   gate that executes original vs rewritten functions under stubbed globals is now the highest-value
   safety idea on the beam (I-017, re-scored).
