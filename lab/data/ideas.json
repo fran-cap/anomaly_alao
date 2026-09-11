@@ -250,10 +250,10 @@
       "expected_gain": "high",
       "risk": "med",
       "status": "proposed",
-      "score": 8.0,
+      "score": 9.0,
       "parent": null,
       "generation": 1,
-      "notes": "Slightly less urgent than in the first draft: the corpus harness has now shown output compiles across 513 rewritten files, and the one real bug was caught by idempotence rather than by semantics."
+      "notes": "Slightly less urgent than in the first draft: the corpus harness has now shown output compiles across 513 rewritten files, and the one real bug was caught by idempotence rather than by semantics. Re-scored 9.0 on 2026-09-11: gen-2 found two silent-miscompile bugs in shipped GREEN caching (I-021 receiver rebind, I-040 enclosing-scope capture) that G4/G5 cannot see; only execution-level differential testing at corpus scale would have."
     },
     {
       "id": "I-018",
@@ -598,7 +598,7 @@
       "hypothesis": "I-013 found time_global() is the top trace killer: 186 abort sites in per-frame bodies, many calling it 2+ times per invocation inside throttle guards. Every call is an engine C call on the interpreted path.",
       "change": "ast_analyzer.py / ast_transformer.py - repeated_call-style GREEN cache of time_global() per body when called 2+ times with no intervening yield.",
       "measure": "Interpreted microbench with a stubbed C call, census of shapes on both corpora, gates G4-G8, FPS delta vs full-ALAO overlays if live per-frame code changes.",
-      "notes": "Registered 2026-09-11 for gen-2 by the organizer; agent-I040.\nGEN-2 KEPT as GREEN 2026-09-11 (agent-I040, 7a470ce): 134 sites, 1.24x-1.88x interpreted (Lua stub), 2.46x (C stub), 0 compiled sites. Only 15 live per-frame sites, 7 of them UI: ~0.4 us of a 4770 us frame. FPS delta 20260911-164718-I-040-ec27c2 predicted null."
+      "notes": "Registered 2026-09-11 for gen-2 by the organizer; agent-I040.\nGEN-2 KEPT as GREEN 2026-09-11 (agent-I040, 7a470ce): 134 sites, 1.24x-1.88x interpreted (Lua stub), 2.46x (C stub), 0 compiled sites. Only 15 live per-frame sites, 7 of them UI: ~0.4 us of a 4770 us frame. FPS delta 20260911-164718-I-040-ec27c2 predicted null. Found+fixed a second PRE-EXISTING bug (18756a9): _collect_function_locals never walked enclosing scopes, so a module-level local (e.g. local tg = 0, local actor = \"...\") was captured by an inserted cache of the same name; at bae4b0c four db.actor reads plus a module-level local actor produced a function returning the cached actor instead of the string. Resolver now unions ancestor-scope locals (renames to tg_alao / actor_alao). FPS item 20260911-164718-I-040-ec27c2 discarded: its variant overlay carried the broken drx_da_main_artefacts_movement.script."
     },
     {
       "id": "I-041",
