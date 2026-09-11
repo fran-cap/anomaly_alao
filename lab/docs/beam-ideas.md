@@ -708,12 +708,17 @@ Cross-cutting facts this generation established:
   reusable helper it left behind.
 - **Three silent-miscompile bugs in shipped GREEN caching were found by agents auditing their own
   output**, not by the corpus gates: the Invoke-receiver suppression and the receiver-rebind bucket
-  (I-021) and the enclosing-scope cache-name capture (I-040). I-021 scanned all 772 rewritten files
-  of its runs for the capture and found zero occurrences; `tg` is a module-scope name mod authors
-  use, `actor` is not. Both pass G4 (it compiles) and G5 (it is idempotent). The differential
+  (I-021) and the enclosing-scope cache-name capture (I-040). I-021's first two scans of its 772 rewritten
+  files reported zero captures and both were artifacts (a module-level-only grep, then a difflib
+  pass that folds an inserted line into a `replace` hunk); the scope-aware scan found 3 inserted
+  declarations in `tasks_fetch.script` where `local actor = db.actor` shadowed a *parameter* named
+  `actor` inside a nested closure. Lesson recorded: validate a scanner against a known positive
+  before quoting its zero. The merged branch renames that site to `actor_alao`. Both pass G4 (it compiles) and G5 (it is idempotent). The differential
   harness (`run_both`) only catches what a test author thought to write. A corpus-scale differential
   gate that executes original vs rewritten functions under stubbed globals is now the highest-value
-  safety idea on the beam (I-017, re-scored).
+  safety idea on the beam (I-017, re-scored). It would not have caught the `tasks_fetch` shape,
+  where parameter and `db.actor` coincide under any stub; that needs a cheaper, narrower check that
+  `--fix` never introduces a binding shadowing a live outer one (I-046).
 - **The per-frame rewrites ALAO can do today are worth ~0.01% of a frame.** Both in-game deltas
   this generation (I-021, I-040) were predicted null from site arithmetic before they ran, and I-021
   measured null. In-game FPS remains the wrong instrument for anything except I-043/I-044-class
