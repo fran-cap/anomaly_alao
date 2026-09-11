@@ -180,7 +180,7 @@ def test_object_by_id_is_never_cached(analyze):
     ]
 
 
-# --- known ALAO gap -------------------------------------------------------
+# --- I-021: db.actor as a method receiver ---------------------------------
 
 DB_ACTOR_METHOD_CALLS = """
 function f()
@@ -193,13 +193,10 @@ end
 """
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ast_analyzer.py:1612 suppresses the `db.actor` Index when it is the "
-           "receiver of an Invoke, so `db.actor:method()` never counts toward "
-           "repeated_db_actor - the dominant real-world shape of the pattern.",
-)
 def test_db_actor_as_method_receiver_should_be_cached(analyze):
+    """Fixed by I-021: _visit_Invoke no longer suppresses an EXPENSIVE_INDEXES
+    receiver. 3615 of the 6298 `db.actor` reads in the enabled GAMMA corpus are
+    method receivers, so this was the dominant real-world shape going unseen."""
     assert "repeated_db_actor" in pattern_names(analyze(DB_ACTOR_METHOD_CALLS))
 
 
@@ -258,3 +255,166 @@ def test_nil_returning_call_is_not_cached_when_the_chain_is_unwarned(analyze):
 def test_a_nil_returning_call_we_already_warn_about_is_still_cached(analyze):
     """The guard above must not kill the ordinary alife() caching case."""
     assert "repeated_alife" in pattern_names(analyze(ALIFE_CHAIN_WE_DO_WARN_ABOUT))
+
+
+# --- I-021: widened EXPENSIVE_INDEXES and CACHEABLE_OBJECT_METHODS ---------
+
+DB_ACTOR_MIXED_SHAPES = """
+function f()
+    local a = db.actor:health()
+    local b = db.actor.some_field
+    db.actor:give_info_portion("x")
+    local c = db.actor:position()
+    return a, b, c
+end
+"""
+
+
+def test_db_actor_counts_receivers_and_plain_reads_together(analyze):
+    """A body that mixes `db.actor.x` with `db.actor:m()` reaches the threshold."""
+    f = find_one(analyze(DB_ACTOR_MIXED_SHAPES), "repeated_db_actor")
+    assert f.details["count"] == 4
+
+
+def test_db_actor_receiver_rewrite_is_syntactically_whole(transform, compiles):
+    out = transform(DB_ACTOR_MIXED_SHAPES)
+    assert "local actor = db.actor" in out
+    assert "actor:health()" in out and "db.actor:health()" not in out
+    assert "actor:give_info_portion" in out
+    assert compiles(out)
+
+
+DB_STORAGE = """
+function f(obj)
+    local a = db.storage[obj:id()]
+    local b = db.storage[1]
+    local c = db.storage
+    local d = db.storage[2]
+    return a, b, c, d
+end
+"""
+
+
+def test_db_storage_is_cached(analyze):
+    f = find_one(analyze(DB_STORAGE), "repeated_db_storage")
+    assert f.severity == "GREEN"
+    assert f.source_line == "local db_storage = db.storage"
+
+
+def test_db_storage_rewrite_preserves_behaviour(transform, run_both):
+    out = transform(DB_STORAGE)
+    assert "local db_storage = db.storage" in out
+    harness = """
+function g()
+    db.storage[7] = 'seven'
+    db.storage[1] = 'one'
+    db.storage[2] = 'two'
+    return f(make_object_stub(7, 'x'))
+end
+"""
+    run_both(DB_STORAGE + harness, out + harness, "g")
+
+
+# db.* tables that are NOT in EXPENSIVE_INDEXES stay untracked - the table is
+# the contract, not "any db field".
+DB_UNLISTED = """
+function f()
+    local a = db.spawn_cop_heli
+    local b = db.spawn_cop_heli
+    local c = db.spawn_cop_heli
+    local d = db.spawn_cop_heli
+    return a, b, c, d
+end
+"""
+
+
+def test_unlisted_db_field_is_not_cached(analyze):
+    assert not [
+        f for f in analyze(DB_UNLISTED) if f.pattern_name.startswith("repeated_db_")
+    ]
+
+
+OBJ_NAME = """
+function f(obj)
+    local a = obj:name()
+    local b = obj:name()
+    local c = obj:name()
+    local d = obj:name()
+    return a, b, c, d
+end
+"""
+
+
+def test_obj_name_is_green(analyze):
+    f = find_one(analyze(OBJ_NAME), "repeated_obj_name()")
+    assert f.severity == "GREEN"
+
+
+def test_obj_name_rewrite_preserves_behaviour(transform, run_both):
+    out = transform(OBJ_NAME)
+    assert "local obj_name = obj:name()" in out
+    harness_orig = OBJ_NAME + "\nfunction g() return f(make_object_stub(7, 'wpn_ak74')) end\n"
+    harness_new = out + "\nfunction g() return f(make_object_stub(7, 'wpn_ak74')) end\n"
+    run_both(harness_orig, harness_new, "g")
+
+
+# :character_community() is stable only because no engine tick happens inside a
+# body, which is a weaker argument than :id()/:section() being stored members.
+OBJ_COMMUNITY = """
+function f(obj)
+    local a = obj:character_community()
+    local b = obj:character_community()
+    local c = obj:character_community()
+    local d = obj:character_community()
+    return a, b, c, d
+end
+"""
+
+
+def test_character_community_is_yellow(analyze):
+    assert find_one(analyze(OBJ_COMMUNITY), "repeated_obj_character_community()").severity == "YELLOW"
+
+
+def test_yellow_method_is_not_rewritten_without_fix_yellow(transform):
+    assert "local obj_comm" not in transform(OBJ_COMMUNITY)
+    assert "local obj_comm" in transform(OBJ_COMMUNITY, fix_yellow=True)
+
+
+# The cache-name regex must not truncate the receiver: `section_name` has to win
+# over `name`, exactly as `story_id` wins over `id`.
+OBJ_SECTION_NAME = """
+function f(obj)
+    local a = obj:section_name()
+    local b = obj:section_name()
+    local c = obj:section_name()
+    local d = obj:section_name()
+    return a, b, c, d
+end
+"""
+
+
+def test_section_name_does_not_collide_with_name(transform, compiles):
+    out = transform(OBJ_SECTION_NAME)
+    assert "local obj_secname = obj:section_name()" in out
+    assert "obj:name()" not in out
+    assert compiles(out)
+
+
+# Mutable engine reads stay out of the table on purpose.
+OBJ_POSITION = """
+function f(obj)
+    local a = obj:position()
+    local b = obj:position()
+    local c = obj:position()
+    local d = obj:position()
+    return a, b, c, d
+end
+"""
+
+
+def test_position_is_never_cached(analyze):
+    """:position() hands back a fresh vector whose methods mutate in place, so a
+    cached copy aliases where the original did not."""
+    assert not [
+        f for f in analyze(OBJ_POSITION) if f.pattern_name.startswith("repeated_obj_position")
+    ]
