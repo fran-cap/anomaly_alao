@@ -626,7 +626,7 @@ Corrections to earlier sections:
   were counted clean in every run. Now reported (I-029).
 - **The JIT-on column of section 2 is moot for per-frame code.** `..` is NYI and every engine call aborts, so
   the "8.69x JIT on" concat number was interpreter-vs-interpreter. The interpreted column is the operative one.
-- **Speedups that depend on loop length must be quoted with K.** `string_concat_in_loop` and `counter_append`
+- **Speedups that depend on loop length must be quoted with K.** `string_concat_in_loop` and `append_loop_counter` (bench file was `counter_append` until 2026-09-11)
   both go from a regression or ~1.0x at K=5 to >9x at K=2000. The corpus mass is at small K.
 - **Only 290 of ALAO's 513 rewritten files are loaded by the live profile**; 223 are shadowed by a
   higher-priority mod (`lab/coord/build_overlay.py`). Corpus counts overstate in-game reach by ~43%.

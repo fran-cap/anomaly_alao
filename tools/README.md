@@ -159,7 +159,7 @@ no flag to turn any part of it off.
 ```bash
 py -3.12 tools/microbench.py                                # all 24 pairs, ~18 s
 py -3.12 tools/microbench.py --list
-py -3.12 tools/microbench.py --pattern counter_append --json out.json
+py -3.12 tools/microbench.py --pattern append_loop_counter --json out.json
 py -3.12 tools/microbench.py --shipped                      # only what ALAO fixes today
 py -3.12 tools/microbench.py --quick                        # tiny N smoke, NOT a measurement
 py -3.12 tools/microbench.py --self-check                   # prove jit.off(f,true) works
@@ -198,7 +198,7 @@ Copy any `bench/*.lua`, change five things. The format is comment directives;
 everything after a `-- @section` line until the next directive is Lua.
 
 ```lua
--- @pattern counter_append          -- required; Finding.pattern_name, and the file name
+-- @pattern append_loop_counter          -- required; Finding.pattern_name, and the file name
 -- @title t[#t+1]=v -> counter      -- required; one line for the table
 -- @status proposed                 -- shipped | proposed (default proposed)
 -- @doc 12.44 4.80                  -- optional: the beam-ideas s.2 figures, jit_on jit_off ('-' for none)

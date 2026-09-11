@@ -1,6 +1,6 @@
--- @pattern counter_append
+-- @pattern append_loop_counter
 -- @title t[#t+1]=v -> hoisted counter n=n+1; t[n]=v
--- @status proposed
+-- @status shipped
 -- @doc 12.44 4.80
 -- @iters 5 20 100 2000
 -- @doc_at 2000

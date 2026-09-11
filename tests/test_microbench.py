@@ -173,8 +173,8 @@ def test_tiny_run_produces_numbers():
 
 
 def test_sweep_case_yields_one_result_per_k():
-    case = next(c for c in microbench.load_cases(BENCH_DIR) if c.pattern == "counter_append")
-    assert case.iters, "counter_append should sweep K"
+    case = next(c for c in microbench.load_cases(BENCH_DIR) if c.pattern == "append_loop_counter")
+    assert case.iters, "append_loop_counter should sweep K"
     results = microbench.run_case(case, reps=1, modes=("jit_on",), n_override=2000)
     assert [r.k for r in results] == case.iters
     # the outer count is scaled so total work stays ~constant
