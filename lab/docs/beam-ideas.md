@@ -164,9 +164,9 @@ their group has no surviving replacement. Edits are applied end-to-start.
 
 **Where the logic is heuristic**, in rough order of how much it worries me:
 
-- **`_apply_edits()` treats containment as conflict** (`ast_transformer.py:2272`). This is no longer
-  a worry, it is a confirmed bug with a reproducer — see I-008. Two edits where one span *contains*
-  the other are not peers, but the overlap rule handles them as peers and drops the container.
+- **`_apply_edits()` containment** (`ast_transformer.py:2272`) — fixed 2026-09-10 (I-008): a
+  replacement that fully contains admitted edits now folds them into its own text instead of
+  being dropped. Partial overlaps are still rejected by priority.
 - `_extract_table_insert_value()` (`ast_transformer.py:229`) re-parses the call text and takes the
   first `,` after the first `(`, with no string or paren awareness *before* that comma. It then does
   a careful string/long-string/paren scan for the closing paren. The value span is reconstructed
@@ -298,7 +298,7 @@ before the loop, only appended to inside it, and never passed somewhere that cou
 calls inside loops, and the same transform applies to the 701 sites ALAO already rewrites to
 `t[#t+1]`. Promoted above I-002 on the team lead's recommendation and the corrected numbers.
 
-**I-008 — Fix `_apply_edits()` containment, the confirmed dropped-edit bug** *(transformer, 9.2)*
+**I-008 — Fix `_apply_edits()` containment, the confirmed dropped-edit bug** *(transformer, 9.2, DONE 2026-09-10: GAMMA idempotence 8 -> 0, run `20260910-230310-gamma-fix`)*
 Hypothesis: `_apply_edits()` (`ast_transformer.py:2272`) resolves overlaps by priority and drops the
 loser, but when a cacheable-global rewrite lands *inside* the argument list of a `table.insert(...)`
 that also has a `table_insert_append` edit, the inner edit wins and the outer append rewrite is

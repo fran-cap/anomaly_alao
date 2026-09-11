@@ -344,17 +344,6 @@ def test_the_cache_rewrite_itself_lands(tmp_path):
     assert text.count("unpack_(src)") == 4
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_apply_edits (ast_transformer.py:2272) treats a contained edit and its "
-           "containing edit as a plain overlap and keeps only the higher-priority "
-           "inner one. A cacheable-global rewrite inside a table.insert argument "
-           "list therefore cancels the table_insert_append rewrite of that call. "
-           "The append edit is dropped, never retried, and because the CLI skips "
-           "files that already have a .alao-bak the GREEN fix is lost for good. "
-           "Seen in 9 corpus files, e.g. G.A.M.M.A. UI ui_inventory.script:807 and "
-           "vanilla luapanda.lua:3490.",
-)
 def test_nested_cache_edit_does_not_cancel_the_table_insert_rewrite(tmp_path):
     path = tmp_path / "nested.script"
     path.write_text(NESTED_CACHE_IN_TABLE_INSERT, encoding="utf-8")
@@ -369,13 +358,6 @@ def test_nested_cache_edit_does_not_cancel_the_table_insert_rewrite(tmp_path):
     assert "table.insert" not in text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="same dropped-edit bug as "
-           "test_nested_cache_edit_does_not_cancel_the_table_insert_rewrite: the "
-           "second pass applies the table_insert_append edit that the first pass "
-           "dropped, so --fix is not a fixpoint on this shape.",
-)
 @pytest.mark.parametrize(
     "src", [
         NESTED_CACHE_IN_TABLE_INSERT,

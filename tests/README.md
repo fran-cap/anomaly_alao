@@ -81,14 +81,14 @@ in the reason string. Strict means they fail the run if ALAO starts passing them
 which is the signal to delete the marker. `pytest -rx` lists them all with their
 reasons.
 
-The one worth knowing before you touch `_apply_edits`: a cacheable-global rewrite
-that lands *inside* a `table.insert(...)` argument list cancels the
-`table_insert_append` rewrite of that call, because the two edits are nested and
-the overlap rule treats them as peers. The append edit is dropped and never
-retried, and the CLI skips any file that already has a `.alao-bak`, so a normal
-user never gets the fix. `test_fix_is_a_fixpoint_for_nested_edits` is the general
-form: run `--fix` twice and demand identical bytes. Anything a second pass still
-changes is an optimization ALAO reported and then threw away.
+The one that used to bite: a cacheable-global rewrite that lands *inside* a
+`table.insert(...)` argument list is *contained* by the `table_insert_append`
+rewrite of that call. `_apply_edits` used to treat the two as peers and drop
+the container, so the append was never applied. Since 2026-09-10 the container
+folds the inner edits into its own replacement text instead.
+`test_fix_is_a_fixpoint_for_nested_edits` is the general guard: run `--fix`
+twice and demand identical bytes. Anything a second pass still changes is an
+optimization ALAO reported and then threw away.
 
 ## What the reports do not tell you
 

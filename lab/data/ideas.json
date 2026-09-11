@@ -114,11 +114,11 @@
       "measure": "Idempotence goes from 8 GAMMA plus 1 vanilla violation to 0, and the 8 leftover GREEN table_insert_append findings in the post-fix re-analysis disappear.",
       "expected_gain": "high",
       "risk": "med",
-      "status": "queued",
+      "status": "done",
       "score": 9.2,
       "parent": null,
       "generation": 1,
-      "notes": "Confirmed with a reproducer in reports/corpus-sanity-report.md section 4. Nine affected files; canonical case G.A.M.M.A. UI/gamedata/scripts/ui_inventory.script:807, plus five sites in vanilla luapanda.lua. Lost optimization, not broken output."
+      "notes": "Confirmed with a reproducer in reports/corpus-sanity-report.md section 4. Nine affected files; canonical case G.A.M.M.A. UI/gamedata/scripts/ui_inventory.script:807, plus five sites in vanilla luapanda.lua. Lost optimization, not broken output. DONE 2026-09-10: containers fold contained edits into their replacement text (absorbed inner edits are skipped at apply time). GAMMA corpus run 20260910-230310-gamma-fix: idempotence 8 -> 0, 0 compile failures, findings unchanged. Both strict xfails in tests/test_transformer.py dropped."
     },
     {
       "id": "I-009",

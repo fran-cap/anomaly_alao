@@ -2289,27 +2289,58 @@ class ASTTransformer:
         replacements = [e for e in self.edits if e.start_char != e.end_char]
         insertions = [e for e in self.edits if e.start_char == e.end_char]
 
-        # Pass 1: replacements - same overlap rules as before.
+        # Pass 1: replacements. Non-overlapping ones are admitted as before.
+        # A replacement that fully *contains* already-admitted replacements
+        # (e.g. `table.insert(t, unpack(x))` -> `t[#t+1] = unpack(x)` wrapping
+        # the `unpack` -> `unpack_` cache rewrite inside its arguments) used to
+        # be dropped, so the append never happened and --fix was not a fixpoint.
+        # Now we fold the inner edits into the outer replacement text and keep
+        # the outer one, as long as the outer replacement still carries the
+        # original inner text verbatim (true for every edit that splices a
+        # source slice into its output). Partial overlaps are still rejected.
         replacements.sort(key=lambda e: (-e.priority, -e.start_char))
         admitted_repl = []
         covered_starts: List[int] = []
         covered_ends: List[int] = []
+        covered_edits: List[SourceEdit] = []
+        absorbed: Set[int] = set()   # id() of edits folded into a container
         for edit in replacements:
             s, e = edit.start_char, edit.end_char
-            overlaps = False
-            if covered_starts:
-                i = bisect_right(covered_starts, s) - 1
-                if i >= 0 and covered_ends[i] > s:
-                    overlaps = True
-                if not overlaps:
-                    j = bisect_left(covered_starts, s)
-                    if j < len(covered_starts) and covered_starts[j] < e:
-                        overlaps = True
-            if not overlaps:
+            # admitted spans are disjoint and sorted, so the ones touching
+            # [s, e) form one contiguous run [lo, hi)
+            lo = bisect_right(covered_starts, s) - 1
+            if lo < 0 or covered_ends[lo] <= s:
+                lo += 1
+            hi = bisect_left(covered_starts, e)
+            touching = covered_edits[lo:hi]
+            if not touching:
                 admitted_repl.append(edit)
-                idx = bisect_left(covered_starts, edit.start_char)
-                covered_starts.insert(idx, edit.start_char)
-                covered_ends.insert(idx, edit.end_char)
+                covered_starts.insert(lo, s)
+                covered_ends.insert(lo, e)
+                covered_edits.insert(lo, edit)
+                continue
+            # every touching edit must sit strictly inside [s, e)
+            if any(t.start_char < s or t.end_char > e for t in touching):
+                continue
+            a = touching[0].start_char
+            b = touching[-1].end_char
+            orig = self.source[a:b]
+            if not orig or edit.replacement.count(orig) != 1:
+                continue
+            base = edit.replacement.index(orig)
+            folded = edit.replacement
+            for t in sorted(touching, key=lambda t: -t.start_char):
+                fs = base + (t.start_char - a)
+                fe = base + (t.end_char - a)
+                folded = folded[:fs] + t.replacement + folded[fe:]
+            edit.replacement = folded
+            for t in touching:
+                absorbed.add(id(t))
+            admitted_repl.append(edit)
+            del covered_starts[lo:hi], covered_ends[lo:hi], covered_edits[lo:hi]
+            covered_starts.insert(lo, s)
+            covered_ends.insert(lo, e)
+            covered_edits.insert(lo, edit)
 
         # Pass 2: insertions - dedupe by (pos, text), then drop any whose
         # position is inside an admitted replacement's span. Allow insertion
@@ -2345,8 +2376,10 @@ class ASTTransformer:
             if not (e.is_enabler and e.group_id is not None and e.group_id not in groups_with_repl)
         ]
 
-        # Apply end-to-start so earlier positions stay valid.
-        admitted = admitted_repl + admitted_ins
+        # Apply end-to-start so earlier positions stay valid. Absorbed inner
+        # edits stay in admitted_repl for the group bookkeeping above but are
+        # already baked into their container's text, so skip them here.
+        admitted = [e for e in admitted_repl if id(e) not in absorbed] + admitted_ins
         admitted.sort(key=lambda e: -e.start_char)
         result = self.source
         for edit in admitted:
