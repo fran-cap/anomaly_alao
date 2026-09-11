@@ -133,6 +133,23 @@ class ASTTransformer:
                 if df.line_num not in existing_lines:
                     fixable.append(df)
 
+        # A counter rewrite (I-001) and table_insert_append want the same
+        # `table.insert(t, v)` call. The counter wins, but only once we know it
+        # is actually going to be attempted - the analyzer only suppresses the
+        # GREEN ones, so YELLOW sites are settled here under --fix-yellow.
+        claimed = set()
+        for f in fixable:
+            if f.pattern_name == 'append_loop_counter':
+                for kind, node, _value in (f.details.get('sites') or ()):
+                    if kind == 'insert':
+                        claimed.add(id(node))
+        if claimed:
+            fixable = [
+                f for f in fixable
+                if not (f.pattern_name == 'table_insert_append'
+                        and id(f.details.get('node')) in claimed)
+            ]
+
         if not fixable:
             return False, self.source, 0
 

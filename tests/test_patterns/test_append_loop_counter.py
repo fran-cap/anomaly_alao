@@ -51,6 +51,32 @@ def test_table_insert_in_loop_is_claimed_by_the_counter(analyze):
     assert findings_named(findings, "table_insert_append") == []
 
 
+def test_a_yellow_site_still_gets_the_plain_table_insert_rewrite(transform, analyze):
+    """The counter only claims a table.insert call when it is actually going to
+    rewrite it. A YELLOW site under plain --fix must still get the ordinary
+    table_insert_append treatment, not be left untouched by both."""
+    src = """
+        function build(src)
+            local out = {}
+            for _, v in pairs(src) do
+                table.insert(out, v)
+            end
+            return out
+        end
+    """
+    findings = analyze(src)
+    assert find_one(findings, PATTERN).severity == "YELLOW"
+    assert len(findings_named(findings, "table_insert_append")) == 1
+
+    plain = transform(src)
+    assert "out[#out+1] = v" in plain
+    assert "out_n" not in plain
+
+    yellow = transform(src, fix_yellow=True)
+    assert "out_n = out_n + 1; out[out_n] = v" in yellow
+    assert "table.insert" not in yellow
+
+
 def test_table_insert_outside_a_loop_still_belongs_to_table_insert_append(analyze):
     findings = analyze("""
         function build()

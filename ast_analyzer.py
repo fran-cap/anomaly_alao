@@ -1973,9 +1973,16 @@ class ASTAnalyzer:
 
             seed = '0' if (empty_ctor and not pre_sites) else '#%s' % name
 
-            for kind, node, value in loop_sites:
-                if kind == 'insert':
-                    self.append_loop_claimed.add(id(node))
+            # Only a GREEN finding gets to claim the call away from
+            # table_insert_append, because GREEN is what plain --fix applies.
+            # Claiming a YELLOW site would suppress the table_insert_append
+            # rewrite that --fix *would* have done and leave the call untouched.
+            # Under --fix-yellow the transformer does the same suppression for
+            # the YELLOW ones, where the counter rewrite really does happen.
+            if severity == 'GREEN':
+                for kind, node, value in loop_sites:
+                    if kind == 'insert':
+                        self.append_loop_claimed.add(id(node))
 
             self.findings.append(Finding(
                 pattern_name='append_loop_counter',
