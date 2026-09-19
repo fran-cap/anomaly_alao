@@ -103,6 +103,60 @@ def warn_if_no_luajit(quiet: bool = False) -> bool:
     return False
 
 
+def mask_lua_code(source: str) -> str:
+    """Blank out comments and string literals, keeping every offset intact.
+
+    Handy whenever we want to sweep the source for identifiers and must not
+    pick up a name from a comment ("-- tg is the throttle") or a string. Used
+    by the global-name sweep here and by the G9 capture gate (I-046).
+    """
+    out = list(source)
+    i, n = 0, len(source)
+
+    def blank(a, b):
+        for k in range(a, b):
+            if out[k] != '\n':
+                out[k] = ' '
+
+    while i < n:
+        ch = source[i]
+        if ch == '-' and source.startswith('--', i):
+            m = re.match(r'--\[(=*)\[', source[i:])
+            if m:
+                close = ']' + m.group(1) + ']'
+                end = source.find(close, i + m.end())
+                end = n if end < 0 else end + len(close)
+            else:
+                end = source.find('\n', i)
+                end = n if end < 0 else end
+            blank(i, end)
+            i = end
+            continue
+        if ch in '"\'':
+            j = i + 1
+            while j < n:
+                if source[j] == '\\':
+                    j += 2
+                    continue
+                if source[j] == ch or source[j] == '\n':
+                    j += 1
+                    break
+                j += 1
+            blank(i, min(j, n))
+            i = j
+            continue
+        m = re.match(r'\[(=*)\[', source[i:])
+        if m:
+            close = ']' + m.group(1) + ']'
+            end = source.find(close, i + m.end())
+            end = n if end < 0 else end + len(close)
+            blank(i, end)
+            i = end
+            continue
+        i += 1
+    return ''.join(out)
+
+
 @dataclass
 class SourceEdit:
     """A source code edit with character positions."""
@@ -143,6 +197,8 @@ class ASTTransformer:
         self.compile_error: Optional[str] = None
         self.edits_applied: int = 0
         self.edits_dropped: int = 0   # rejected by _apply_edits for overlap
+        self.applied_edits: List[SourceEdit] = []  # what _apply_edits kept (I-046)
+        self._file_globals_cache: Optional[Set[str]] = None
         self._vector_scratch_names: Set[str] = set()
         self._source_identifiers: Optional[Set[str]] = None
 
@@ -176,6 +232,7 @@ class ASTTransformer:
         self.compile_error = None
         self.edits_applied = 0
         self.edits_dropped = 0
+        self.applied_edits = []
         self._next_group_id = 1
         # (scope start_line, end_line) -> (local name for math.sqrt, edit group id)
         self._sqrt_cache_scopes = {}
@@ -188,6 +245,7 @@ class ASTTransformer:
         # same file never pick the same identifier
         self._vector_scratch_names: Set[str] = set()
         self._source_identifiers: Optional[Set[str]] = None
+        self._file_globals_cache: Optional[Set[str]] = None
 
         # run analyzer with user-specified cache_threshold
         self.analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
@@ -2734,6 +2792,48 @@ class ASTTransformer:
         while anc is not None:
             names.update(anc.locals)
             anc = anc.parent
+
+        # ...and the file's globals, which are just as visible and were the
+        # other half of the same hole (I-046).
+        names |= self._file_global_names()
+        return names
+
+    def _file_global_names(self) -> Set[str]:
+        """Every name the file uses that no scope of it declares: its globals.
+
+        Locals were only half the story. `factionID_hud_mcm.script` keeps its
+        clock in a *global* `tg`:
+
+            function actor_on_update()
+                tg = time_global()
+                ...
+                if (trigger == 1 and tg > grok_delay) then
+
+        and the time_global cache happily inserted `local tg = time_global()`
+        above that write, which then became `tg = tg` - so the global stops
+        being written, for ever, and anything else reading it sees nil. Same
+        break as the module-local one 18756a9 fixed, one binding kind over.
+        G9 found 4 live sites on GAMMA + vanilla at the merged head.
+
+        Blunt on purpose, in the spirit of `_vector_names_taken`: a file-wide
+        sweep of every identifier that is not a field/method name (`db.actor`
+        must not make `actor` look taken) minus every declared local. Comments
+        and strings are masked out, so a comment mentioning `tg` does not cost
+        us a rename.
+        """
+        cached = getattr(self, '_file_globals_cache', None)
+        if cached is not None:
+            return cached
+        names: Set[str] = set()
+        if self.analyzer is not None and self.source:
+            declared: Set[str] = set()
+            for s in self.analyzer.scopes:
+                declared |= set(s.locals)
+            names = set(re.findall(r'(?<![\w.:])[A-Za-z_][A-Za-z0-9_]*',
+                                   mask_lua_code(self.source)))
+            names -= declared
+            names -= _LUA_KEYWORDS
+        self._file_globals_cache = names
         return names
 
     @staticmethod
@@ -2968,6 +3068,11 @@ class ASTTransformer:
         # the counter that would have exposed I-008 on day one.
         self.edits_applied = len(admitted_repl) + len(admitted_ins) + len(folded_ins)
         self.edits_dropped = max(0, len(self.edits) - self.edits_applied)
+        # I-046: the edits that actually reach the file, for the capture gate.
+        # An insertion that got dropped here (enabler with no surviving
+        # replacement, or one that landed inside a rewritten span) never
+        # shadows anything, so the gate must not look at it.
+        self.applied_edits = list(admitted_repl) + list(admitted_ins) + list(folded_ins)
         admitted.sort(key=lambda e: -e.start_char)
         result = self.source
         for edit in admitted:

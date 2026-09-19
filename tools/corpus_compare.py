@@ -104,6 +104,7 @@ def compare(base_id, new_id, base, new, limit):
          len(nres.get("compile_failures_after_fix") or []), "int"),
         ("idempotence_violations", len(bres.get("idempotence_violations") or []),
          len(nres.get("idempotence_violations") or []), "int"),
+        ("captures (G9)", len(bres.get("captures") or []), len(nres.get("captures") or []), "int"),
     ]
     for name, b, n, kind in rows:
         if kind == "secs":
@@ -180,6 +181,28 @@ def compare(base_id, new_id, base, new, limit):
                 A(f"- `{f}`")
             if len(fixed) > limit:
                 A(f"- _...{len(fixed) - limit} more_")
+            A("")
+
+    # G9 (I-046): identify a capture by file+name+line, not by file alone - two
+    # inserted names in the same file are two different bugs.
+    def _caps(res):
+        return {f"{c.get('file')}:{c.get('line')} `{c.get('name')}` ({c.get('kind')}, "
+                f"{c.get('reason')}, read at {c.get('read_line')})"
+                for c in (res.get("captures") or [])}
+
+    b, n = _caps(bres), _caps(nres)
+    new_only, fixed = sorted(n - b), sorted(b - n)
+    if new_only or fixed:
+        A("## Captures (G9)\n")
+        if new_only:
+            A(f"**New ({len(new_only)}):**\n")
+            for c in new_only[:limit]:
+                A(f"- {c}")
+            A("")
+        if fixed:
+            A(f"**Gone ({len(fixed)}):**\n")
+            for c in fixed[:limit]:
+                A(f"- {c}")
             A("")
 
     return "\n".join(lines)
