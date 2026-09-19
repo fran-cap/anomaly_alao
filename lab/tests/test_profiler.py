@@ -219,6 +219,99 @@ def test_overhead_is_reported_and_small(driven):
 
 
 # ---------------------------------------------------------------------------
+# against the real winner axr_main.script
+# ---------------------------------------------------------------------------
+
+# No enabled GAMMA mod ships axr_main.script (the only copy in mods/ belongs to
+# a disabled one), so the vanilla db copy is what the game loads and what the
+# profiler has to wrap. The stub above re-implements the dispatcher; this loads
+# the actual file, in its own environment, the way the engine does.
+REAL_AXR = Path(r"C:\code\GIT\anomaly_alao\extracted\vanilla_db\raw\scripts\axr_main.script")
+
+# what axr_main.script touches at module level
+ENGINE_BITS = """
+function ini_file_ex(name, rw)
+    local o = {}
+    function o:section_exist(s) return true end
+    function o:w_value(a, b, c) end
+    function o:r_value(a, b, c, d) return d end
+    function o:save() end
+    return o
+end
+function getFS() local f = {} function f:update_path(a, b) return "" end return f end
+function __load_module(name, src)
+    local env = setmetatable({}, {__index = _G})
+    local chunk, err = loadstring(src, name)
+    if not chunk then return nil, err end
+    setfenv(chunk, env)
+    local ok, e = pcall(chunk)
+    if not ok then return nil, e end
+    _G[name] = env
+    return env, ""
+end
+"""
+
+# _g.script's SendScriptCallback, verbatim, plus two listeners: one plain
+# function and one userdata-style table, which are the dispatcher's two branches
+REAL_WIRING = r"""
+function SendScriptCallback(name, ...)
+    axr_main.make_callback(name, ...)
+    if (axr_main[name]) then axr_main[name](...) end
+end
+function RegisterScriptCallback(name, f) axr_main.callback_set(name, f) end
+for _, n in ipairs({"actor_on_update", "npc_on_update", "nested_thing"}) do
+    axr_main.callback_add(n)
+end
+RegisterScriptCallback("actor_on_update", function()
+    __extra = __extra + 200
+    SendScriptCallback("nested_thing")
+end)
+RegisterScriptCallback("nested_thing", function() __extra = __extra + 50 end)
+RegisterScriptCallback("npc_on_update", function() __extra = __extra + 100 end)
+local listener = {}
+listener.npc_on_update = function(self) __extra = __extra + 25 end
+RegisterScriptCallback("npc_on_update", listener)
+
+function __drive(frames)
+    for _ = 1, frames do
+        __frame = __frame + 1
+        __dev.frame = __frame
+        __tg = __tg + 5
+        SendScriptCallback("actor_on_update")
+        SendScriptCallback("npc_on_update")
+    end
+end
+function __dumped() return table.concat(__log, "\n") end
+"""
+
+
+def test_wraps_the_real_axr_main_without_changing_dispatch():
+    if not REAL_AXR.is_file():
+        pytest.skip(f"vanilla db corpus not extracted: {REAL_AXR}")
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(STUB_PRELUDE.split("-- axr_main, vanilla shape")[0])
+    lua.execute(ENGINE_BITS)
+    env, err = lua.eval("__load_module")("axr_main", REAL_AXR.read_text(encoding="cp1251"))
+    assert env is not None, f"real axr_main.script would not load: {err}"
+    lua.execute(REAL_WIRING)
+    lua.execute(_lua_source())
+    lua.eval("on_game_start")()
+    lua.eval("__drive")(12500)
+
+    log = _profiler.parse(lua.eval("__dumped")())
+    assert log.errors == []
+    assert log.header.make_callback is True
+    rows = {r["name"]: r for r in log.ranking(top=None, drop_first=0)}
+    # 200 us + a 50 us nested call, inclusive
+    assert rows["actor_on_update"]["ms_per_frame"] == pytest.approx(0.25, abs=0.02)
+    # both dispatcher branches ran: 100 us function + 25 us userdata listener
+    assert rows["npc_on_update"]["ms_per_frame"] == pytest.approx(0.125, abs=0.02)
+    assert rows["nested_thing"]["nested_per_frame"] == pytest.approx(1.0, abs=0.01)
+    # and nothing was swallowed
+    assert lua.eval("__extra") == pytest.approx(12500 * 375, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # the parser on its own
 # ---------------------------------------------------------------------------
 
