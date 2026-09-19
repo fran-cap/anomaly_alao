@@ -230,6 +230,31 @@ def test_unknown_lua_call_makes_the_body_undecidable(analyze):
 
 
 def test_unknown_method_makes_the_body_undecidable(analyze):
+    # the method name has to be one ENGINE_NYI_METHODS does NOT know - it used
+    # to be `section_name`, which I-042 moved into the table, so the body now
+    # classifies as interpreted instead (see the next test)
+    f = _one(analyze("""
+        function build()
+            local t = {}
+            t[#t+1] = 1
+            local s = 0
+            for _, v in pairs(t) do
+                if v:some_mod_helper_method() == "x" then s = s + 1 end
+            end
+            return s
+        end
+    """))
+    assert f.details["jit_mode"] == "undecidable"
+    assert f.details["calls_decidable"] is False
+
+
+def test_section_name_makes_the_body_interpreted_not_undecidable(analyze):
+    """I-042: once a method is in ENGINE_NYI_METHODS the answer is known.
+
+    `:section_name()` is an engine C call, so the body is interpreted - a
+    decidable, definite answer, not the 'I cannot tell' verdict. Either way
+    the finding stays RED, so --fix output does not move.
+    """
     f = _one(analyze("""
         function build()
             local t = {}
@@ -241,7 +266,8 @@ def test_unknown_method_makes_the_body_undecidable(analyze):
             return s
         end
     """))
-    assert f.details["jit_mode"] == "undecidable"
+    assert f.details["jit_mode"] == "interpreted"
+    assert f.severity == "RED"
 
 
 def test_second_unconvertible_pairs_loop_blocks_the_first(analyze):
