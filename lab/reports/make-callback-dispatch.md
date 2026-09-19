@@ -327,6 +327,16 @@ anybody can feel. That asymmetry is itself a useful result for I-042 — the one
 that matters is invisible to name-based classification, and the 99 that are visible do
 not matter.
 
+agent-I042 confirmed the site against their call-graph census independently: it appears
+only at **hop 2** and only over a **bare-global** edge
+(`binder:update -> _g.SendScriptCallback -> axr_main.make_callback`), so a strict
+one-hop rule over same-file and `module.func` edges misses it twice over. They also
+report that their `jit_mode` classifier calls this body `compiled` with 0 abort sites,
+and that this is wrong — the classification is intra-procedural, so a call into a user
+Lua function (`spairs` -> `hspairs`) is invisible to it. Their number should not be used
+to pick between my compiled and interpreted columns; that stays open until the profiler
+answers it.
+
 A transform would also have to prove things ALAO structurally cannot:
 
 * that `intercepts` is mutated **only** in the three named functions of the same file
