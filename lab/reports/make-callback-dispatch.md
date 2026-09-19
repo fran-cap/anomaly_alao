@@ -155,12 +155,11 @@ Three `SendScriptCallback` sites, none throttled, all inside an unconditional bi
 | `npc_on_update` | `xr_motivator.script:486`, in `motivator_binder:update()`, above the `tg < self.__tmr` throttle | **1 per online stalker** |
 | `monster_on_update` | `bind_monster.script:54` (loose), in `generic_object_binder:update()`, first statement after `object_binder.update` | **1 per online monster** |
 
-The honest unknown: **how many stalkers and monsters are online at the
-`gammabaseline` save**. Nothing static answers it — it depends on the level, the smart
-terrains that have spawned, and the alife switch distance. A typical Anomaly scene is
-tens; I will not put a number on it from the outside. I-048's profiler reports
-calls/frame per callback name, which settles it directly, which is why the queued
-request exists.
+How many stalkers and monsters are online at the `gammabaseline` save is not something
+static analysis answers — it depends on the level, which smart terrains have spawned and
+the alife switch distance. I-048's A/A run bounds it instead: `actor_on_update` is 94.5%
+of all script time, so everything else together, listeners included, fits in 40 us/frame
+and the online count is single digits. See §5 — it is what kills the compiled case.
 
 ---
 
@@ -273,8 +272,8 @@ this patch has to be exactly one thing.
 
 ## 5. Site arithmetic, and why the profiler is the right instrument
 
-Frame budget 4770 us. **The in-game gate is 0.5% of the frame = 23.9 us** (lowered from
-1% by the user, 2026-09-19). Using the K=73 (permanent-only) figures:
+Frame budget 4770 us. **The in-game gate is 25 us saved per frame** (~0.5% of the frame;
+lowered from 1% by the user, 2026-09-19). Using the K=73 (permanent-only) figures:
 
 ```
 compiled:     1 x  6.44          =  6.4 us   actor_on_update
