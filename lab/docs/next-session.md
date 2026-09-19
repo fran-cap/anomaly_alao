@@ -17,8 +17,12 @@ standing-still FPS capture cannot resolve anything below roughly 2% of a frame, 
 per-frame rewrite ALAO can do today is worth ~0.01%. **Do not queue an FPS delta for a pattern
 rewrite again unless the site arithmetic says >0.5% of frame time.**
 
-(Bar lowered from 1% to 0.5% by the user on 2026-09-19: we are after gradual gains. FPS still cannot
-resolve 0.5%, so anything between 0.5% and ~2% has to be read in script-ms through the I-048 profiler.)
+(Bar history, user decisions on 2026-09-19: 1% -> 0.5% because we are after gradual gains, then restated
+in absolute terms: **the bar is 25 us of script time saved per frame** on the `gammabaseline` save (0.5% of
+the 4770 us frame it was derived from). Microseconds are additive across ideas, are what the I-048 profiler
+reads directly, and do not move when the frame time does (other hardware, another scene, or our own earlier
+wins). Quote every saving as us/frame first, percent second. FPS cannot resolve under ~100 us, so anything
+between 25 and 100 us is measured in script-ms through the profiler.)
 
 Reference overlays `lab/coord/overlays/ref-alao-merged-b` and `vanilla-db-bottom` were built from
 gen-1 code and no longer match `--fix` output. Rebuild them from a fresh integration corpus run
