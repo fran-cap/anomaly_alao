@@ -8,13 +8,14 @@ count), the overlay is built and compile-checked, and an in-game request is queu
 through I-048's profiler. What it is *not* is a pattern: exactly one `spairs(` site in
 the whole live GAMMA script set runs per frame, and it is this one.
 
-**Against the 0.5% in-game gate (23.9 us of a 4770 us frame):** it passes
-unconditionally if the dispatcher runs interpreted (43.1 us saved per frame from the
-actor callback alone), and passes above roughly 13 online stalkers if it JITs (6.4 us
-alone, plus 1.17 us per online stalker and 0.58 us per monster). **The single deciding
-fact is whether the `hspairs` dispatch loop forms a trace in the real engine** — a
-binary I cannot settle statically and I-048's profiler reports directly. Everything
-else in this report is measured.
+**Against the in-game gate (25 us of a 4770 us frame):** it passes if the dispatcher
+runs interpreted (43.1 us saved per frame, from the actor callback alone) and fails if
+it JITs (6.4 us). I-048's A/A run closed the second unknown — at the `gammabaseline`
+save `actor_on_update` is 94.5% of all script time at 1 call/frame, so the
+per-online-NPC terms are worth single-digit microseconds and cannot rescue the compiled
+case. **The single deciding fact is whether the `hspairs` dispatch loop forms a trace in
+the real engine** — a binary I cannot settle statically and the profiler run reports
+directly. Everything else in this report is measured.
 
 ---
 
@@ -284,42 +285,71 @@ interpreted:  1 x 43.13          = 43.1 us   actor_on_update
             + Nmon x 0.88
 ```
 
-| scenario | saved per frame | % of frame | vs the 0.5% gate |
+| scenario | saved per frame | % of frame | vs the 25 us gate |
 |---|---|---|---|
-| compiled, **actor_on_update alone** (no NPCs online) | 6.4 us | 0.14% | **fails** |
-| compiled, 5 stalkers + 2 monsters online | 13.4 us | 0.28% | fails |
-| compiled, 15 stalkers + 5 monsters | 26.9 us | 0.56% | **passes** |
-| compiled, 30 stalkers + 10 monsters | 47.4 us | 0.99% | passes |
-| interpreted, **actor_on_update alone** | 43.1 us | 0.90% | **passes** |
-| interpreted, 15 + 5 | 101.3 us | 2.12% | passes |
-| interpreted, 30 + 10, K=125 | 176.6 us | 3.70% | passes |
+| compiled, **actor_on_update alone** | 6.4 us | 0.13% | **fails** |
+| compiled, + 5 stalkers / 2 monsters | 13.4 us | 0.28% | fails |
+| compiled, + 15 stalkers / 5 monsters | 26.9 us | 0.56% | passes |
+| **interpreted, actor_on_update alone** | **43.1 us** | **0.90%** | **passes** |
+| interpreted, + 15 / 5 | 101.3 us | 2.12% | passes |
+| interpreted, + 30 / 10, K=125 | 176.6 us | 3.70% | passes |
 
-At the 0.5% bar the picture sharpens into one clean conditional:
+### I-048's A/A run removes the second unknown
 
-* **If the dispatcher does not JIT in-game, it clears the gate unconditionally** — the
-  single actor_on_update dispatch alone is 43.1 us against a 23.9 us bar, with no online
-  NPCs needed at all.
-* **If it does JIT**, it clears the gate once roughly **13 stalkers plus 4 monsters** are
-  online (`6.44 + N x 1.17 + N/3 x 0.58 >= 23.9`), and fails below that.
+Measured in-game, both arms identical, warm rounds only, run-to-run **cv 1.64%**:
 
-So the deciding fact is a single binary: **does the `hspairs` dispatch loop form a trace
-in the real engine?** Structurally I would expect not — per call it allocates two
-closures and a table, calls a Lua comparator through two nested frames per heap
-comparison, and then calls listeners that make engine calls. agent-I042's call-graph
-census labels the body `compiled` with 0 abort sites, but they flagged that themselves
-as an artifact: their jit_mode classification is intra-procedural, so the call into
-`spairs`/`hspairs` is invisible to it. I am not going to settle it by reading code.
+| quantity | value |
+|---|---|
+| total script time | **749 us/frame** (15.7% of the frame) |
+| `actor_on_update`, inclusive | **709 us/frame** — 94.5% of all script time |
+| `actor_on_update` calls/frame | **1** |
 
-Those are exactly the two things a static analysis cannot supply and exactly the two
-things I-048's profiler reports:
-script ms/frame attributed to `make_callback` per callback name, plus calls/frame per
-name (= the online object count) and the resulting listener count. So the in-game
-measurement is queued **through the profiler**, not as an FPS hunt — the compiled-case
-prediction, 0.56-0.99%, is well inside the +-2% FPS noise floor and FPS alone could
-never resolve it.
+Two things follow, and they are the reason this idea is now a clean binary rather than a
+two-parameter guess.
 
-Queued: **`20260919-184412-I-043-b1d614`**, `profiler_overlay` set per I-048's
-instructions. The two arms differ in exactly one file.
+**The per-online-NPC terms are negligible at this save.** Everything that is not
+`actor_on_update` — `npc_on_update`, `monster_on_update` and every event callback
+together — fits in 40 us/frame *inclusive of the listeners*. A single `npc_on_update`
+dispatch costs 1.5 us compiled / 3.8 us interpreted before any listener runs, so the
+online stalker count at `gammabaseline` is single digits, not the 15-30 my compiled rows
+needed. **The compiled case therefore has no escape hatch: it is ~6.4 us against a 25 us
+bar, and it fails.**
+
+**The experiment is well posed.** At 709 us/frame with cv 1.64%, the resolvable
+difference is about 11.6 us:
+
+| case | predicted drop in `actor_on_update` | vs 11.6 us resolution |
+|---|---|---|
+| interpreted | 43.1 us = **6.1%** of the callback | ~3.7x the noise — clearly visible |
+| compiled | 6.4 us = **0.9%** of the callback | below the noise — invisible |
+
+So a null result is not an inconclusive result. If the profiler shows no change, the
+dispatcher JITs and the saving is below the bar; if it shows a ~6% drop, it does not and
+the saving clears the bar by 1.7x. Either outcome decides the idea.
+
+(For context on the size of what is being optimised: 709 us/frame across ~73 listeners
+is ~9.7 us per listener per frame. The dispatcher is 1-6% of that. The other 94% is
+listener bodies — which is I-044's and I-042's territory, not mine.)
+
+Structurally I expect it not to trace: per call the shipped path allocates two closures
+and a table, calls a Lua comparator through two nested frames per heap comparison, and
+then calls listeners that make engine calls. agent-I042's call-graph census labels the
+body `compiled` with 0 abort sites, but they flagged that themselves as an artifact —
+their jit_mode classification is intra-procedural, so the call into `spairs`/`hspairs`
+is invisible to it. I am not going to settle it by reading code.
+
+### The queued run
+
+**`20260919-192703-I-043-3f2729`** (priority 2, 4 x 120 s, readout
+`result.profiler.script_ms_per_frame_warm` with round 1 of each arm dropped).
+
+My first submission, `20260919-184412-I-043-b1d614`, went in before I-048's runner change
+was merged; that runner ignores `profiler_overlay`, so neither installed arm actually
+contained `zzz_alao_profiler.script` and it can only return fps — which at 6-43 us of a
+4770 us frame is unresolvable against the +-2% fps noise floor. The organizer caught it,
+merged I-048 (b875c9c) and requeued the identical arms. **Poll the second id.**
+
+The two arms differ in exactly one file:
 
 * variant top `lab/coord/overlays/agent-I043-b` — byte copy of `ref3-alao-b` (324 files)
   plus the patched `gamedata/scripts/axr_main.script`
@@ -403,12 +433,15 @@ re-file the patch as an upstream/hand-patch item.**
   ALAO's output is byte-identical and those gates have nothing to compare.
 * The listener count K is **static**, never observed running. 73 and 125 are bounds, not
   a measurement, and `@corpus_k` marks the bucket estimated.
-* The online stalker/monster count is unknown. Every per-frame total above is
-  parameterised by it rather than guessed.
+* The online stalker/monster count is not measured directly; I-048's A/A bounds it
+  (everything that is not `actor_on_update` fits in 40 us/frame inclusive), which is
+  enough to rule the compiled case out but is a bound, not a count.
 * Whether the dispatcher JITs in the real engine is unknown. The 7x spread between the
   compiled and interpreted savings is the single biggest uncertainty in this report and
   the profiler resolves it.
-* The in-game run had not returned when this was written.
+* My first queue item ran on the pre-I-048 runner with no profiler installed, so it
+  measures fps only and I am not going to read anything into it.
+* The profiler run `20260919-192703-I-043-3f2729` had not returned when this was written.
 
 ## 8. Unrelated bug found on the way (organizer)
 
