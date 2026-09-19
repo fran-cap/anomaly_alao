@@ -12,6 +12,7 @@ fields.  A line may carry an engine timestamp/sigil prefix, so we look for
     ALAOPROF|1|hdr|ts=..|timer=profile_timer|units_per_ms=..|overhead_ns=..|..
     ALAOPROF|1|win|seq=1|t0=..|t1=..|span_ms=..|frames=..|total_units=..|..
     ALAOPROF|1|cb|seq=1|name=actor_on_update|calls=..|units=..|nested=..
+    ALAOPROF|1|lst|seq=1|name=actor_on_update#foo.script:412|calls=..|units=..
     ALAOPROF|1|eow|seq=1|frames_total=..
     ALAOPROF|1|err|install failed: ..
 
@@ -65,6 +66,7 @@ class Header:
     calib_units: float | None = None
     make_callback: bool = False
     binders: str = "off"
+    listeners: str = "off"
     dump_ms: float | None = None
     ts: float | None = None
     raw: str = ""
@@ -95,6 +97,8 @@ class Window:
     nested: int = 0
     names: int = 0
     entries: dict = field(default_factory=dict)
+    # per-listener rows, only present when the overlay ran with WRAP_LISTENERS
+    listeners: dict = field(default_factory=dict)
     complete: bool = False
 
     @property
@@ -145,15 +149,19 @@ class ProfileLog:
                 out.append(w.frames * 1000.0 / w.span_ms)
         return out
 
-    def ranking(self, top: int | None = 20, drop_first: int = 1) -> list:
-        """Per-callback ms/frame over the kept windows, biggest first."""
+    def ranking(self, top: int | None = 20, drop_first: int = 1, listeners: bool = False) -> list:
+        """Per-callback ms/frame over the kept windows, biggest first.
+
+        With *listeners* true, rank the individual subscribers instead of the
+        callback names - only populated when the overlay ran WRAP_LISTENERS.
+        """
         ws = self.good_windows(drop_first)
         frames = sum(w.frames for w in ws)
         if not frames:
             return []
         agg: dict = {}
         for w in ws:
-            for name, e in w.entries.items():
+            for name, e in (w.listeners if listeners else w.entries).items():
                 a = agg.setdefault(name, {"units": 0.0, "calls": 0, "nested": 0})
                 a["units"] += e.units
                 a["calls"] += e.calls
@@ -222,6 +230,7 @@ def parse(text: str, path=None) -> ProfileLog:
                 calib_units=_num(d, "calib_units"),
                 make_callback=d.get("make_callback") == "true",
                 binders=d.get("binders", "off"),
+                listeners=d.get("listeners", "off"),
                 dump_ms=_num(d, "dump_ms"),
                 ts=_num(d, "ts"),
                 raw=raw.strip(),
@@ -250,6 +259,13 @@ def parse(text: str, path=None) -> ProfileLog:
                 calls=int(_num(d, "calls", 0) or 0),
                 units=float(_num(d, "units", 0.0) or 0.0),
                 nested=int(_num(d, "nested", 0) or 0),
+            )
+        elif kind == "lst":
+            name = d.get("name", "?")
+            w.listeners[name] = CallbackWindow(
+                name=name,
+                calls=int(_num(d, "calls", 0) or 0),
+                units=float(_num(d, "units", 0.0) or 0.0),
             )
         elif kind == "eow":
             w.complete = True

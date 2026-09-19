@@ -56,7 +56,7 @@ def _resolve(paths):
     return out
 
 
-def _report_arm(name, dirs, top, drop_first):
+def _report_arm(name, dirs, top, drop_first, listeners=False):
     logs = []
     for d in dirs:
         log = _profiler.load_run(d) if d.is_dir() else _profiler.load(d)
@@ -88,6 +88,22 @@ def _report_arm(name, dirs, top, drop_first):
         print(f"| {i} | `{r['name']}` | {_fmt(r['ms_per_frame'], 4)} | {share:.1f}% | "
               f"{_fmt(r['calls_per_frame'], 2)} | {_fmt(us, 1)} | {_fmt(r['cv_pct'], 1)}% |")
     print()
+    if listeners:
+        rows = []
+        for _, log in logs:
+            rows = log.ranking(top=top, drop_first=drop_first, listeners=True)
+            if rows:
+                break
+        if not rows:
+            print(f"(no per-listener rows: the overlay ran with listeners={hdr.listeners})\n")
+        else:
+            print(f"#### {name}: per listener (one run, listeners={hdr.listeners})")
+            print("| # | listener | ms/frame | calls/frame | us/call |")
+            print("|---|---|---:|---:|---:|")
+            for i, r in enumerate(rows, 1):
+                print(f"| {i} | `{r['name']}` | {_fmt(r['ms_per_frame'], 4)} | "
+                      f"{_fmt(r['calls_per_frame'], 2)} | {_fmt(r['us_per_call'], 1)} |")
+            print()
     return rep
 
 
@@ -98,6 +114,8 @@ def main(argv=None) -> int:
     ap.add_argument("--arm-b", nargs="*", default=[], help="variant arm")
     ap.add_argument("--queue", help="queue item id: read both arms out of its result")
     ap.add_argument("--top", type=int, default=20)
+    ap.add_argument("--listeners", action="store_true",
+                    help="also rank the individual subscribers (needs WRAP_LISTENERS in the overlay)")
     ap.add_argument("--drop-first", type=int, default=1,
                     help="windows to drop from the start of each run (default 1: it straddles the load)")
     ap.add_argument("--json", type=Path, help="also write the aggregate here")
@@ -129,7 +147,7 @@ def main(argv=None) -> int:
 
     out = {}
     for name, dirs in arms.items():
-        rep = _report_arm(name, dirs, a.top, a.drop_first)
+        rep = _report_arm(name, dirs, a.top, a.drop_first, a.listeners)
         if rep:
             out[name] = rep
     b = (out.get("baseline") or {}).get("script_ms_per_frame") or {}

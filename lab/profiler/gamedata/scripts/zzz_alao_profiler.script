@@ -38,6 +38,7 @@ local CALIB_MS        = 250     -- busy-loop length used to establish timer unit
 local OVERHEAD_ITERS  = 20000   -- iterations used to price our own instrumentation
 local WRAP_BINDERS    = false   -- see the header comment: binder wrapping swallows
                                 -- the callbacks fired inside the binder bodies
+local WRAP_LISTENERS  = false   -- v2, see "per-listener attribution" below
 
 -- ---------------------------------------------------------------------------
 -- state (all local and flat: this runs a few thousand times a second and I do
@@ -62,7 +63,19 @@ local win_t0         = 0
 local next_dump      = 0
 local last_frame     = -1
 
+-- per-listener accounting (WRAP_LISTENERS). Its own timer and its own depth
+-- guard, because it nests INSIDE the make_callback timing region and one
+-- profile_timer cannot be nested - two independent accumulators can.
+local ltimer         = nil
+local ldepth         = 0
+local llast          = 0
+local lunits, lcalls = {}, {}
+local wrapped_by     = {}       -- original listener -> our wrapper
+local orig_by        = {}       -- our wrapper -> original listener
+local listeners_wrapped = 0
+
 local orig_make_callback = nil
+local orig_callback_set, orig_callback_unset = nil, nil
 local dump = nil                -- forward declaration, defined below
 
 -- ---------------------------------------------------------------------------
@@ -171,8 +184,13 @@ dump = function(now)
 			printf("ALAOPROF|1|cb|seq=%s|name=%s|calls=0|units=0.000|nested=%s", seq, k, v)
 		end
 	end
+	for k, v in pairs(lunits) do
+		printf("ALAOPROF|1|lst|seq=%s|name=%s|calls=%s|units=%s",
+			seq, k, lcalls[k] or 0, string.format("%.3f", v))
+	end
 	printf("ALAOPROF|1|eow|seq=%s|frames_total=%s", seq, frames_total)
 
+	lunits, lcalls = {}, {}
 	units, calls, nested = {}, {}, {}
 	win_frames, win_calls, win_nested = 0, 0, 0
 	win_t0 = now
@@ -184,6 +202,10 @@ dump = function(now)
 	-- more than a second or so of script time, which is safe either way.
 	timer = new_timer()
 	last = timer:time()
+	if ltimer then
+		ltimer = new_timer()
+		llast = ltimer:time()
+	end
 end
 
 -- ---------------------------------------------------------------------------
@@ -242,6 +264,110 @@ local function wrap_method(cls, mname, label)
 end
 
 -- ---------------------------------------------------------------------------
+-- per-listener attribution (WRAP_LISTENERS)
+--
+-- The first in-game run said 95% of all scripted per-frame time is a single
+-- callback NAME, actor_on_update, at ~850 us per frame. Which is useful and
+-- also useless: the name is a mailing list, and what anyone optimising wants is
+-- which subscriber costs what. So wrap the listeners themselves.
+--
+-- Getting at them is the trick. `intercepts` is a file-local in axr_main.script,
+-- not a field of the module table - but it is an upvalue of make_callback, and
+-- Lua 5.1's debug.getupvalue hands it over. That also means this does not care
+-- about load order: our on_game_start runs last, by which point every listener
+-- is registered, and we rewrite the table in place.
+--
+-- The table is keyed BY the listener (function or object) with the sort index as
+-- the value, so swapping in a wrapper changes the key. callback_unset is then
+-- passed the original and would not find it, so both callback_set and
+-- callback_unset are wrapped too and translate through wrapped_by/orig_by.
+-- ---------------------------------------------------------------------------
+
+local function listener_label(name, f)
+	local fn = f
+	if type(fn) ~= "function" then
+		fn = (type(f) == "table" or type(f) == "userdata") and f[name] or nil
+	end
+	local src, line = "?", 0
+	if debug and debug.getinfo and type(fn) == "function" then
+		local ok, info = pcall(debug.getinfo, fn, "S")
+		if ok and info then
+			src = tostring(info.short_src or info.source or "?")
+			src = string.match(src, "([^\\/]+)$") or src
+			line = info.linedefined or 0
+		end
+	end
+	return name .. "#" .. src .. ":" .. line
+end
+
+local function wrap_listener(name, f)
+	if wrapped_by[f] then return wrapped_by[f] end
+	local label = listener_label(name, f)
+	local is_fn = (type(f) == "function")
+	local wrapper = function(...)
+		if ldepth > 0 then
+			if is_fn then return f(...) end
+			return f[name](f, ...)
+		end
+		ldepth = 1
+		ltimer:start()
+		if is_fn then f(...) else f[name](f, ...) end
+		ltimer:stop()
+		ldepth = 0
+		local t = ltimer:time()
+		local d = t - llast
+		llast = t
+		lunits[label] = (lunits[label] or 0) + d
+		lcalls[label] = (lcalls[label] or 0) + 1
+	end
+	wrapped_by[f] = wrapper
+	orig_by[wrapper] = f
+	return wrapper
+end
+
+-- `intercepts` out of make_callback's upvalues
+local function find_intercepts(fn)
+	if not (debug and debug.getupvalue) then return nil, "no debug library" end
+	for i = 1, 60 do
+		local ok, n, v = pcall(debug.getupvalue, fn, i)
+		if not ok or n == nil then break end
+		if n == "intercepts" and type(v) == "table" then return v end
+	end
+	return nil, "no `intercepts` upvalue on make_callback"
+end
+
+local function wrap_all_listeners()
+	local intercepts, why = find_intercepts(orig_make_callback)
+	if not intercepts then return 0, why end
+	local n = 0
+	for name, tbl in pairs(intercepts) do
+		if type(tbl) == "table" then
+			local swap = {}
+			for f, v in pairs(tbl) do
+				swap[#swap + 1] = { f, v }
+			end
+			for i = 1, #swap do
+				local f, v = swap[i][1], swap[i][2]
+				tbl[f] = nil
+				tbl[wrap_listener(name, f)] = v
+				n = n + 1
+			end
+		end
+	end
+	-- keep later registrations wrapped too, and keep unset working
+	orig_callback_set = axr_main.callback_set
+	orig_callback_unset = axr_main.callback_unset
+	axr_main.callback_set = function(name, f)
+		if f == nil then return orig_callback_set(name, f) end
+		return orig_callback_set(name, wrap_listener(name, f))
+	end
+	axr_main.callback_unset = function(name, f)
+		return orig_callback_unset(name, wrapped_by[f] or f)
+	end
+	return n, "ok"
+end
+
+-- ---------------------------------------------------------------------------
 -- install
 -- ---------------------------------------------------------------------------
 local function install()
@@ -258,6 +384,20 @@ local function install()
 	orig_make_callback = axr_main.make_callback
 	axr_main.make_callback = profiled_make_callback
 	local ok_cb = (axr_main.make_callback == profiled_make_callback)
+
+	local listeners = "off"
+	if WRAP_LISTENERS then
+		ltimer = new_timer()
+		llast = ltimer:time()
+		local ok, n, why = pcall(wrap_all_listeners)
+		if ok then
+			listeners_wrapped = n
+			listeners = tostring(n) .. ":" .. tostring(why)
+		else
+			ltimer = nil
+			listeners = "failed:" .. tostring(n)
+		end
+	end
 
 	local binders = {}
 	if WRAP_BINDERS then
@@ -283,7 +423,7 @@ local function install()
 	next_dump = win_t0 + DUMP_EVERY_MS
 	installed = true
 
-	printf("ALAOPROF|1|hdr|ts=%s|timer=%s|units_per_ms=%s|calib_ms=%s|calib_units=%s|calib_spin=%s|overhead_ns=%s|make_callback=%s|binders=%s|dump_ms=%s",
+	printf("ALAOPROF|1|hdr|ts=%s|timer=%s|units_per_ms=%s|calib_ms=%s|calib_units=%s|calib_spin=%s|overhead_ns=%s|make_callback=%s|binders=%s|listeners=%s|dump_ms=%s",
 		win_t0, timer_kind,
 		upm and string.format("%.6f", upm) or "nil",
 		string.format("%.3f", calib_ms or 0),
@@ -292,6 +432,7 @@ local function install()
 		string.format("%.1f", ns),
 		tostring(ok_cb),
 		(#binders > 0) and table.concat(binders, ",") or "off",
+		listeners,
 		DUMP_EVERY_MS)
 	return "installed"
 end

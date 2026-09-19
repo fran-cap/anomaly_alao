@@ -304,16 +304,21 @@ function __dumped() return table.concat(__log, "\n") end
 """
 
 
-def test_wraps_the_real_axr_main_without_changing_dispatch():
-    if not REAL_AXR.is_file():
-        pytest.skip(f"vanilla db corpus not extracted: {REAL_AXR}")
+def _real_axr_runtime(profiler_src=None):
     lua = lupa.LuaRuntime(unpack_returned_tuples=True)
     lua.execute(STUB_PRELUDE.split("-- axr_main, vanilla shape")[0])
     lua.execute(ENGINE_BITS)
     env, err = lua.eval("__load_module")("axr_main", REAL_AXR.read_text(encoding="cp1251"))
     assert env is not None, f"real axr_main.script ({REAL_AXR}) would not load: {err}"
     lua.execute(REAL_WIRING)
-    lua.execute(_lua_source())
+    lua.execute(profiler_src or _lua_source())
+    return lua
+
+
+def test_wraps_the_real_axr_main_without_changing_dispatch():
+    if not REAL_AXR.is_file():
+        pytest.skip(f"no axr_main.script to load: {REAL_AXR}")
+    lua = _real_axr_runtime()
     lua.eval("on_game_start")()
     lua.eval("__drive")(12500)
 
@@ -328,6 +333,68 @@ def test_wraps_the_real_axr_main_without_changing_dispatch():
     assert rows["nested_thing"]["nested_per_frame"] == pytest.approx(1.0, abs=0.01)
     # and nothing was swallowed
     assert lua.eval("__extra") == pytest.approx(12500 * 375, rel=1e-9)
+    assert log.header.listeners == "off"
+
+
+def test_wrap_listeners_reaches_the_intercepts_upvalue():
+    """WRAP_LISTENERS: per-subscriber attribution, the v2 mode.
+
+    `intercepts` is a file-local in axr_main.script, so the only way to the
+    individual listeners is `debug.getupvalue` on make_callback.  This proves
+    that works on the real file, that the swapped keys still dispatch (both
+    listener shapes), that callback_unset still finds a wrapped listener, and
+    that the per-listener times add up to the per-name ones.
+    """
+    if not REAL_AXR.is_file():
+        pytest.skip(f"no axr_main.script to load: {REAL_AXR}")
+    src = _lua_source().replace(
+        "local WRAP_LISTENERS  = false", "local WRAP_LISTENERS  = true", 1)
+    assert "local WRAP_LISTENERS  = true" in src, "the WRAP_LISTENERS switch moved"
+    lua = _real_axr_runtime(src)
+    lua.eval("on_game_start")()
+    lua.eval("__drive")(12500)
+
+    log = _profiler.parse(lua.eval("__dumped")())
+    assert log.errors == []
+    # "4:ok" - three listeners on the two update callbacks plus nested_thing's
+    assert log.header.listeners.endswith(":ok"), log.header.raw
+    assert int(log.header.listeners.split(":")[0]) == 4
+
+    rows = {r["name"]: r for r in log.ranking(top=None, drop_first=0, listeners=True)}
+    by_cb = {}
+    for label, r in rows.items():
+        by_cb.setdefault(label.split("#")[0], 0.0)
+        by_cb[label.split("#")[0]] += r["ms_per_frame"]
+    # inclusive and top-level, exactly like the name level: actor_on_update's
+    # listener carries its own 200 us plus the 50 us of the nested_thing
+    # dispatch it triggers, and that nested listener is not timed again
+    assert by_cb["actor_on_update"] == pytest.approx(0.250, abs=0.02)
+    assert "nested_thing" not in by_cb   # only ever reached nested, so never timed
+    assert by_cb["npc_on_update"] == pytest.approx(0.125, abs=0.02)
+    # two distinct subscribers on npc_on_update, separately attributed
+    assert len([k for k in rows if k.startswith("npc_on_update#")]) == 2
+    # nothing swallowed, still
+    assert lua.eval("__extra") == pytest.approx(12500 * 375, rel=1e-9)
+
+
+def test_wrap_listeners_keeps_callback_unset_working():
+    if not REAL_AXR.is_file():
+        pytest.skip(f"no axr_main.script to load: {REAL_AXR}")
+    src = _lua_source().replace(
+        "local WRAP_LISTENERS  = false", "local WRAP_LISTENERS  = true", 1)
+    lua = _real_axr_runtime(src)
+    lua.eval("on_game_start")()
+    # register, drive, unregister with the ORIGINAL function, drive again
+    lua.execute("""
+        __late = 0
+        __late_fn = function() __late = __late + 1; __extra = __extra + 10 end
+        RegisterScriptCallback("npc_on_update", __late_fn)
+    """)
+    lua.eval("__drive")(100)
+    assert lua.eval("__late") == 100
+    lua.execute('axr_main.callback_unset("npc_on_update", __late_fn)')
+    lua.eval("__drive")(100)
+    assert lua.eval("__late") == 100, "callback_unset did not find the wrapped listener"
 
 
 # ---------------------------------------------------------------------------

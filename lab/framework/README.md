@@ -230,6 +230,23 @@ Three things it establishes rather than assumes, all in the `hdr` line:
   but their bodies contain the callbacks, so their inclusive time swallows the
   per-callback ranking. Leave it off unless that is what you want.
 
+### Per-listener attribution (`WRAP_LISTENERS`, off by default)
+
+A callback name is a mailing list, and the first in-game run showed 95% of all
+scripted per-frame time sitting on one name, `actor_on_update`. Knowing *which
+subscriber* costs what needs the individual listeners, and those live in
+`intercepts`, a file-local in `axr_main.script`. It is reachable anyway: it is an
+upvalue of `make_callback`, so `debug.getupvalue` hands it over. Setting
+`WRAP_LISTENERS = true` in the overlay script makes the profiler rewrite that
+table in place at `on_game_start` (by which point every listener is registered,
+so load order does not matter), wrapping each subscriber in its own timer, and
+wrap `callback_set` / `callback_unset` so later registrations are covered and an
+unset by the original function still finds its wrapper. Rows come out labelled
+`<callback>#<file>:<line>` from `debug.getinfo`, and `profile_report.py
+--listeners` ranks them. Same inclusive-top-level rule as the name level, on a
+second independent timer. Validated offline against the real `axr_main.script`
+but **not yet in-game** - run it once with `--listeners` before quoting it.
+
 ### Running an arm with it
 
 Add one key to the queue request. The profiler is the **instrument, not the
