@@ -40,6 +40,9 @@ sys.path.insert(0, str(REPO_ROOT / "lab" / "coord"))
 
 from build_overlay import read_modlist, DEFAULT_MODLIST  # noqa: E402
 
+DEFAULT_LOOSE = Path(
+    r"D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA\Anomaly\gamedata\scripts")
+
 # `local foo = function(...)` / `foo = function(...)` / `m.foo = function(...)`
 ANON_ASSIGN = re.compile(r'^\s*(?:local\s+)?([A-Za-z_][\w.]*)\s*=\s*function\s*\(')
 LOCAL_DECL = re.compile(r'^\s*local\s+')
@@ -211,7 +214,7 @@ def extract_one(job):
 # live-winner resolution (same rule as lab/coord/build_overlay.py)
 # --------------------------------------------------------------------------
 
-def resolve_live(gamma_root, vanilla_root, modlist_path):
+def resolve_live(gamma_root, vanilla_root, modlist_path, loose_root=None):
     order = read_modlist(modlist_path)
     rank = {n: i for i, n in enumerate(order)}
     winners = {}   # rel(lower) -> dict
@@ -239,6 +242,19 @@ def resolve_live(gamma_root, vanilla_root, modlist_path):
                                     'origin': 'gamma', 'mod': mod_dir.name}
                 else:
                     shadowed['gamma'] += 1
+
+    # GAMMA patches the install in place: ~66 loose scripts in
+    # Anomaly/gamedata/scripts that beat the .db archives but lose to any
+    # enabled mod. They are live code that lives in NEITHER corpus, so read
+    # them where they are (read-only) as a third source.
+    if loose_root and loose_root.is_dir():
+        for f in list(loose_root.rglob('*.script')) + list(loose_root.rglob('*.lua')):
+            rel = ('scripts/' + f.relative_to(loose_root).as_posix()).lower()
+            if rel in winners:
+                shadowed['loose'] += 1
+                continue
+            winners[rel] = {'rel': rel, 'path': str(f), 'rank': 10 ** 5,
+                            'origin': 'loose', 'mod': 'Anomaly/gamedata'}
 
     if vanilla_root:
         # extracted/vanilla_db carries the same scripts twice (raw/ and
@@ -273,22 +289,25 @@ class Graph:
             self.by_module.setdefault(f['module'], rel)   # one file per module
         # global namespace: top-level `function foo()` is a real global in
         # Anomaly (that is how _g.script exports SendScriptCallback)
-        # Several files can define the same bare global (`ph_car.script` has a
-        # no-op `function printf() end`); at runtime the last loaded wins and we
-        # cannot know the order, so prefer `_g.script`, which is where Anomaly
-        # keeps the real ones, and count the ambiguity.
-        defs = defaultdict(list)
-        for rel, f in self.files.items():
-            for name, i in f['exports'].items():
-                if '.' not in name:
-                    defs[name].append((rel, i))
+        # X-Ray loads every `.script` as its own module table, so a top-level
+        # `function foo()` in xr_logic.script is `xr_logic.foo`, NOT a global -
+        # `options_builder.script` really does define `function vector(args)`
+        # and it does not clobber the engine constructor. The exception is
+        # `_g.script` (and GAMMA's loose `_g_patches.script`), which the engine
+        # loads into the global table; that is how `SendScriptCallback` and
+        # `printf` become bare globals everyone can call.
         self.globals = {}
         self.ambiguous_globals = 0
-        for name, cands in defs.items():
-            if len(cands) > 1:
-                self.ambiguous_globals += 1
-            pick = next((c for c in cands if self.files[c[0]]['module'] == '_g'), None)
-            self.globals[name] = pick or sorted(cands)[0]
+        for mod in ('_g', '_g_patches'):
+            rel = self.by_module.get(mod)
+            if rel is None:
+                continue
+            for name, i in self.files[rel]['exports'].items():
+                if '.' in name:
+                    continue
+                if name in self.globals:
+                    self.ambiguous_globals += 1
+                self.globals[name] = (rel, i)
 
     def node(self, rel, i):
         return (rel, i)
@@ -394,6 +413,9 @@ def main(argv=None):
     ap.add_argument('--gamma', type=Path)
     ap.add_argument('--vanilla', type=Path)
     ap.add_argument('--modlist', type=Path, default=DEFAULT_MODLIST)
+    ap.add_argument('--loose', type=Path, default=DEFAULT_LOOSE,
+                    help="GAMMA's in-place patches: Anomaly/gamedata/scripts "
+                         '(beats the .db archives, loses to any enabled mod)')
     ap.add_argument('--workers', type=int, default=8)
     ap.add_argument('--hops', type=int, default=2)
     ap.add_argument('--json', type=Path)
@@ -403,12 +425,10 @@ def main(argv=None):
     ap.add_argument('--top', type=int, default=40)
     a = ap.parse_args(argv)
 
-    winners, shadowed, missing = resolve_live(a.gamma, a.vanilla, a.modlist)
-    print('live winners: %d (%d gamma, %d vanilla); %d shadowed copies; '
-          '%d tree mods not in the modlist'
-          % (len(winners),
-             sum(1 for w in winners.values() if w['origin'] == 'gamma'),
-             sum(1 for w in winners.values() if w['origin'] == 'vanilla'),
+    winners, shadowed, missing = resolve_live(a.gamma, a.vanilla, a.modlist, a.loose)
+    origins = Counter(w['origin'] for w in winners.values())
+    print('live winners: %d (%s); %d shadowed copies; %d tree mods not in the modlist'
+          % (len(winners), ', '.join('%s %d' % kv for kv in origins.most_common()),
              sum(shadowed.values()), len(missing)))
 
     jobs = [(w['rel'], w['path'], w['origin'], w['mod'], a.nyi_baseline)
