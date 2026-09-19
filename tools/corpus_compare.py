@@ -15,9 +15,15 @@ gamma, which is meaningless).
 
 import argparse
 import json
+import os
 from pathlib import Path
 
-DEFAULT_ROOT = Path(__file__).resolve().parent.parent / "lab" / "data" / "corpus"  # <repo>/lab/data/corpus
+# Same rule as corpus_run.py: runs land in the MAIN checkout's lab so they can
+# be diffed across worktrees. Override with ALAO_LAB or --root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MAIN_LAB = Path(r"C:\code\GIT\anomaly_alao\lab")
+_LAB = Path(os.environ.get("ALAO_LAB") or (_MAIN_LAB if _MAIN_LAB.is_dir() else _REPO_ROOT / "lab"))
+DEFAULT_ROOT = _LAB / "data" / "corpus"
 
 
 def load_run(root: Path, run_id: str):
