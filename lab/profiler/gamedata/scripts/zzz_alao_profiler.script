@@ -1,0 +1,300 @@
+-- ALAO script-side profiler (idea I-048). Measurement only - this never ships
+-- with a rewrite, it is its own overlay mod that goes on TOP of both arms.
+--
+-- Why: fps measures the whole frame and ALAO only ever moves the script slice of
+-- it, so every per-frame delta we queued came back null inside the +-2% noise.
+-- The engine hands Lua a profile_timer (lua_help.script:1200, start/stop/time),
+-- so we can time the script slice directly instead.
+--
+-- What it hooks: axr_main.make_callback. _g.SendScriptCallback funnels every
+-- scripted callback in the game through that one function, so wrapping it gets
+-- actor_on_update / npc_on_update / monster_on_update / on_key_press / ... in
+-- one place, with no edit to any winner file. Optionally (off by default, see
+-- WRAP_BINDERS) the three binder :update methods too.
+--
+-- Attribution is INCLUSIVE and top-level only: a make_callback that happens
+-- while another one is already being timed is counted (as `nested`) but not
+-- timed, because one shared timer cannot be nested. So the per-name numbers add
+-- up to the total without double counting, and that total is the thing we are
+-- actually after: script ms per frame.
+--
+-- Output: one block of ALAOPROF| lines in the engine log every DUMP_EVERY_MS.
+-- lab/framework/aalo/profiler.py parses it back. Units are established at
+-- startup against os.clock, not assumed - see calibrate().
+
+local DUMP_EVERY_MS   = 30000   -- dump window length, engine ms
+local CALIB_MS        = 250     -- busy-loop length used to establish timer units
+local OVERHEAD_ITERS  = 20000   -- iterations used to price our own instrumentation
+local WRAP_BINDERS    = false   -- see the header comment: binder wrapping swallows
+                                -- the callbacks fired inside the binder bodies
+
+-- ---------------------------------------------------------------------------
+-- state (all local and flat: this runs a few thousand times a second and I do
+-- not want the instrument to become the thing I am measuring)
+-- ---------------------------------------------------------------------------
+local installed      = false
+local dev            = nil
+local timer          = nil
+local timer_kind     = "none"
+local units_per_ms   = nil
+
+local depth          = 0
+local last           = 0        -- last reading of timer:time(), monotonic
+
+local units, calls, nested = {}, {}, {}
+local seq            = 0
+local frames_total   = 0
+local win_frames     = 0
+local win_calls      = 0
+local win_nested     = 0
+local win_t0         = 0
+local next_dump      = 0
+local last_frame     = -1
+
+local orig_make_callback = nil
+local dump = nil                -- forward declaration, defined below
+
+-- ---------------------------------------------------------------------------
+-- timer plumbing
+-- ---------------------------------------------------------------------------
+
+-- os.clock-based stand-in, used only if the engine has no profile_timer. Its
+-- resolution on Windows is about a millisecond, which is far too coarse for a
+-- single callback - the dump says so in `timer=` so nobody quotes it by mistake.
+local function make_clock_shim()
+	local acc, t0 = 0, 0
+	local shim = {}
+	function shim:start() t0 = os.clock() end
+	function shim:stop()  acc = acc + (os.clock() - t0) end
+	function shim:time()  return acc * 1000000 end   -- microseconds
+	return shim
+end
+
+-- How many timer units are one millisecond? Busy-loop for CALIB_MS of wall time
+-- with the timer running and divide. os.clock is the reference because
+-- time_global() only advances once per frame and would never move inside a loop.
+local function calibrate()
+	local t
+	if timer_kind == "profile_timer" then
+		t = profile_timer()
+	else
+		t = make_clock_shim()
+	end
+	local c0 = os.clock()
+	local c1 = c0
+	t:start()
+	local spin = 0
+	while (c1 - c0) * 1000 < CALIB_MS do
+		spin = spin + 1
+		c1 = os.clock()
+	end
+	t:stop()
+	local ms = (c1 - c0) * 1000
+	local u = t:time()
+	if ms <= 0 or u <= 0 then
+		return nil, ms, u, spin
+	end
+	return u / ms, ms, u, spin
+end
+
+-- What one instrumented call costs us, in nanoseconds: exactly the work the
+-- wrapper does around the real call, nothing else.
+local function measure_overhead(iters)
+	local u, c = {}, {}
+	local l = 0
+	local c0 = os.clock()
+	for _ = 1, iters do
+		local _f = dev.frame
+		timer:start()
+		timer:stop()
+		local t = timer:time()
+		local d = t - l
+		l = t
+		u.probe = (u.probe or 0) + d
+		c.probe = (c.probe or 0) + 1
+	end
+	local c1 = os.clock()
+	last = timer:time()             -- the probe moved the accumulator; resync
+	return (c1 - c0) * 1000000000 / iters
+end
+
+-- ---------------------------------------------------------------------------
+-- per-frame bookkeeping
+-- ---------------------------------------------------------------------------
+local function tick()
+	local f = dev.frame
+	if f ~= last_frame then
+		last_frame = f
+		frames_total = frames_total + 1
+		win_frames = win_frames + 1
+		local now = time_global()
+		if now >= next_dump then
+			dump(now)
+		end
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- the dump
+-- ---------------------------------------------------------------------------
+dump = function(now)
+	seq = seq + 1
+	local total, names = 0, 0
+	for _, v in pairs(units) do
+		total = total + v
+		names = names + 1
+	end
+	for k, _ in pairs(nested) do          -- names seen only nested still get a line
+		if units[k] == nil then names = names + 1 end
+	end
+	printf("ALAOPROF|1|win|seq=%s|t0=%s|t1=%s|span_ms=%s|frames=%s|total_units=%s|calls=%s|nested=%s|names=%s",
+		seq, win_t0, now, now - win_t0, win_frames, string.format("%.3f", total), win_calls, win_nested, names)
+	for k, v in pairs(units) do
+		printf("ALAOPROF|1|cb|seq=%s|name=%s|calls=%s|units=%s|nested=%s",
+			seq, k, calls[k] or 0, string.format("%.3f", v), nested[k] or 0)
+	end
+	for k, v in pairs(nested) do
+		if units[k] == nil then
+			printf("ALAOPROF|1|cb|seq=%s|name=%s|calls=0|units=0.000|nested=%s", seq, k, v)
+		end
+	end
+	printf("ALAOPROF|1|eow|seq=%s|frames_total=%s", seq, frames_total)
+
+	units, calls, nested = {}, {}, {}
+	win_frames, win_calls, win_nested = 0, 0, 0
+	win_t0 = now
+	next_dump = now + DUMP_EVERY_MS
+end
+
+-- ---------------------------------------------------------------------------
+-- the wrappers
+-- ---------------------------------------------------------------------------
+local function profiled_make_callback(name, ...)
+	if depth > 0 then
+		nested[name] = (nested[name] or 0) + 1
+		win_nested = win_nested + 1
+		return orig_make_callback(name, ...)
+	end
+	tick()
+	depth = 1
+	timer:start()
+	orig_make_callback(name, ...)
+	timer:stop()
+	depth = 0
+	local t = timer:time()
+	local d = t - last
+	last = t
+	units[name] = (units[name] or 0) + d
+	calls[name] = (calls[name] or 0) + 1
+	win_calls = win_calls + 1
+end
+
+-- Wrap one method on one lua-class table. Returns true only if the assignment
+-- actually took: these are luabind-backed classes and I am not assuming they
+-- accept a new method just because the table indexes like a table.
+local function wrap_method(cls, mname, label)
+	if type(cls) ~= "table" then return false, "class not a table" end
+	local orig = rawget(cls, mname)
+	if orig == nil then orig = cls[mname] end
+	if type(orig) ~= "function" then return false, "method not a function" end
+	local wrapper
+	wrapper = function(self, ...)
+		if depth > 0 then
+			nested[label] = (nested[label] or 0) + 1
+			win_nested = win_nested + 1
+			return orig(self, ...)
+		end
+		tick()
+		depth = 1
+		timer:start()
+		orig(self, ...)
+		timer:stop()
+		depth = 0
+		local t = timer:time()
+		local d = t - last
+		last = t
+		units[label] = (units[label] or 0) + d
+		calls[label] = (calls[label] or 0) + 1
+		win_calls = win_calls + 1
+	end
+	cls[mname] = wrapper
+	return cls[mname] == wrapper, "ok"
+end
+
+-- ---------------------------------------------------------------------------
+-- install
+-- ---------------------------------------------------------------------------
+local function install()
+	if installed then return "already installed" end
+
+	timer_kind = (profile_timer ~= nil) and "profile_timer" or "os_clock_shim"
+	if timer_kind == "profile_timer" then
+		timer = profile_timer()
+	else
+		timer = make_clock_shim()
+	end
+	dev = device()
+
+	local upm, calib_ms, calib_units, spin = calibrate()
+	units_per_ms = upm
+	local ns = measure_overhead(OVERHEAD_ITERS)
+
+	orig_make_callback = axr_main.make_callback
+	axr_main.make_callback = profiled_make_callback
+	local ok_cb = (axr_main.make_callback == profiled_make_callback)
+
+	local binders = {}
+	if WRAP_BINDERS then
+		local targets = {
+			{ "bind_stalker",        "actor_binder",            "binder:actor" },
+			{ "bind_monster",        "generic_object_binder",   "binder:monster" },
+			{ "bind_physic_object",  "generic_physics_binder",  "binder:physic" },
+		}
+		for i = 1, #targets do
+			local modname, clsname, label = targets[i][1], targets[i][2], targets[i][3]
+			local ok, why = pcall(function()
+				local mod = _G[modname]
+				local cls = mod and mod[clsname]
+				local done, msg = wrap_method(cls, "update", label)
+				return done and "ok" or msg
+			end)
+			binders[#binders + 1] = label .. "=" .. tostring(ok and why or "error")
+		end
+	end
+
+	last = timer:time()
+	win_t0 = time_global()
+	next_dump = win_t0 + DUMP_EVERY_MS
+	installed = true
+
+	printf("ALAOPROF|1|hdr|ts=%s|timer=%s|units_per_ms=%s|calib_ms=%s|calib_units=%s|calib_spin=%s|overhead_ns=%s|make_callback=%s|binders=%s|dump_ms=%s",
+		win_t0, timer_kind,
+		upm and string.format("%.6f", upm) or "nil",
+		string.format("%.3f", calib_ms or 0),
+		string.format("%.3f", calib_units or 0),
+		spin or 0,
+		string.format("%.1f", ns),
+		tostring(ok_cb),
+		(#binders > 0) and table.concat(binders, ",") or "off",
+		DUMP_EVERY_MS)
+	return "installed"
+end
+
+-- Public entry points ---------------------------------------------------------
+
+-- axr_main.on_game_start() walks every *.script in the scripts root and calls
+-- this if it exists, so the overlay needs no registration anywhere else.
+function on_game_start()
+	local ok, err = pcall(install)
+	if not ok then
+		printf("ALAOPROF|1|err|install failed: %s", tostring(err))
+	end
+end
+
+-- for the offline test harness and for a console poke
+function alao_profiler_install() return install() end
+function alao_profiler_dump() if installed then dump(time_global()) end end
+function alao_profiler_state()
+	return { installed = installed, frames = frames_total, seq = seq,
+	         units_per_ms = units_per_ms, timer = timer_kind, depth = depth }
+end
