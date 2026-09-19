@@ -140,9 +140,9 @@ One hop **more than doubles** the set (340 -> 795) and takes interpreted bodies 
 By origin at hop<=1: gamma 129 GREEN / 89 `debug_statement`, vanilla 47 GREEN / 109
 `debug_statement`.
 
-For context, the same live files hold **2313** `debug_statement` and **2346** GREEN findings
-in total, so one hop reaches 8.6% of the live debug statements and 7.6% of the live GREEN
-findings, against 3.2% and 4.4% for the name-based set.
+For context, the same 1350 live files hold **2410** `debug_statement` and **2142** GREEN
+findings in total, so one hop reaches 8.2% of the live debug statements and 8.3% of the live
+GREEN findings, against 3.1% and 4.8% for the name-based set.
 
 **The honest reading of the GREEN column: the reach doubles and the absolute numbers stay
 tiny.** I-040 gains four sites. I-021 gains eight. The two patterns the callee hop was
@@ -251,7 +251,9 @@ per arm, `jit.off(chunk, true)` for the interpreted arm, warm-up 1000 calls,
 | the same line commented out (what `--fix-debug` leaves) | 0.2 ns | 2.2 ns |
 
 The formatted form costs the same compiled and interpreted because it never compiles: it
-builds a closure (`BC_FNEW`) and calls `string.gsub` with it, per call. And **vanilla
+builds a closure (`BC_FNEW`) and calls `string.gsub` with it, per call. `jit.off` did take
+effect — the empty-loop arm is 0.2 ns compiled against 2.2 ns interpreted, 11x, which is the
+self-check for these three rows. And **vanilla
 `printf` has no `DEV_DEBUG` guard** — it always reaches the engine's `log()`, which writes to
 `xray_*.log`. That write is not measurable from here and is certainly the larger half.
 

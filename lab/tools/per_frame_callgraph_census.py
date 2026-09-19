@@ -423,6 +423,8 @@ def main(argv=None):
                     help='drop section_name/profile_name from ENGINE_NYI_METHODS '
                          '(the pre-I-042 tables), for the classification delta')
     ap.add_argument('--top', type=int, default=40)
+    ap.add_argument('--self-check', action='store_true',
+                    help='exit 3 unless both known positives land in the set')
     a = ap.parse_args(argv)
 
     winners, shadowed, missing = resolve_live(a.gamma, a.vanilla, a.modlist, a.loose)
@@ -569,17 +571,24 @@ def main(argv=None):
               % (fn['module'], fn['bare'], c, fn['jit_mode'], fn['abort_sites'],
                  f['origin']))
 
-    # known positives
+    # Known positives. Never quote a zero out of this tool without them: both
+    # are per-frame in reality and neither is visible to the name rule.
+    # pick_section_from_condlist is one hop via module.func; make_callback is
+    # TWO hops and only over the bare-global edge into _g.script, so it also
+    # tells you whether the global namespace resolved at all.
     print('\n=== known positives ===')
+    ok = True
     for want in ('axr_main.make_callback', 'xr_logic.pick_section_from_condlist'):
         mod, _, fname = want.partition('.')
         rel = graph.by_module.get(mod)
         status = 'MODULE NOT LIVE'
+        found = False
         if rel is not None:
             i = graph.files[rel]['exports'].get(fname)
             if i is None:
                 status = 'not exported by %s' % rel
             else:
+                found = results['with-globals'].get((rel, i)) is not None
                 node = (rel, i)
                 bits = []
                 for label in ('strict', 'with-globals'):
@@ -591,6 +600,14 @@ def main(argv=None):
                     ', '.join(bits), fn['jit_mode'], fn['abort_sites'],
                     graph.files[rel]['mod'])
         print('  %-44s %s' % (want, status))
+        ok = ok and found
+    if not ok:
+        print('  SELF-CHECK FAILED: a known positive is missing from the set. '
+              'Every count above is suspect - fix the resolution first.')
+        if a.self_check:
+            return 3
+    elif a.self_check:
+        print('  self-check ok')
 
     if a.json:
         payload = {
