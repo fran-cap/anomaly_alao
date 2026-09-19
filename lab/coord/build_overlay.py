@@ -125,6 +125,12 @@ def build_bottom(work: Path, out: Path, modlist: Path, mods_dir: Path, manifest_
         if gd.is_dir():
             for f in gd.rglob("*.script"):
                 shipped.add(f.relative_to(gd).as_posix().lower())
+    # GAMMA also patches the game in place: loose files in Anomaly/gamedata beat the .db archives,
+    # so a db script shadowed by one of those is NOT live either (bind_monster.script bit us, gen-3)
+    loose = mods_dir.parent.parent / "Anomaly" / "gamedata"
+    if loose.is_dir():
+        for f in loose.rglob("*.script"):
+            shipped.add(f.relative_to(loose).as_posix().lower())
     trees = [p for p in work.iterdir() if p.is_dir() and (p / "gamedata").is_dir()]
     taken, shadowed, untouched = [], [], 0
     for tree in trees:
