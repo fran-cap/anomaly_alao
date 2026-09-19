@@ -281,10 +281,46 @@ The first window of every run is dropped by default (`--drop-first`): it
 straddles the level load and the warm-up. A run also loses up to one window of
 tail, because a window only reaches the log when it is dumped.
 
+### What the A/A run measured (2026-09-19, `20260919-184343-I-048-757367`)
+
+Both arms identical (`ref3-alao-b` + the profiler on top, `ref3-vanilla-bottom`
+at the bottom), 3 repeats x 300 s each, standing still on `gammabaseline`:
+
+| | all 6 rounds | dropping each arm's first round |
+|---|---:|---:|
+| total script ms/frame | 0.749 | 0.724 |
+| run-to-run cv, script ms/frame | **5.48%** | **1.64%** |
+| run-to-run cv, fps avg, same runs | 4.35% | 4.82% |
+| A/A delta, script ms/frame | -0.14% | +1.04% |
+| A/A delta, fps avg | -1.83% | +0.62% |
+
+Three things follow.
+
+1. **There is a script-side session warm-up the in-level warm-up does not
+   cover.** The first round of each arm reads ~10% high in script ms/frame
+   (0.810 / 0.792 against 0.715-0.740 for every later round) while its fps is
+   unremarkable - so it is not a general session artefact, it is specific to
+   script time (LuaJIT traces, caches). **Run 4 repeats and drop the first round
+   of each arm** (`profile_report.py --drop-rounds 1`; `fps_runner` reports both
+   numbers, `script_ms_per_frame` and `script_ms_per_frame_warm`). Then the cv
+   target is met with room to spare.
+2. **Script time is 15.7% of the frame**: 0.75 ms of a 4.78 ms frame at 209 fps.
+   That is the whole argument for this instrument. A rewrite that cuts script
+   time by 10% moves the frame by 1.6% - under what fps can resolve - but moves
+   script-ms by 10%, which is 6x the warm instrument's noise.
+3. **94.5% of it is one callback name**, `actor_on_update`, at ~709 us per
+   frame, one call per frame. `npc_on_update` is 1.7%, `npc_on_choose_weapon`
+   1.5%, `squad_on_update` 0.7%; nothing else clears 0.5%. Measured standing
+   still in a quiet spot, so the npc/monster rows are starved of work and the
+   ranking is site-specific - but the actor row is not, and it is where every
+   optimisation should be aimed. Use `WRAP_LISTENERS` to find out which
+   subscriber inside it costs what.
+
 ### Honesty rules for a script-ms number
 
 1. Quote the **run-to-run** `cv_pct`, not the within-run one. Windows inside a
-   run are correlated; runs are the unit of noise.
+   run are correlated; runs are the unit of noise. And say whether the first
+   round was dropped - it changes the cv by 3x.
 2. A delta is only resolvable if it clears both arms' cv. `profile_report.py`
    prints them next to the delta for exactly that reason.
 3. Subtract nothing for the instrument, but state `overhead_ns x calls/frame` -

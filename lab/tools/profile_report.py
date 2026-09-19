@@ -56,7 +56,7 @@ def _resolve(paths):
     return out
 
 
-def _report_arm(name, dirs, top, drop_first, listeners=False):
+def _report_arm(name, dirs, top, drop_first, listeners=False, drop_rounds=0):
     logs = []
     for d in dirs:
         log = _profiler.load_run(d) if d.is_dir() else _profiler.load(d)
@@ -69,10 +69,11 @@ def _report_arm(name, dirs, top, drop_first, listeners=False):
     print(f"### {name}")
     print(f"- timer `{hdr.timer}`, {hdr.units_per_ms:.1f} units/ms, "
           f"instrument cost {hdr.overhead_ns:.0f} ns per instrumented call, binders {hdr.binders}")
-    rep = _profiler.compare_runs([d for d, _ in logs], drop_first=drop_first)
+    rep = _profiler.compare_runs([d for d, _ in logs], drop_first=drop_first, drop_rounds=drop_rounds)
     s = rep["script_ms_per_frame"]
     print(f"- {rep['n_runs']} run(s), {rep['frames']} frames kept "
-          f"(first {drop_first} window(s) of each run dropped)")
+          f"(first {drop_first} window(s) of each run dropped"
+          + (f", first {drop_rounds} whole round(s) dropped)" if drop_rounds else ")"))
     print(f"- **total script {_fmt(s['mean'])} ms/frame**, run-to-run cv "
           f"{_fmt(s['cv_pct'], 2)}%, range {_fmt(s['min'])}-{_fmt(s['max'])} ms")
     within = [w["cv_pct"] for w in rep["within_run"] if w["cv_pct"] is not None]
@@ -116,6 +117,9 @@ def main(argv=None) -> int:
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--listeners", action="store_true",
                     help="also rank the individual subscribers (needs WRAP_LISTENERS in the overlay)")
+    ap.add_argument("--drop-rounds", type=int, default=0,
+                    help="skip this many whole runs from the start of the arm; 1 drops the session "
+                         "warm-up round, which runs about 10%% high in script-ms")
     ap.add_argument("--drop-first", type=int, default=1,
                     help="windows to drop from the start of each run (default 1: it straddles the load)")
     ap.add_argument("--json", type=Path, help="also write the aggregate here")
@@ -147,7 +151,7 @@ def main(argv=None) -> int:
 
     out = {}
     for name, dirs in arms.items():
-        rep = _report_arm(name, dirs, a.top, a.drop_first, a.listeners)
+        rep = _report_arm(name, dirs, a.top, a.drop_first, a.listeners, a.drop_rounds)
         if rep:
             out[name] = rep
     b = (out.get("baseline") or {}).get("script_ms_per_frame") or {}

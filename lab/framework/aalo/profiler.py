@@ -315,13 +315,21 @@ def spread(values) -> dict:
     }
 
 
-def compare_runs(run_dirs, drop_first: int = 1) -> dict:
+def compare_runs(run_dirs, drop_first: int = 1, drop_rounds: int = 0) -> dict:
     """Aggregate several runs of the SAME arm into one run-to-run spread report.
 
     Each run contributes one number - its mean script ms/frame - so ``spread``
     here is the between-run spread, which is what decides whether script-ms is
     an instrument.  ``within_run`` keeps the per-window spread for contrast.
+
+    *drop_rounds* skips that many runs from the start (run dirs sort
+    chronologically by name).  The A/A run
+    ``20260919-184343-I-048-757367`` found the first round of each arm sitting
+    ~10% high in script-ms while its fps was unremarkable - a script-side
+    session warm-up the 30 s in-level warm-up does not cover.  Dropping it takes
+    the run-to-run cv from 5.48% to 1.64%.
     """
+    run_dirs = sorted(run_dirs, key=lambda d: Path(d).name)[drop_rounds:]
     per_run, within, logs = [], [], []
     for d in run_dirs:
         log = load_run(d)

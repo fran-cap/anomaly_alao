@@ -488,5 +488,23 @@ def test_compare_runs_over_run_dirs(tmp_path):
     assert rep["ranking"][0]["runs"] == 3
 
 
+def test_compare_runs_can_drop_the_session_warmup_round(tmp_path):
+    """The first round of an arm reads ~10% high in script-ms (A/A 2026-09-19)."""
+    dirs = []
+    for i, scale in enumerate((0.9, 1.0, 1.01)):     # round 1 is the hot one
+        d = tmp_path / f"2026091{i}-run"
+        d.mkdir()
+        (d / "xray.log").write_text(
+            HAND_DUMP.replace("units_per_ms=2500.000000", f"units_per_ms={2500 * scale:.6f}"),
+            encoding="utf-8")
+        dirs.append(d)
+    loose = _profiler.compare_runs(dirs)["script_ms_per_frame"]
+    warm = _profiler.compare_runs(dirs, drop_rounds=1)["script_ms_per_frame"]
+    assert loose["n"] == 3 and warm["n"] == 2
+    assert warm["cv_pct"] < loose["cv_pct"]
+    # dirs sort by name, so it is the chronologically first run that goes
+    assert _profiler.compare_runs(dirs, drop_rounds=1)["runs"] == [str(d) for d in dirs[1:]]
+
+
 def test_load_run_returns_none_without_a_log(tmp_path):
     assert _profiler.load_run(tmp_path) is None

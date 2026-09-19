@@ -248,6 +248,12 @@ def summarize_profiler(cfg, per_arm: dict) -> dict | None:
         if rep["n_runs"]:
             any_dump = True
         rep["ranking"] = rep["ranking"][:20]
+        # the first round of an arm runs ~10% high in script-ms (session
+        # warm-up the in-level warm-up misses); keep both numbers rather than
+        # quietly picking one
+        warm = _profiler.compare_runs(dirs, drop_rounds=1)
+        rep["script_ms_per_frame_warm"] = warm["script_ms_per_frame"]
+        rep["n_runs_warm"] = warm["n_runs"]
         out["arms"][arm] = rep
     if not any_dump:
         return None

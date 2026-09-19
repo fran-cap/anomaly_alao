@@ -90,6 +90,9 @@ def test_summarize_profiler_folds_both_arms(tmp_path):
     rep = fps_runner.summarize_profiler(cfg, per_arm)
     assert rep is not None
     assert rep["arms"]["baseline"]["n_runs"] == 3
+    # both numbers are kept: all rounds, and with the session warm-up round out
+    assert rep["arms"]["baseline"]["n_runs_warm"] == 2
+    assert rep["arms"]["baseline"]["script_ms_per_frame_warm"]["n"] == 2
     assert rep["arms"]["baseline"]["script_ms_per_frame"]["cv_pct"] < 1.0
     # variant arm is 10% slower by construction
     assert rep["delta_pct"] == pytest.approx(10.0, abs=0.5)
