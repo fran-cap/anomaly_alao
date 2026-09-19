@@ -15,7 +15,10 @@ before they ran: I-021 +0.35% (`20260911-153413-I-021-392bd3`), I-040 +0.09%
 (`20260911-164718-I-040-ec27c2`). Per-round spread on identical arms is 203-222 fps. The
 standing-still FPS capture cannot resolve anything below roughly 2% of a frame, and every
 per-frame rewrite ALAO can do today is worth ~0.01%. **Do not queue an FPS delta for a pattern
-rewrite again unless the site arithmetic says >1% of frame time.**
+rewrite again unless the site arithmetic says >0.5% of frame time.**
+
+(Bar lowered from 1% to 0.5% by the user on 2026-09-19: we are after gradual gains. FPS still cannot
+resolve 0.5%, so anything between 0.5% and ~2% has to be read in script-ms through the I-048 profiler.)
 
 Reference overlays `lab/coord/overlays/ref-alao-merged-b` and `vanilla-db-bottom` were built from
 gen-1 code and no longer match `--fix` output. Rebuild them from a fresh integration corpus run
@@ -48,7 +51,7 @@ has the hypothesis, change and measure; the line below is the deciding question.
 | B | **I-046 shadowing-assertion gate** | Turn `i021_capture_scan.py` into a `corpus_run.py` gate (G9) and a pytest guard that fails on the `18756a9` and `tasks_fetch` repros at `bae4b0c`. Then extend it from cache declarations to every insertion ALAO makes (`local mfloor = ...`, `local n = #t`, sqrt aliases). | corpus, no game |
 | C | **I-042 call-graph-aware per-frame classifier** | Propagating per-frame status one hop along same-file and `module.func` edges: how many interpreted functions enter the set, and do the I-040 / I-021 / debug-statement site counts inside it rise? Include the two `ENGINE_NYI_METHODS` gaps (`section_name`, `profile_name`). Report-only, like I-013. Run the census on GAMMA mods too, not only vanilla (I-041 was vanilla-only). | corpus, no game |
 | D | **I-043 `axr_main.make_callback` dispatch** | Microbench the `spairs` dispatcher shape (pairs + `table.sort` + closure per call) against a sorted parallel array at 5 / 20 / 60 listeners, interpreted. If >2x, hand-patch `axr_main.script` as a one-off overlay and measure with agent A's profiler (fps as a fallback only). Not a table-driven pattern; needs its own transform or stays a hand patch. | microbench first; in-game only via A |
-| E | **I-044 `--fix-debug` in-game arm** | Count `debug_statement` findings inside live per-frame bodies on GAMMA mods (vanilla has 34; the mod side is unknown). If the count times per-call cost clears 1% of frame time, build overlays from a `--fix --fix-debug` run of the merged code and queue one delta with 5 repeats. Otherwise report the count and stop. | corpus, then maybe game |
+| E | **I-044 `--fix-debug` in-game arm** | Count `debug_statement` findings inside live per-frame bodies on GAMMA mods (vanilla has 34; the mod side is unknown). If the count times per-call cost clears 0.5% of frame time, build overlays from a `--fix --fix-debug` run of the merged code and queue one delta with 5 repeats. Otherwise report the count and stop. | corpus, then maybe game |
 
 Do not start **I-017** (corpus-scale differential execution) as an agent this generation: it is
 scored 9.0 but is a multi-day harness, and I-046 catches the shape I-017 cannot. Scope it as a
@@ -65,7 +68,7 @@ plan document instead, if anyone has spare time.
    gen-3 **G9: 0 captures from `lab/tools/i021_capture_scan.py`** on the fix tree. Baselines are
    `20260911-175058-gamma-integ-gen2` and `20260911-175201-vanilla-integ-gen2`. Report the
    `jit_mode` split and the live-after-shadowing count.
-3. **In-game only through the profiler (agent A) or when site arithmetic clears 1% of frame time.**
+3. **In-game only through the profiler (agent A) or when site arithmetic clears 0.5% of frame time.**
 
 ## Organizer notes
 
@@ -88,7 +91,7 @@ plan document instead, if anyone has spare time.
 > per-frame classifier, GAMMA census included), I-043 (make_callback dispatch, microbench then
 > hand patch measured by the profiler), I-044 (--fix-debug arm, count first). Each agent validates
 > its tools against a known positive, runs corpus gates on both corpora under the corpus lock, and
-> queues in-game work only through the profiler or when site arithmetic clears 1% of a frame. You
+> queues in-game work only through the profiler or when site arithmetic clears 0.5% of a frame. You
 > are the organizer: rebuild the reference overlays from a fresh integration run first, relay
 > cross-cutting findings, keep ideas.json / beam-ideas.md under the ideas lock, merge on an
 > integration branch with the full suite, both corpus runs and the capture scan as the gate, and
