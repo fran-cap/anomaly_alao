@@ -53,6 +53,7 @@ Pipeline: **discover -> analyze (per file) -> findings -> transform (per file) /
 | `ast_transformer.py` | `ASTTransformer`: re-runs the analyzer on a file, filters findings by the enabled fix flags, converts each to `SourceEdit`s (char-offset ranges + replacement + priority + optional group), then `_apply_edits()` resolves overlaps and writes the file. ~2400 lines. |
 | `reporter.py` | `Reporter` collects findings per mod/file, prints summaries, and saves `.txt` / `.json` / `.html` (Jinja2, `templates/`). `PERFORMANCE_IMPACT` maps pattern names to critical/high/medium/low for the HTML report. |
 | `whole_program_analyzer.py` | Cross-file symbol definition/usage tracker for dead-code detection. **Not imported anywhere yet**; standalone / experimental. |
+| `tools/capture_gate.py` | G9 (I-046): runs the transformer over originals and asserts no inserted `local` binds over a live outer name. Imported by `tools/corpus_run.py` and `tests/test_capture_gate.py`; `lab/tools/i021_capture_scan.py` is its CLI. |
 | `tools/script_extractor.py` | Copies all `.script` files out of a mods tree preserving structure (for building test corpora). |
 | `tools/split_test.py` | Splits an extracted mods tree into zip chunks of N mods for batch testing. |
 | `templates/base.html`, `templates/report.html` | Jinja2 HTML report. |
