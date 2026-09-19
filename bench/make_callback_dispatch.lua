@@ -15,7 +15,7 @@
 -- @notes iterator closure, heapifies O(K) and then sifts O(log K) per listener - every comparison
 -- @notes two nested Lua calls. The candidate keeps a sorted array per callback name, rebuilt only
 -- @notes in callback_set/callback_unset, and dispatches with a numeric for.
--- @notes K is the LISTENER COUNT. Live static counts (census of the 1317 live winner scripts):
+-- @notes K is the LISTENER COUNT. Live static counts (census of the 1350 live winners):
 -- @notes actor_on_update 125 sites (73 of them permanent), npc_on_update 12, monster_on_update 4.
 -- @notes Listeners are trivial here, so this row is the pure dispatch share.
 -- @setup

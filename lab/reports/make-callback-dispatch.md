@@ -16,7 +16,8 @@ This decides everything downstream, so it comes first. Three layers, highest pri
 first: enabled MO2 mods in modlist order, then the loose `Anomaly/gamedata/scripts`
 (GAMMA patches the base install in place: 62 `.script` files plus 4 `.lua`), then the
 Anomaly db archives.
-`lab/tools/i043_callback_census.py` does the resolution; 1317 scripts win.
+`lab/tools/i043_callback_census.py` does the resolution; 1350 files win (1317 `.script` +
+33 `.lua`).
 
 | script | copies that exist | **winner** |
 |---|---|---|
@@ -131,7 +132,7 @@ true K sits between the two columns and only the profiler can pin it.
 The plan's guess of 5 / 20 / 60 was low for the actor and high for the NPC. Real
 K ≈ **73-125**, **12**, **4**.
 
-`actor_on_first_update` is the largest table in the game (156 sites) but fires once, so
+`actor_on_first_update` is the largest table in the game (158 sites) but fires once, so
 it is a load-time cost, not a frame cost.
 
 ### Who calls it per frame, and how many times
