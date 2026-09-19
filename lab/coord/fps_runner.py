@@ -23,6 +23,10 @@ Request JSON an agent submits (all paths absolute):
       "baseline_overlay": null,                  # null = stock game; or another overlay dir
       "variant_overlay_bottom": null,            # optional: a LOWEST-priority overlay (rewritten vanilla
       "baseline_overlay_bottom": null,           #   scripts: every mod still overrides it), same for baseline
+      "profiler_overlay": "C:/.../lab/profiler", # optional: I-048 script-side profiler, installed at the
+                                                 #   TOP and enabled in BOTH arms (it is the instrument,
+                                                 #   not the treatment). Its dumps ride the engine log,
+                                                 #   which every run dir already keeps as xray.log.
       "repeats": 3, "duration_s": 300, "warmup_s": 30, "save": "gammabaseline",
       "notes": "ALAO --fix with I-001 counter append, 1503-file corpus"
     }
@@ -57,7 +61,7 @@ COORD = Path(__file__).resolve().parent
 sys.path.insert(0, str(COORD))
 sys.path.insert(0, str(COORD.parent / "framework"))
 import coord  # noqa: E402
-from aalo import config as _config, mo2 as _mo2  # noqa: E402
+from aalo import config as _config, mo2 as _mo2, profiler as _profiler  # noqa: E402
 
 REWRITE_PREFIX = "aalo-rewrite-"
 SRC_PREFIX = "aalo-src-"
@@ -154,7 +158,9 @@ def write_experiment(cfg, qid: str, req: dict, prof: str, arm_mods: dict) -> Pat
     ]
     for arm in ("baseline", "variant"):
         mine = arm_mods.get(arm, [])
-        others = [n for a, ns in arm_mods.items() if a != arm for n in ns]
+        # a mod both arms enable (the profiler) must not land in the other arm's
+        # disable list, or the TOML would set it true and false in one table
+        others = [n for a, ns in arm_mods.items() if a != arm for n in ns if n not in mine]
         lines += ["", f"[{arm}]", f'notes = "{("overlay " + " ".join(mine)) if mine else "stock"}"', f"[{arm}.mods]"]
         lines += [f'"{n}" = true' for n in mine] + [f'"{n}" = false' for n in others]
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -218,23 +224,69 @@ def summarize_runs(cfg, exp_name: str) -> dict:
             "capped_runs": capped_runs, "summary": summary}
 
 
+def summarize_profiler(cfg, per_arm: dict) -> dict | None:
+    """Fold the I-048 profiler dumps out of each run's xray.log into the result.
+
+    Returns None when no run carried a dump (no profiler overlay, or it failed
+    to install - which shows up as `errors` rather than silence when it did try).
+    Also writes `<run>/profiler.json` so the raw per-window numbers stay next to
+    the frametimes instead of only in the queue item.
+    """
+    out: dict = {"arms": {}}
+    any_dump = False
+    for arm, info in per_arm.items():
+        dirs = [cfg.runs_dir / r for r in info.get("runs", [])]
+        dirs = [d for d in dirs if (d / "xray.log").is_file()]
+        for d in dirs:
+            log = _profiler.load_run(d)
+            if log is None or not log.windows:
+                continue
+            (d / "profiler.json").write_text(
+                json.dumps({"summary": log.summary(), "ranking": log.ranking(top=40)}, indent=2),
+                encoding="utf-8")
+        rep = _profiler.compare_runs(dirs)
+        if rep["n_runs"]:
+            any_dump = True
+        rep["ranking"] = rep["ranking"][:20]
+        # the first round of an arm runs ~10% high in script-ms (session
+        # warm-up the in-level warm-up misses); keep both numbers rather than
+        # quietly picking one
+        warm = _profiler.compare_runs(dirs, drop_rounds=1)
+        rep["script_ms_per_frame_warm"] = warm["script_ms_per_frame"]
+        rep["n_runs_warm"] = warm["n_runs"]
+        out["arms"][arm] = rep
+    if not any_dump:
+        return None
+    b = out["arms"].get("baseline", {}).get("script_ms_per_frame") or {}
+    v = out["arms"].get("variant", {}).get("script_ms_per_frame") or {}
+    if b.get("mean") and v.get("mean"):
+        out["delta_script_ms_per_frame"] = round(v["mean"] - b["mean"], 4)
+        out["delta_pct"] = round(100.0 * (v["mean"] - b["mean"]) / b["mean"], 2)
+    out["summary"] = (
+        f"script ms/frame baseline {b.get('mean')} (cv {b.get('cv_pct')}%) -> "
+        f"variant {v.get('mean')} (cv {v.get('cv_pct')}%)")
+    return out
+
+
 def process(item: dict, dry_run: bool, keep: bool) -> dict:
     cfg = _config.get()
     m = _mo2.MO2(cfg)
     req = item["request"]
     req.setdefault("idea", item.get("idea", ""))
     qid = _slug(item["id"])
-    # (request key, arm, suffix, position)
+    # (request key, arms, suffix, position)
     slots = [
-        ("variant_overlay", "variant", "b", "top"),
-        ("baseline_overlay", "baseline", "a", "top"),
-        ("variant_overlay_bottom", "variant", "b2", "bottom"),
-        ("baseline_overlay_bottom", "baseline", "a2", "bottom"),
+        ("variant_overlay", ("variant",), "b", "top"),
+        ("baseline_overlay", ("baseline",), "a", "top"),
+        ("variant_overlay_bottom", ("variant",), "b2", "bottom"),
+        ("baseline_overlay_bottom", ("baseline",), "a2", "bottom"),
+        # the instrument, not the treatment: same mod, same priority, both arms
+        ("profiler_overlay", ("baseline", "variant"), "p", "top"),
     ]
     installed, top, bottom, prof, toml = [], [], [], None, None
     arm_mods: dict = {"baseline": [], "variant": []}
     try:
-        for key, arm, suffix, pos in slots:
+        for key, arms, suffix, pos in slots:
             src = req.get(key)
             if not src:
                 continue
@@ -242,8 +294,9 @@ def process(item: dict, dry_run: bool, keep: bool) -> dict:
             install_overlay(cfg, name, Path(src))
             installed.append(name)
             (top if pos == "top" else bottom).append(name)
-            arm_mods[arm].append(name)
-        if not arm_mods["variant"]:
+            for arm in arms:
+                arm_mods[arm].append(name)
+        if not (req.get("variant_overlay") or req.get("variant_overlay_bottom")):
             raise ValueError("request has no variant_overlay / variant_overlay_bottom")
         prof = make_source_profile(m, qid, top, bottom)
         toml = write_experiment(cfg, qid, req, prof, arm_mods)
@@ -260,6 +313,15 @@ def process(item: dict, dry_run: bool, keep: bool) -> dict:
         result["wall_s"] = round(time.time() - t0, 1)
         result["overlay_mods"] = {"top": top, "bottom": bottom}
         result["dry_run"] = dry_run
+        if req.get("profiler_overlay"):
+            # NB: not `prof` - that name holds the source profile the finally
+            # block has to delete, and shadowing it leaks a profile per run
+            prof_report = summarize_profiler(cfg, result.get("arms", {}))
+            result["profiler"] = prof_report
+            if prof_report:
+                result["summary"] += "  |  " + prof_report["summary"]
+            else:
+                result["summary"] += "  |  profiler: no ALAOPROF dumps in any run log"
         if proc.returncode != 0:
             raise RuntimeError(f"aalo run exited {proc.returncode}: {result['summary']}")
         return result

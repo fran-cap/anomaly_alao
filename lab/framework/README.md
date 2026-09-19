@@ -190,6 +190,147 @@ py -3.12 -m aalo ltx "<effective_user_ltx>" --key sun
 py -3.12 -m aalo mo2 list --filter shaders
 ```
 
+## Measuring a rewrite in script-ms (the I-048 profiler)
+
+Read this before queueing an FPS delta for a script rewrite. fps measures the
+whole frame; a rewrite only moves the script slice of it. On the standing-still
+`gammabaseline` save the per-round fps spread on **identical** arms is 203-222,
+so fps cannot resolve anything under about 2% of a frame - and every per-frame
+rewrite ALAO does today is worth roughly 0.01% of one. That is why I-021 and
+I-040 both came back null. Measure the slice instead.
+
+`lab/profiler/` is an overlay mod that adds exactly one script,
+`zzz_alao_profiler.script`. At `on_game_start` it wraps `axr_main.make_callback`
+- `_g.SendScriptCallback` funnels every scripted callback in the game through
+that one function - and accumulates **inclusive, top-level** time per callback
+name. Every 30 s it prints one block of `ALAOPROF|` lines to the engine log.
+Because `runner.py` already copies the engine log into every run directory as
+`xray.log`, there is nothing extra to collect.
+
+It patches the table rather than editing a file, so it does not care which copy
+of `axr_main.script` wins. That matters, because the answer is not obvious:
+priority here is **highest-priority enabled mod, then GAMMA's ~66 loose in-place
+patches in `Anomaly/gamedata/scripts`, then the `.db` archives**, and for
+`axr_main.script` the loose GAMMA copy wins - it dispatches through
+`spairs(intercepts[name], sort_func_values_ascend)`, the `hspairs` min-heap from
+`_g_patches.script`, not the db copy's bare `pairs`. Nothing in the install
+caches `axr_main.make_callback` into a local, so one assignment catches every
+caller. (The binder option is the part that does care: `bind_monster.script` is
+loose-patched, `bind_stalker.script` comes from the db.)
+
+Three things it establishes rather than assumes, all in the `hdr` line:
+
+- `units_per_ms`: `profile_timer`'s units are calibrated against a 250 ms
+  `os.clock` busy loop at startup. If calibration fails the parser refuses to
+  convert to milliseconds instead of quoting a made-up number.
+- `overhead_ns`: what one instrumented call costs, measured the same way.
+  Multiply by calls/frame to price the instrument.
+- `make_callback=true`: the wrap actually took. `binders=off` by default;
+  `WRAP_BINDERS` in the script also wraps the three binder `:update` methods,
+  but their bodies contain the callbacks, so their inclusive time swallows the
+  per-callback ranking. Leave it off unless that is what you want.
+
+### Per-listener attribution (`WRAP_LISTENERS`, off by default)
+
+A callback name is a mailing list, and the first in-game run showed 95% of all
+scripted per-frame time sitting on one name, `actor_on_update`. Knowing *which
+subscriber* costs what needs the individual listeners, and those live in
+`intercepts`, a file-local in `axr_main.script`. It is reachable anyway: it is an
+upvalue of `make_callback`, so `debug.getupvalue` hands it over. Setting
+`WRAP_LISTENERS = true` in the overlay script makes the profiler rewrite that
+table in place at `on_game_start` (by which point every listener is registered,
+so load order does not matter), wrapping each subscriber in its own timer, and
+wrap `callback_set` / `callback_unset` so later registrations are covered and an
+unset by the original function still finds its wrapper. Rows come out labelled
+`<callback>#<file>:<line>` from `debug.getinfo`, and `profile_report.py
+--listeners` ranks them. Same inclusive-top-level rule as the name level, on a
+second independent timer. Validated offline against the real `axr_main.script`
+but **not yet in-game** - run it once with `--listeners` before quoting it.
+
+### Running an arm with it
+
+Add one key to the queue request. The profiler is the **instrument, not the
+treatment**, so it is installed once, at the top of the load order, and enabled
+in *both* arms:
+
+```json
+{
+  "label": "i043-make-callback",
+  "baseline_overlay": ".../overlays/ref3-alao-b",
+  "variant_overlay":  ".../overlays/my-arm-b",
+  "baseline_overlay_bottom": ".../overlays/ref3-vanilla-bottom",
+  "variant_overlay_bottom":  ".../overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler",
+  "repeats": 3, "duration_s": 300, "warmup_s": 30, "save": "gammabaseline"
+}
+```
+
+The finished queue item then carries a `profiler` section next to the fps
+numbers: mean script ms/frame per arm, the run-to-run spread, and the top-20
+callback ranking. Each run directory also gets a `profiler.json`.
+
+### Reading it back
+
+```
+py -3.12 lab/tools/profile_report.py --queue <queue id>
+py -3.12 lab/tools/profile_report.py --arm-a <run dirs...> --arm-b <run dirs...>
+py -3.12 lab/tools/profile_report.py <one run dir>         # single arm
+```
+
+The first window of every run is dropped by default (`--drop-first`): it
+straddles the level load and the warm-up. A run also loses up to one window of
+tail, because a window only reaches the log when it is dumped.
+
+### What the A/A run measured (2026-09-19, `20260919-184343-I-048-757367`)
+
+Both arms identical (`ref3-alao-b` + the profiler on top, `ref3-vanilla-bottom`
+at the bottom), 3 repeats x 300 s each, standing still on `gammabaseline`:
+
+| | all 6 rounds | dropping each arm's first round |
+|---|---:|---:|
+| total script ms/frame | 0.749 | 0.724 |
+| run-to-run cv, script ms/frame | **5.48%** | **1.64%** |
+| run-to-run cv, fps avg, same runs | 4.35% | 4.82% |
+| A/A delta, script ms/frame | -0.14% | +1.04% |
+| A/A delta, fps avg | -1.83% | +0.62% |
+
+Three things follow.
+
+1. **There is a script-side session warm-up the in-level warm-up does not
+   cover.** The first round of each arm reads ~10% high in script ms/frame
+   (0.810 / 0.792 against 0.715-0.740 for every later round) while its fps is
+   unremarkable - so it is not a general session artefact, it is specific to
+   script time (LuaJIT traces, caches). **Run 4 repeats and drop the first round
+   of each arm** (`profile_report.py --drop-rounds 1`; `fps_runner` reports both
+   numbers, `script_ms_per_frame` and `script_ms_per_frame_warm`). Then the cv
+   target is met with room to spare.
+2. **Script time is 15.7% of the frame**: 0.75 ms of a 4.78 ms frame at 209 fps.
+   That is the whole argument for this instrument. A rewrite that cuts script
+   time by 10% moves the frame by 1.6% - under what fps can resolve - but moves
+   script-ms by 10%, which is 6x the warm instrument's noise.
+3. **94.5% of it is one callback name**, `actor_on_update`, at ~709 us per
+   frame, one call per frame. `npc_on_update` is 1.7%, `npc_on_choose_weapon`
+   1.5%, `squad_on_update` 0.7%; nothing else clears 0.5%. Measured standing
+   still in a quiet spot, so the npc/monster rows are starved of work and the
+   ranking is site-specific - but the actor row is not, and it is where every
+   optimisation should be aimed. Use `WRAP_LISTENERS` to find out which
+   subscriber inside it costs what.
+
+### Honesty rules for a script-ms number
+
+1. Quote the **run-to-run** `cv_pct`, not the within-run one. Windows inside a
+   run are correlated; runs are the unit of noise. And say whether the first
+   round was dropped - it changes the cv by 3x.
+2. A delta is only resolvable if it clears both arms' cv. `profile_report.py`
+   prints them next to the delta for exactly that reason.
+3. Subtract nothing for the instrument, but state `overhead_ns x calls/frame` -
+   it is present in both arms and cancels in the delta, yet it inflates the
+   absolute ms/frame.
+4. Numbers are **inclusive** of everything a callback calls. A nested
+   `make_callback` is counted (`nested`) but not timed, so per-name times sum to
+   the total without double counting.
+5. Never quote a number from a round the runner marked `capped`.
+
 ## Beam search over ideas
 
 `data/ideas.json` holds the pool. Score a measured idea, keep the top *k* of a
@@ -213,6 +354,7 @@ are neither survivors nor casualties.
 | `mo2.py` | ModOrganizer.ini, modlist.txt, profile copies, launch commands |
 | `snapshot.py` | snapshot/restore `user.ltx` and a profile; diff into `config_diff` |
 | `xraylog.py` | engine log: load time, level markers, warnings, FATAL ERROR, A-Life stats |
+| `profiler.py` | the I-048 `ALAOPROF\|` dumps: ms/frame, per-callback ranking, run-to-run spread |
 | `metrics.py` | PresentMon or psutil sampling, and the fps/frametime math |
 | `runner.py` | one run, or a whole A/B experiment |
 | `ideas.py` | the idea pool and its beam search |
@@ -223,6 +365,7 @@ are neither survivors nor casualties.
 py -3.12 tools/tail_xray_log.py --errors     # follow the newest engine log
 py -3.12 tools/presentmon_check.py           # is real frame capture available
 py -3.12 tools/seed_demo_runs.py --count 3   # synthetic runs for the dashboard
+py -3.12 tools/profile_report.py --queue <id>  # I-048 script-ms report for a run
 ```
 
 Seeded runs carry `"demo": true` in their manifest, so they are never mistaken
