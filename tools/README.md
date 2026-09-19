@@ -91,9 +91,10 @@ What a run does:
 | `--jobs N` / `-j N` | workers for the fix pass and the probe (default min(8, cpus)) |
 | `--single-thread` | pass `--single-thread` to the fix pass instead of `-j` |
 | `--proc-timeout S` | wall-clock limit per ALAO subprocess (default 7200) |
-| `--use-repo-exclude` | honour `alao_exclude.txt`. **Off by default** - that file excludes `VANILLA_SCRIPTS`, which would silently empty the vanilla corpus. |
+| `--use-repo-exclude` | honour `alao_exclude.txt`. **Off by default** - it ships empty since I-036, but it used to exclude `VANILLA_SCRIPTS` and a local edit of it must never quietly shrink a regression corpus. |
 | `--no-probe` | skip failure attribution (counts only, from stdout) |
 | `--no-idempotence` | skip the second fix pass |
+| `--no-capture-gate` | skip G9, the I-046 shadowing scan over the originals |
 | `--keep-work` | keep the working copies (needed to inspect a violation afterwards) |
 | `--out-root PATH` | default `C:\code\GIT\anomaly_alao\lab\data\corpus` |
 

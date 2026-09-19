@@ -1,2 +1,11 @@
-# Allows to exclude some mods from fixes/reports
-VANILLA_SCRIPTS
+# Mods to exclude from reports and fixes - one mod folder name per line.
+# This file auto-loads whenever it sits next to stalker_lua_lint.py, and it
+# applies to --revert / --clean-backups / --list-backups too, so whatever you
+# put here is skipped by every operation. ALAO prints the names it dropped.
+#
+# It ships EMPTY on purpose (I-036): it used to carry VANILLA_SCRIPTS, which
+# silently gave anyone who named their corpus folder that a zero-file run.
+#
+# Example:
+# VANILLA_SCRIPTS
+# 463- Tasks QoL Pack - Serious

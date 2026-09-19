@@ -56,7 +56,7 @@ Pipeline: **discover -> analyze (per file) -> findings -> transform (per file) /
 | `tools/script_extractor.py` | Copies all `.script` files out of a mods tree preserving structure (for building test corpora). |
 | `tools/split_test.py` | Splits an extracted mods tree into zip chunks of N mods for batch testing. |
 | `templates/base.html`, `templates/report.html` | Jinja2 HTML report. |
-| `alao_exclude.txt` | One mod name per line to exclude from reports and fixes. Auto-loaded when it sits next to `stalker_lua_lint.py`; also applies to `--revert`. |
+| `alao_exclude.txt` | One mod name per line to exclude from reports and fixes. Auto-loaded when it sits next to `stalker_lua_lint.py`; also applies to `--revert`. Ships empty since I-036 (it used to carry `VANILLA_SCRIPTS`), and every excluded mod is named on stdout. |
 
 ### The pattern-name contract
 

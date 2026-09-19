@@ -343,8 +343,9 @@ def main():
     ap.add_argument("--proc-timeout", type=float, default=7200.0,
                     help="wall-clock limit per ALAO subprocess (default 7200s)")
     ap.add_argument("--use-repo-exclude", action="store_true",
-                    help="honour the repo's alao_exclude.txt (default: override it with an empty list, "
-                         "so a regression run sees every mod - note it excludes VANILLA_SCRIPTS)")
+                    help="honour the repo's alao_exclude.txt (default: override it with an empty "
+                         "list, so a regression run sees every mod whatever a local edit of that "
+                         "file says - it ships empty since I-036, it used to exclude VANILLA_SCRIPTS)")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip per-file failure attribution entirely (only relevant "
                          "for an ALAO older than I-029, which has no failure data in "
@@ -386,8 +387,9 @@ def main():
     fix_flags = args.fix_flags.split()
     analyze_extra = args.analyze_args.split()
 
-    # the repo auto-loads alao_exclude.txt (which excludes VANILLA_SCRIPTS); a
-    # regression run should see the whole corpus, so hand it an empty list.
+    # the repo auto-loads alao_exclude.txt (it shipped with VANILLA_SCRIPTS in
+    # it until I-036); a regression run should see the whole corpus whatever
+    # someone has since put in that file, so hand it an empty list.
     common_args = []
     if not args.use_repo_exclude:
         empty_exclude = out_dir / "empty-exclude.txt"
