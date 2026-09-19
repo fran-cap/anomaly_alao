@@ -19,9 +19,16 @@ from pathlib import Path
 
 LAB = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LAB / "framework"))
-sys.path.insert(0, str(LAB / "coord"))
 
+from aalo import config as _config  # noqa: E402
 from aalo import profiler as _profiler  # noqa: E402
+
+# aalo.toml's `lab` always points at the MAIN checkout, never at a worktree -
+# runs, the queue and the overlays are runtime state that exists once on the
+# machine. Resolve both through it or a worktree finds empty directories.
+_CFG = _config.get()
+RUNS_ROOT = _CFG.runs_dir
+MAIN_COORD = Path(_CFG.lab) / "coord"
 
 
 def _fmt(v, nd=3):
@@ -31,7 +38,7 @@ def _fmt(v, nd=3):
 def _resolve(paths):
     """Accept run dirs, raw logs, or run ids under lab/data/runs."""
     out = []
-    runs_root = LAB / "data" / "runs"
+    runs_root = RUNS_ROOT
     for p in paths:
         p = Path(p)
         if p.is_dir():
@@ -98,19 +105,18 @@ def main(argv=None) -> int:
 
     arms: dict = {}
     if a.queue:
+        sys.path.insert(0, str(MAIN_COORD))
         import coord
-        item = coord.queue_get(a.queue) if hasattr(coord, "queue_get") else None
+        item = None
+        for it in coord.queue_list():
+            if it["id"] == a.queue or it["id"].endswith(a.queue):
+                item = it
+                break
         if item is None:
-            for it in coord.queue_list():
-                if it["id"] == a.queue or it["id"].endswith(a.queue):
-                    item = it
-                    break
-        if item is None:
-            print(f"no queue item {a.queue}", file=sys.stderr)
+            print(f"no queue item {a.queue} under {MAIN_COORD / 'queue'}", file=sys.stderr)
             return 2
-        runs_root = LAB / "data" / "runs"
         for arm, info in ((item.get("result") or {}).get("arms", {})).items():
-            arms[arm] = [runs_root / r for r in info.get("runs", [])]
+            arms[arm] = [RUNS_ROOT / r for r in info.get("runs", [])]
     elif a.arm_a or a.arm_b:
         if a.arm_a:
             arms["baseline"] = _resolve(a.arm_a)
