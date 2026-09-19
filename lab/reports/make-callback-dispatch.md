@@ -8,6 +8,14 @@ count), the overlay is built and compile-checked, and an in-game request is queu
 through I-048's profiler. What it is *not* is a pattern: exactly one `spairs(` site in
 the whole live GAMMA script set runs per frame, and it is this one.
 
+**Against the 0.5% in-game gate (23.9 us of a 4770 us frame):** it passes
+unconditionally if the dispatcher runs interpreted (43.1 us saved per frame from the
+actor callback alone), and passes above roughly 13 online stalkers if it JITs (6.4 us
+alone, plus 1.17 us per online stalker and 0.58 us per monster). **The single deciding
+fact is whether the `hspairs` dispatch loop forms a trace in the real engine** — a
+binary I cannot settle statically and I-048's profiler reports directly. Everything
+else in this report is measured.
+
 ---
 
 ## 1. Which copy is live
@@ -264,7 +272,8 @@ this patch has to be exactly one thing.
 
 ## 5. Site arithmetic, and why the profiler is the right instrument
 
-Frame budget 4770 us; 1% = 47.7 us. Using the K=73 (permanent-only) figures:
+Frame budget 4770 us. **The in-game gate is 0.5% of the frame = 23.9 us** (lowered from
+1% by the user, 2026-09-19). Using the K=73 (permanent-only) figures:
 
 ```
 compiled:     1 x  6.44          =  6.4 us   actor_on_update
@@ -275,16 +284,34 @@ interpreted:  1 x 43.13          = 43.1 us   actor_on_update
             + Nmon x 0.88
 ```
 
-| scenario | saved per frame | % of frame |
-|---|---|---|
-| compiled, 15 stalkers + 5 monsters online | 26.9 us | 0.56% |
-| compiled, 30 stalkers + 10 monsters | 47.4 us | 0.99% |
-| interpreted, 15 + 5 | 101.3 us | 2.12% |
-| interpreted, 30 + 10, K=125 | 176.6 us | 3.70% |
+| scenario | saved per frame | % of frame | vs the 0.5% gate |
+|---|---|---|---|
+| compiled, **actor_on_update alone** (no NPCs online) | 6.4 us | 0.14% | **fails** |
+| compiled, 5 stalkers + 2 monsters online | 13.4 us | 0.28% | fails |
+| compiled, 15 stalkers + 5 monsters | 26.9 us | 0.56% | **passes** |
+| compiled, 30 stalkers + 10 monsters | 47.4 us | 0.99% | passes |
+| interpreted, **actor_on_update alone** | 43.1 us | 0.90% | **passes** |
+| interpreted, 15 + 5 | 101.3 us | 2.12% | passes |
+| interpreted, 30 + 10, K=125 | 176.6 us | 3.70% | passes |
 
-**It straddles the 1% line**, and the two unknowns are (a) whether the dispatcher
-compiles in-game and (b) the online NPC count. Those are exactly the two things a
-static analysis cannot supply and exactly the two things I-048's profiler reports:
+At the 0.5% bar the picture sharpens into one clean conditional:
+
+* **If the dispatcher does not JIT in-game, it clears the gate unconditionally** — the
+  single actor_on_update dispatch alone is 43.1 us against a 23.9 us bar, with no online
+  NPCs needed at all.
+* **If it does JIT**, it clears the gate once roughly **13 stalkers plus 4 monsters** are
+  online (`6.44 + N x 1.17 + N/3 x 0.58 >= 23.9`), and fails below that.
+
+So the deciding fact is a single binary: **does the `hspairs` dispatch loop form a trace
+in the real engine?** Structurally I would expect not — per call it allocates two
+closures and a table, calls a Lua comparator through two nested frames per heap
+comparison, and then calls listeners that make engine calls. agent-I042's call-graph
+census labels the body `compiled` with 0 abort sites, but they flagged that themselves
+as an artifact: their jit_mode classification is intra-procedural, so the call into
+`spairs`/`hspairs` is invisible to it. I am not going to settle it by reading code.
+
+Those are exactly the two things a static analysis cannot supply and exactly the two
+things I-048's profiler reports:
 script ms/frame attributed to `make_callback` per callback name, plus calls/frame per
 name (= the online object count) and the resulting listener count. So the in-game
 measurement is queued **through the profiler**, not as an FPS hunt — the compiled-case
