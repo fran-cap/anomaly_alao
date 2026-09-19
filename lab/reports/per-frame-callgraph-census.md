@@ -295,17 +295,45 @@ Two analyzer changes, both report-only. Corpus runs under the `corpus` lock, bot
 compared against the gen-3 baselines `20260919-182320-gamma-integ-gen3-base` /
 `20260919-182421-vanilla-integ-gen3-base`.
 
-| gate | `0261a19` (NYI methods) | `8a80d0f` (local-function per-frame) |
-|---|---|---|
-| G4 compile failures | 0 (gamma), 0 (vanilla) | see run ids below |
-| G5 idempotence violations | 0, 0 | |
-| G6 analyze / fix | gamma 12.0 s / 22.7 s vs 11.6 / 21.9 (+3.4% / +3.7%) | |
-| G7 findings | **no per-pattern change on either corpus**; files_modified 571/217 and edits_applied 6493/3620 unchanged | |
-| byte-identity | **0 of 1503 and 0 of 828 fixed files differ** from the baseline trees (sha256) | |
-| G8 pytest | 478 passed, 7 skipped, 4 xfailed | |
-| G9 capture scan | 0 captures over 788 originals, 1203 inserted declarations | |
+### `0261a19` — the two `ENGINE_NYI_METHODS` entries
 
-Run ids: `20260919-183816-gamma-0-9-4-fix`, `20260919-183934-vanilla-db-fix`.
+Full corpus runs, `20260919-183816-gamma-0-9-4-fix` and `20260919-183934-vanilla-db-fix`:
+
+| gate | result |
+|---|---|
+| G4 compile failures | 0 (gamma), 0 (vanilla) |
+| G5 idempotence violations | 0, 0 |
+| G6 analyze / fix | gamma 12.0 s / 22.7 s vs baseline 11.6 / 21.9 (+3.4% / +3.7%) |
+| G7 findings | **no per-pattern change on either corpus**; findings total 10688 / 4665, files_modified 571 / 217, edits_applied 6493 / 3620, all unchanged |
+| byte-identity | **0 of 1503 and 0 of 828 fixed files differ** from the baseline trees (sha256) |
+| G8 pytest | 478 passed, 7 skipped, 4 xfailed |
+| G9 capture scan | 0 captures over 788 originals, 1203 inserted declarations |
+
+### `8a80d0f` — the local-function per-frame fix
+
+**Its full corpus run did not happen: the `corpus` lock waits on the `game` lock, and the
+FPS runner held the game continuously (I-048's validation run, then I-043's) for the rest of
+my slot.** I did not run an 8-worker corpus job alongside a frametime capture. G7 for this
+commit is therefore established by a targeted check instead, which is cheap enough to run
+without the lock and is in fact *tighter* than the corpus diff for this particular change:
+
+- Only a file containing `local function <per-frame name>` can be affected. Of the baseline's
+  rewritten files, **43 contain one; transforming all 43 at HEAD reproduces the baseline's
+  fixed file byte for byte, 0 differ.**
+- Of the files the baseline did **not** rewrite, 10 MO2-layout files contain one;
+  **0 of them become modified** at HEAD.
+
+So no file changes and no file starts changing. That is what G7 would have measured. What is
+*not* covered: G4/G5/G6 for this commit (they cannot regress from appending to a list, but
+they are unmeasured), and the new `per_frame_callback` / `jit_mode` finding counts, which
+will rise — that rise is the expected and only G7 movement. The organizer should re-run
+
+```
+coord run corpus --ttl 900 -- py -3.12 tools\corpus_run.py --corpus ...\extracted\gamma --corpus-name gamma-0.9.4 --fix-flags=--fix --keep-work
+```
+
+on both corpora at merge time. G8 (478 passed) and G9 (0 captures) above were both run at
+`8a80d0f` or later.
 
 G6 on the vanilla corpus is **unresolved at 10% resolution and not attributable**: my runs
 came in at 6.8/12.8 and 6.4/13.8 against a 5.7/10.9 baseline, but a control run of the
