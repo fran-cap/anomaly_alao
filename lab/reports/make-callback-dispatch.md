@@ -104,22 +104,27 @@ that changes only when someone registers or unregisters.
 
 ## 2. Listener census (the N that matters)
 
-`py -3.12 lab/tools/i043_callback_census.py` over the 1317 live winners.
-1796 `RegisterScriptCallback` sites total. "permanent" = registered from the module's
+`py -3.12 lab/tools/i043_callback_census.py` over the 1350 live winners (1317 `.script`
++ 33 `.lua`; agent-I042's independent implementation agrees on the set, and the whole
+1350 - 1317 gap was `.lua` inclusion — nothing in the live tree sits in a subdirectory of
+`gamedata/scripts`, so basename keying is safe). The 33 `.lua` files hold 22
+`RegisterScriptCallback` sites and **0** `spairs(` sites, none of them for a per-frame
+callback, so they move nothing that matters here.
+1818 `RegisterScriptCallback` sites total. "permanent" = registered from the module's
 `on_game_start` (which `axr_main` auto-runs for every script) and never unregistered
 anywhere in that file; the rest is churn, registered on demand or dropped again. The
 true K sits between the two columns and only the profiler can pin it.
 
 | callback | register sites | permanent | churn | unregister | send sites |
 |---|---|---|---|---|---|
-| actor_on_first_update | 156 | 140 | 16 | 5 | 1 |
+| actor_on_first_update | 158 | 140 | 18 | 5 | 1 |
 | on_option_change | 152 | 142 | 10 | 2 | 2 |
 | save_state | 129 | 109 | 20 | 8 | 1 |
 | **actor_on_update** | **125** | **73** | 52 | 47 | 1 |
 | load_state | 119 | 108 | 11 | 2 | 1 |
 | on_game_load | 74 | 53 | 21 | 0 | 1 |
 | on_key_press | 65 | 51 | 14 | 8 | 1 |
-| on_key_release | 53 | 38 | 15 | 8 | 1 |
+| on_key_release | 53 | 38 | 15 | 9 | 1 |
 | **npc_on_update** | **12** | **11** | 1 | 1 | 1 |
 | **monster_on_update** | **4** | **4** | 0 | 0 | 1 |
 
@@ -317,7 +322,8 @@ LuaJIT 2.0 compile-checks clean.
 
 **No, and the count is the argument.**
 
-There are **99 `spairs(` call sites across 44 of the 1317 live winner scripts**. Of
+There are **99 `spairs(` call sites across 44 of the 1350 live winner scripts** (all 99
+in `.script` files; the 33 live `.lua` files have none). Of
 those, **0** sit in a body today's name-based per-frame classifier recognises, and
 **exactly 1 — this one — is per-frame in reality**, reached through
 `SendScriptCallback -> axr_main.make_callback`, an edge only a call-graph classifier

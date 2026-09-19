@@ -53,19 +53,34 @@ def read(p: Path) -> str:
     return p.read_bytes().decode("latin-1")
 
 
-def live_scripts(modlist=DEFAULT_MODLIST, mods_dir=DEFAULT_MODS_DIR):
-    """{lowercase filename: (Path, source tag)} for the copy the game loads."""
+SUFFIXES = (".script", ".lua")
+
+
+def live_scripts(modlist=DEFAULT_MODLIST, mods_dir=DEFAULT_MODS_DIR, suffixes=SUFFIXES):
+    """{lowercase filename: (Path, source tag)} for the copy the game loads.
+
+    Keyed on the BASENAME, which is right here: nothing in the live tree sits in a
+    subdirectory of gamedata/scripts (checked - 0 of 1350), and the engine addresses
+    a script by its bare name. Including .lua matters only for agreeing with
+    agent-I042's count: the 33 live .lua files hold 22 RegisterScriptCallback sites
+    and 0 spairs( sites, none of them for a per-frame callback.
+    """
     winners: dict[str, tuple[Path, str]] = {}
+
+    def take(f: Path, tag: str):
+        if f.is_file() and f.suffix.lower() in suffixes:
+            winners.setdefault(f.name.lower(), (f, tag))
+
     for mod in read_modlist(modlist):            # highest priority first
         d = mods_dir / mod / "gamedata" / "scripts"
         if d.is_dir():
-            for f in d.rglob("*.script"):
-                winners.setdefault(f.name.lower(), (f, "mod:" + mod))
-    for f in LOOSE.glob("*.script"):
-        winners.setdefault(f.name.lower(), (f, "loose"))
+            for f in d.rglob("*"):
+                take(f, "mod:" + mod)
+    for f in LOOSE.rglob("*"):
+        take(f, "loose")
     if DB.is_dir():
-        for f in DB.rglob("*.script"):
-            winners.setdefault(f.name.lower(), (f, "db"))
+        for f in DB.rglob("*"):
+            take(f, "db")
     return winners
 
 
@@ -136,7 +151,8 @@ def main(argv=None) -> int:
     c = census(winners)
     problems = self_check(winners, c)
 
-    print(f"live winner scripts: {c['live_scripts']}")
+    n_lua = sum(1 for k in winners if k.endswith(".lua"))
+    print(f"live winner scripts: {c['live_scripts']} ({c['live_scripts'] - n_lua} .script + {n_lua} .lua)")
     print(f"RegisterScriptCallback sites: {sum(c['register'].values())}")
     print(f"spairs( sites: {c['spairs_total']} across {len(c['spairs_sites'])} files\n")
     print(f"{'callback':34}{'reg':>5}{'perm':>6}{'churn':>7}{'unreg':>7}{'send':>6}")
