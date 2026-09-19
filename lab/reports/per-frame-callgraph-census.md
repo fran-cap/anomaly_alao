@@ -228,15 +228,21 @@ N = 2e6 compiled / 3e5 interpreted). Interpreted arm, because the set is 53% int
 | `pow_op_simple` | 0.2 ns | 8 |
 | `string_find_plain`, `redundant_not_eq` | 0.0 ns (1.00x both modes) | 42 |
 
+The in-game gate is **0.5% of frame time = 23.9 us**; the near-miss band worth flagging for
+the profiler is 0.25–0.5%, i.e. **11.9–23.9 us**.
+
 **Generous upper bound.** Give every one of the 178 GREEN sites at hop<=1 the best number in
 the table (15.8 ns) and assume each executes once per frame: **2.8 us, 0.059% of the frame**.
-At a realistic 6 ns average: 1.1 us, 0.022%. To clear 1% of the frame (47.7 us) at 6 ns per
-execution you need ~8000 site-executions per frame; there are 178 sites, so each would have
-to run 45 times every frame. Hop 2 adds 28 more sites and changes nothing.
+At a realistic 6 ns average: 1.1 us, 0.022%. To clear 23.9 us at 6 ns per execution you need
+~4000 site-executions per frame; there are 178 sites, so each would have to run 22 times
+every frame. Hop 2 adds 28 more sites and changes nothing.
 
-**Nothing in the GREEN set clears 1% of the frame, before or after the propagation.** This is
-the same verdict I-021 and I-040 already got in-game, now with the enlarged set, so the
-enlarged set does not rescue it.
+**Nothing in the GREEN set clears 0.5% of the frame, before or after the propagation, and
+nothing is in the 0.25–0.5% near-miss band either.** The whole one-hop GREEN set is an order
+of magnitude below the near-miss floor even at the generous bound, so no measured call
+frequency rescues it: reaching 11.9 us would need every one of the 178 sites to run ~12 times
+per frame at the best-case 15.8 ns. This is the same verdict I-021 and I-040 already got
+in-game, now with the enlarged set.
 
 `debug_statement` is the one family where the arithmetic is not obviously dead, and only
 because its per-call cost is two orders of magnitude larger. Measured Lua-side cost of one
@@ -258,10 +264,14 @@ self-check for these three rows. And **vanilla
 `xray_*.log`. That write is not measurable from here and is certainly the larger half.
 
 So, for I-044: 198 `debug_statement` sites at hop<=1 (gamma 89 / vanilla 109), 280 at hop<=2.
-At 770 ns of Lua alone, **62 of them executing once per frame would be 1% of the frame**, and
-the engine log write pushes that threshold lower. Whether 62 execute, or 6, or 600, depends
-entirely on how many are behind `if DEV_DEBUG`-style guards and how many NPCs are online —
-which a static census cannot answer.
+At 770 ns of Lua alone, **31 of them executing once per frame is 23.9 us = the 0.5% gate**,
+and 16 puts it in the 0.25–0.5% near-miss band; the engine log write pushes both thresholds
+lower still. If all 198 ran every frame it would be 152 us, 3.2% of the frame. So
+`debug_statement` is the **only** family in this census that can clear 0.5%, and whether it
+does turns entirely on how many of the 198 are behind `if DEV_DEBUG`-style guards and how
+many NPCs are online — which a static census cannot answer. Classify it as
+**near miss / above gate, pending measured call frequency from the I-048 profiler**: the
+per-call cost is measured, the frequency is not.
 
 ### What the profiler (I-048) should instrument
 
@@ -311,10 +321,11 @@ other appends to a list.
 
 The propagation works and doubles the reach, and the `local function` bug it exposed is worth
 the whole exercise on its own. But the thing the enlarged set was supposed to unlock —
-more GREEN sites on the frame path — gains 75 sites worth about 1 us of a 4770 us frame. The
-set is only worth wiring into the analyzer once there is a transform whose per-site value is
-large enough to care where it lands, and today the only candidate is `--fix-debug` at ~770 ns
-plus a log write per site, which needs I-048 to price.
+more GREEN sites on the frame path — gains 75 sites worth about 1 us of a 4770 us frame,
+against a 23.9 us gate. The set is only worth wiring into the analyzer once there is a
+transform whose per-site value is large enough to care where it lands, and today the only
+candidate is `--fix-debug` at ~770 ns plus a log write per site: 31 of its 198 in-set sites
+firing once per frame clears the gate, which needs I-048 to settle.
 
 A one-hop rule would also miss the single most valuable target: `axr_main.make_callback` is
 two hops away across a `_g.script` global. Any future gating rule has to be hop-2 with global
