@@ -14,7 +14,8 @@ the whole live GAMMA script set runs per frame, and it is this one.
 
 This decides everything downstream, so it comes first. Three layers, highest priority
 first: enabled MO2 mods in modlist order, then the loose `Anomaly/gamedata/scripts`
-(GAMMA patches the base install in place, 62 files), then the Anomaly db archives.
+(GAMMA patches the base install in place: 62 `.script` files plus 4 `.lua`), then the
+Anomaly db archives.
 `lab/tools/i043_callback_census.py` does the resolution; 1317 scripts win.
 
 | script | copies that exist | **winner** |
@@ -293,9 +294,16 @@ instructions. The two arms differ in exactly one file.
 * both bottoms `lab/coord/overlays/ref3-vanilla-bottom`
 * both arms carry `lab/coord/overlays/alao-profiler`
 
-`ref3-alao-b` ships no `axr_main.script` (ALAO finds nothing to rewrite in it and it is
-not in the gamma corpus at all), so nothing in the reference is overwritten — the build
-script asserts that rather than trusting it. The profiler wraps
+Neither reference overlay ships `axr_main.script`, so nothing in the reference is
+overwritten — the build script asserts that rather than trusting it. The reason is
+structural, and worth stating: `ref3-alao-b` is built from the **gamma** corpus (enabled
+mods only, and the only mod that ships `axr_main.script` is disabled), and
+`ref3-vanilla-bottom` from **vanilla_db** (where ALAO left `axr_main.script` untouched).
+The loose `Anomaly/gamedata/scripts` tree — `extracted/vanilla` / `VANILLA_SCRIPTS`, the
+one that actually wins — is in **neither** gen-3 corpus. So the baseline arm runs the
+stock loose `axr_main.script` and the delta is purely my patch. It also means the live
+winners of all 62 loose scripts are outside the gen-3 reference entirely, which the
+organizer may want to know for its own sake. The profiler wraps
 `axr_main.make_callback` at runtime, so it composes with the patch instead of colliding
 with it.
 
