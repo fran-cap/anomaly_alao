@@ -50,7 +50,7 @@ Winner resolution reuses `lab/coord/build_overlay.py`'s `read_modlist`.
 ## 2. The two `ENGINE_NYI_METHODS` gaps (deliverable 1)
 
 `section_name` and `profile_name` are LuaBind exports on the server object, like `:id()` and
-`:name()` — 197 sites in 82 GAMMA files — and both were missing, so a body whose only engine
+`:name()` — 222 sites in 82 of the 1350 live files — and both were missing, so a body whose only engine
 call was one of them classified as `compiled`. Added, with two tests.
 
 **12 of the 19745 live function bodies change classification**: 8 `compiled -> interpreted`,

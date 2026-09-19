@@ -325,9 +325,10 @@ ENGINE_NYI_GLOBALS = frozenset({
 ENGINE_NYI_METHODS = frozenset({
     'position', 'direction', 'health', 'set_health', 'id', 'section',
     # I-042: `section_name` and `profile_name` were missing. They are the two
-    # most common engine getters in the mod corpus after :id()/:name() (197
-    # sites in 82 GAMMA files) and both are LuaBind C functions, so a body
-    # whose only engine call was one of them classified as `compiled`.
+    # most common engine getters in the mod corpus after :id()/:name()
+    # (222 sites in 82 of the 1350 live scripts) and both are LuaBind C
+    # functions, so a body whose only engine call was one of them classified
+    # as `compiled`.
     'section_name', 'profile_name',
     'clsid', 'name', 'alive', 'parent', 'level_vertex_id', 'game_vertex_id',
     'object', 'best_enemy', 'best_danger', 'best_item', 'active_item',
