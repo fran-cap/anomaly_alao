@@ -70,16 +70,18 @@ local function make_clock_shim()
 	return shim
 end
 
+local function new_timer()
+	if timer_kind == "profile_timer" then
+		return profile_timer()
+	end
+	return make_clock_shim()
+end
+
 -- How many timer units are one millisecond? Busy-loop for CALIB_MS of wall time
 -- with the timer running and divide. os.clock is the reference because
 -- time_global() only advances once per frame and would never move inside a loop.
 local function calibrate()
-	local t
-	if timer_kind == "profile_timer" then
-		t = profile_timer()
-	else
-		t = make_clock_shim()
-	end
+	local t = new_timer()
 	local c0 = os.clock()
 	local c1 = c0
 	t:start()
@@ -164,6 +166,13 @@ dump = function(now)
 	win_frames, win_calls, win_nested = 0, 0, 0
 	win_t0 = now
 	next_dump = now + DUMP_EVERY_MS
+	-- Start each window on a fresh accumulator. I do not know whether the
+	-- engine's profile_timer accumulates in a float or a double, and over a
+	-- 300 s run a single accumulator would climb high enough that a float's
+	-- ulp would start eating the per-call deltas. One window can never hold
+	-- more than a second or so of script time, which is safe either way.
+	timer = new_timer()
+	last = timer:time()
 end
 
 -- ---------------------------------------------------------------------------
@@ -228,11 +237,7 @@ local function install()
 	if installed then return "already installed" end
 
 	timer_kind = (profile_timer ~= nil) and "profile_timer" or "os_clock_shim"
-	if timer_kind == "profile_timer" then
-		timer = profile_timer()
-	else
-		timer = make_clock_shim()
-	end
+	timer = new_timer()
 	dev = device()
 
 	local upm, calib_ms, calib_units, spin = calibrate()
