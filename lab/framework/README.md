@@ -202,11 +202,21 @@ I-040 both came back null. Measure the slice instead.
 `lab/profiler/` is an overlay mod that adds exactly one script,
 `zzz_alao_profiler.script`. At `on_game_start` it wraps `axr_main.make_callback`
 - `_g.SendScriptCallback` funnels every scripted callback in the game through
-that one function, and no enabled GAMMA mod ships `axr_main.script`, so the
-vanilla copy is the live one - and accumulates **inclusive, top-level** time per
-callback name. Every 30 s it prints one block of `ALAOPROF|` lines to the engine
-log. Because `runner.py` already copies the engine log into every run directory
-as `xray.log`, there is nothing extra to collect.
+that one function - and accumulates **inclusive, top-level** time per callback
+name. Every 30 s it prints one block of `ALAOPROF|` lines to the engine log.
+Because `runner.py` already copies the engine log into every run directory as
+`xray.log`, there is nothing extra to collect.
+
+It patches the table rather than editing a file, so it does not care which copy
+of `axr_main.script` wins. That matters, because the answer is not obvious:
+priority here is **highest-priority enabled mod, then GAMMA's ~66 loose in-place
+patches in `Anomaly/gamedata/scripts`, then the `.db` archives**, and for
+`axr_main.script` the loose GAMMA copy wins - it dispatches through
+`spairs(intercepts[name], sort_func_values_ascend)`, the `hspairs` min-heap from
+`_g_patches.script`, not the db copy's bare `pairs`. Nothing in the install
+caches `axr_main.make_callback` into a local, so one assignment catches every
+caller. (The binder option is the part that does care: `bind_monster.script` is
+loose-patched, `bind_stalker.script` comes from the db.)
 
 Three things it establishes rather than assumes, all in the `hdr` line:
 

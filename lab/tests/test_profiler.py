@@ -222,14 +222,33 @@ def test_overhead_is_reported_and_small(driven):
 # against the real winner axr_main.script
 # ---------------------------------------------------------------------------
 
-# No enabled GAMMA mod ships axr_main.script (the only copy in mods/ belongs to
-# a disabled one), so the vanilla db copy is what the game loads and what the
-# profiler has to wrap. The stub above re-implements the dispatcher; this loads
-# the actual file, in its own environment, the way the engine does.
-REAL_AXR = Path(r"C:\code\GIT\anomaly_alao\extracted\vanilla_db\raw\scripts\axr_main.script")
+# Which copy of axr_main.script does the game actually load? Priority is:
+# highest-priority ENABLED mod, else GAMMA's loose in-place patch in
+# Anomaly/gamedata/scripts, else the .db archive. No enabled mod ships it (the
+# one copy under GAMMA/mods belongs to a disabled mod), but GAMMA *does* patch
+# it loose - and the loose one dispatches through
+# `spairs(intercepts[name], sort_func_values_ascend)` (the min-heap `hspairs`
+# from _g_patches.script), not the db copy's bare `pairs`. That loose file is
+# the one the profiler has to wrap, so it is the one this test loads.
+LOOSE_AXR = Path(r"D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA\Anomaly\gamedata\scripts\axr_main.script")
+DB_AXR = Path(r"C:\code\GIT\anomaly_alao\extracted\vanilla_db\raw\scripts\axr_main.script")
+REAL_AXR = LOOSE_AXR if LOOSE_AXR.is_file() else DB_AXR
 
-# what axr_main.script touches at module level
+# what axr_main.script touches at module level, plus the two globals the loose
+# copy's dispatcher needs (_g.script's spairs and _g_patches' comparator)
 ENGINE_BITS = """
+function spairs(t, order)
+    local keys, n = {}, 0
+    for k in pairs(t) do n = n + 1; keys[n] = k end
+    if order then table.sort(keys, function(a, b) return order(t, a, b) end)
+    else table.sort(keys) end
+    local i = 0
+    return function()
+        i = i + 1
+        if keys[i] ~= nil then return keys[i], t[keys[i]] end
+    end
+end
+function sort_func_values_ascend(t, a, b) return t[a] < t[b] end
 function ini_file_ex(name, rw)
     local o = {}
     function o:section_exist(s) return true end
@@ -292,7 +311,7 @@ def test_wraps_the_real_axr_main_without_changing_dispatch():
     lua.execute(STUB_PRELUDE.split("-- axr_main, vanilla shape")[0])
     lua.execute(ENGINE_BITS)
     env, err = lua.eval("__load_module")("axr_main", REAL_AXR.read_text(encoding="cp1251"))
-    assert env is not None, f"real axr_main.script would not load: {err}"
+    assert env is not None, f"real axr_main.script ({REAL_AXR}) would not load: {err}"
     lua.execute(REAL_WIRING)
     lua.execute(_lua_source())
     lua.eval("on_game_start")()

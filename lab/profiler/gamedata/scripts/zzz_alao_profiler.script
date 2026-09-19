@@ -12,6 +12,17 @@
 -- one place, with no edit to any winner file. Optionally (off by default, see
 -- WRAP_BINDERS) the three binder :update methods too.
 --
+-- Which copy of axr_main is live does not matter to us, and that is the point
+-- of patching the table instead of editing a file: priority in this install is
+-- highest-priority enabled mod, then GAMMA's loose in-place patches in
+-- Anomaly/gamedata/scripts, then the .db archives, and for axr_main.script the
+-- loose GAMMA copy wins - its make_callback dispatches through
+-- spairs(intercepts[name], sort_func_values_ascend), i.e. the hspairs min-heap
+-- from _g_patches.script, not the db copy's bare pairs. Nothing in the install
+-- caches axr_main.make_callback into a local, so one assignment catches every
+-- caller. Binder wrapping is the part that DOES care: bind_monster.script is
+-- loose-patched by GAMMA while bind_stalker.script comes from the db.
+--
 -- Attribution is INCLUSIVE and top-level only: a make_callback that happens
 -- while another one is already being timed is counted (as `nested`) but not
 -- timed, because one shared timer cannot be nested. So the per-name numbers add
