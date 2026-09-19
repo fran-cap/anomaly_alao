@@ -448,6 +448,52 @@ def main(argv=None):
           '(RegisterScriptCallback to a per-frame event under a non-matching name)'
           % (len(seeds), len(by_reg)))
 
+    # deliverable 3: what the NAME-based classifier misses about registrations
+    reg_tot = reg_pf = reg_hit = reg_miss = reg_unres = 0
+    reg_events = Counter()
+    reg_kind = Counter()
+    miss_examples = []
+    for rel, f in graph.files.items():
+        for reg in f['registrations']:
+            reg_tot += 1
+            if reg['event'] not in PER_FRAME_EVENTS:
+                continue
+            reg_pf += 1
+            reg_events[reg['event']] += 1
+            name = reg['func'].split('.')[-1].split(':')[-1]
+            i = f['file_locals'].get(name)
+            if i is None:
+                g = graph.globals.get(name)
+                i = g[1] if g is not None and g[0] == rel else None
+            if i is None:
+                reg_unres += 1
+                continue
+            if f['funcs'][i]['per_frame_by_name']:
+                reg_hit += 1
+            else:
+                reg_miss += 1
+                # two different causes hide in here: a handler whose NAME is a
+                # per-frame callback but which is declared `local function`
+                # (the visitor never builds a PerFrameCallbackInfo for those -
+                # a plain classifier bug), and a handler under a name the rule
+                # could never guess (`process_queue`, `batt_checker`).
+                from ast_analyzer import _is_per_frame_callback_name
+                reg_kind['local-decl of a per-frame name'
+                         if _is_per_frame_callback_name(name)
+                         else 'name the rule cannot guess'] += 1
+                if len(miss_examples) < 15:
+                    miss_examples.append('%s:%d %s -> %s (%s)' % (
+                        rel, reg['line'], reg['event'], reg['func'],
+                        f['funcs'][i]['jit_mode']))
+    print('RegisterScriptCallback sites in live files: %d; to a per-frame event: %d (%s)'
+          % (reg_tot, reg_pf, ', '.join('%s %d' % kv for kv in reg_events.most_common())))
+    print('  handler already caught by the name rule: %d; MISSED by it: %d; '
+          'handler not resolvable in this file: %d' % (reg_hit, reg_miss, reg_unres))
+    for k, v in reg_kind.most_common():
+        print('    missed because: %-34s %d' % (k, v))
+    for ex in miss_examples:
+        print('    miss: %s' % ex)
+
     all_seeds = seeds | by_reg
     strict = {'same-file', 'module.func'}
     wide = strict | {'global'}

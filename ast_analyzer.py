@@ -1209,9 +1209,25 @@ class ASTAnalyzer:
                     )
 
         is_hot = func_name in HOT_CALLBACKS
+        # I-042: `local function actor_on_update()` + RegisterScriptCallback is
+        # the normal shape in mod scripts - 36 of the 144 live per-frame
+        # registrations in the GAMMA profile - and this visitor never built a
+        # PerFrameCallbackInfo for it, so all of them were invisible to I-010 /
+        # I-013. The name rule is the same one the global form uses.
+        is_per_frame = _is_per_frame_callback_name(func_name)
 
         self.function_depth += 1
         self._enter_scope(func_name, line, 'function', is_hot, node=node)
+
+        pf_info = None
+        if is_per_frame:
+            pf_info = PerFrameCallbackInfo(
+                name=func_name,
+                start_line=line,
+                end_line=-1,
+                scope=self.current_scope,
+            )
+            self.per_frame_callbacks.append(pf_info)
 
         if hasattr(node, 'args') and node.args:
             for arg in node.args:
@@ -1221,6 +1237,8 @@ class ASTAnalyzer:
         self._visit(node.body)
 
         end_line = self._get_end_line(node)
+        if pf_info is not None:
+            pf_info.end_line = end_line
         self._exit_scope(end_line)
         self.function_depth -= 1
 
