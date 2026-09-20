@@ -22,9 +22,13 @@ it:
     mention the name are the three copies of this very script, in this same
     dead branch - so the lookup and its branch are dead.
  4. the `<bar>_bg` statics: same lookup, 8x/frame, for names this script is the
-    only writer of.  Replaced by a Lua-side `bg_shown` set.  (If the engine
-    auto-deleted one behind our back, the flag makes us call RemoveCustomStatic
-    on an absent name, which is a no-op, instead of skipping it.)
+    only writer of.  The *remove* side now consults a Lua-side `bg_shown` set
+    instead of the engine; the *add* side still asks the engine, so a static
+    the engine dropped on its own (level change, auto-delete) is still
+    recreated.  Worst case the set is stale and we call RemoveCustomStatic on a
+    name that is already gone, which is a no-op.  The live HUD mode
+    (show_hud_type 2) only ever takes the remove side, so this is 8 crossings a
+    frame in the configuration that was measured.
  5. `TEXT_BASED_PATCH` read through MCM twice per frame.  `ini_file_ex:r_value`
     caches with `if (cache_result) then`, so a stored *false* never hits the
     cache and each read pays section_exist + line_exist + r_string: 6 crossings
@@ -226,22 +230,25 @@ def patch(text: str) -> str:
         '\t\t\t\t\tend\n'
         '\t\t\t\tend\n'
         '\t\t\t\tif not healthstatus or show_hud_type~=1 then --not show\n'
+        '\t\t\t\t\t-- bg_shown is only trusted in this direction: if the engine\n'
+        '\t\t\t\t\t-- dropped the static behind our back we call\n'
+        '\t\t\t\t\t-- RemoveCustomStatic on a name that is already gone, which is\n'
+        '\t\t\t\t\t-- a no-op. The add path below still asks the engine.\n'
         '\t\t\t\t\tif bg_shown[staticname] then\n'
         '\t\t\t\t\t\thud:RemoveCustomStatic(staticname)\n'
         '\t\t\t\t\t\tbg_shown[staticname] = nil\n'
         '\t\t\t\t\tend\n'
         '\t\t\t\telse\n'
-        '\t\t\t\t\tif not bg_shown[staticname] then\n'
+        '\t\t\t\t\tlocal hud_d = hud:GetCustomStatic(staticname)\n'
+        '\t\t\t\t\tif (hud_d == nil) then\n'
         '\t\t\t\t\t\thud:AddCustomStatic(staticname,true)\n'
-        '\t\t\t\t\t\tbg_shown[staticname] = true\n'
-        '\t\t\t\t\t\tlocal hud_d = hud:GetCustomStatic(staticname)\n'
-        '\t\t\t\t\t\tif (hud_d ~= nil) then\n'
-        '\t\t\t\t\t\t\tlocal wnd = hud_d:wnd()\n'
-        '\t\t\t\t\t\t\tif (wnd ~= nil) then\n'
-        '\t\t\t\t\t\t\t\twnd:SetAutoDelete(true)\n'
-        '\t\t\t\t\t\t\tend\n'
+        '\t\t\t\t\t\thud_d = hud:GetCustomStatic(staticname)\n'
+        '\t\t\t\t\t\tlocal wnd = hud_d:wnd()\n'
+        '\t\t\t\t\t\tif (wnd ~= nil) then\n'
+        '\t\t\t\t\t\t\twnd:SetAutoDelete(true)\n'
         '\t\t\t\t\t\tend\n'
         '\t\t\t\t\tend\n'
+        '\t\t\t\t\tbg_shown[staticname] = true\n'
         '\t\t\t\tend\n'
         '\t\t\tend\n'
         '\t\t\t-------------------\n'
