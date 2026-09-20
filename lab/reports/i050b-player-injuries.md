@@ -109,6 +109,25 @@ the end. They do.
 
 The patched file LuaJIT-compiles (`loadstring` under `lupa.luajit20`).
 
+## The timing bench: NOT RUN
+
+`lab/tools/i050b_bench.py` exists and is wired up, but **no number from it is quoted
+anywhere in this report**. The `game` lock was held continuously by the gen-4 in-game
+queue (four items back to back, ~2.5 h) and beam-ideas.md section 2 forbids quoting a
+bench taken under a lock. Run it on a quiet box with no lock held before or after:
+
+```
+py -3.12 C:\code\GIT\anomaly_alao\lab\tools\i050b_bench.py --iters 20000 --json i050b-bench.json
+```
+
+It builds the patched file itself, checks that `jit.off` actually took, and prints
+us/frame for both arms with JIT on and off (fresh `LuaRuntime` per arm per mode,
+`collectgarbage()` before every timed run, best of 9). What it would add: the split
+between Lua work and boundary cost. If the Lua-only frame turns out to be a large part
+of 74 us, the proportional attribution below is too optimistic and the band should move
+down; if it is a few us, as the crossing census suggests, the band stands. Everything
+below is a count, not a timing, so it is load-independent.
+
 ## Arithmetic
 
 The offline harness can count crossings exactly but cannot price them: a stub call is a
