@@ -34,6 +34,12 @@ Data schema (JSON, UTF-8):
       "files_modified": int, "edits_applied": int, "edits_dropped_overlap": int,
       "compile_failures_after_fix": [{file, error}]   (lupa compile of each rewritten file),
       "idempotence_violations": [file]  (second --fix pass still changed the file),
+      "captures": [{file, name, kind, line, scope, reason, read_line, decl}]  (G9, I-046: an
+          inserted `local` that binds over a live outer name - an ancestor scope's local /
+          parameter / upvalue, or a global - that is still read after the insertion point.
+          `kind` is the _edit_* method that emitted it, `reason` is ancestor-local|free-name.
+          MUST be empty; a non-empty list marks the run "failed". The per-kind insertion
+          census and the shadow-without-read advisories live in extra.capture_scan),
       "differential_failures": [{file, detail}] (optional), "extra": {} }
   data/runs/<run_id>/ (existing end-to-end FPS schema, unchanged; see framework/README.md)
 

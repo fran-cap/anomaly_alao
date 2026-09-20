@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import luajit_compiles
+from conftest import REPO_ROOT, luajit_compiles
 
 
 MOD_A = """
@@ -307,9 +307,37 @@ def test_exclude_drops_the_named_mod(tree, run_cli, tmp_path):
     proc = run_cli(tree, "--exclude", exclude, check=True)
     _assert_no_traceback(proc)
 
-    assert "Excluded 1 mods" in proc.stdout
+    # I-036: the line names the mod it dropped, not just a count
+    assert "Excluded 1 of 2 mods" in proc.stdout
+    assert "ModB" in proc.stdout
     assert "Files analyzed: 1" in proc.stdout
     assert "global_write" not in proc.stdout
+
+
+def test_excluding_everything_says_so(tree, run_cli, tmp_path):
+    """The footgun I-036 is about: a stale exclude list emptying the whole run."""
+    exclude = tmp_path / "exclude.txt"
+    exclude.write_text("ModA\nModB\n", encoding="utf-8")
+
+    proc = run_cli(tree, "--exclude", exclude, check=True)
+    assert "Excluded 2 of 2 mods" in proc.stdout
+    assert "leaves NOTHING to process" in proc.stdout
+
+
+def test_the_shipped_exclude_file_excludes_nothing(tree, run_cli):
+    """alao_exclude.txt auto-loads from next to the CLI; it must ship empty.
+
+    It used to carry VANILLA_SCRIPTS, so anyone whose corpus folder had that
+    obvious name got a silent zero-file run.
+    """
+    shipped = REPO_ROOT / "alao_exclude.txt"
+    entries = [ln.strip() for ln in shipped.read_text(encoding="utf-8").splitlines()
+               if ln.strip() and not ln.strip().startswith("#")]
+    assert entries == [], f"alao_exclude.txt ships with active entries: {entries}"
+
+    proc = run_cli(tree, check=True)
+    assert "Files analyzed: 2" in proc.stdout
+    assert "Excluded" not in proc.stdout
 
 
 def test_exclude_ignores_comments_and_blank_lines(tree, run_cli, tmp_path):

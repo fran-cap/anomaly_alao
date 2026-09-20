@@ -14,7 +14,9 @@ What it does, in order:
   5. optionally re-runs with the given --fix flags on the same working copy
   6. compile-checks every rewritten file with lupa's bundled LuaJIT 2.0
   7. copies the fixed tree, drops the .alao-bak files, fixes again -> idempotence
-  8. writes manifest.json + results.json + diffs/ into data/corpus/<run_id>/
+  8. G9 (I-046): re-runs the transformer over every original and asserts that no
+     inserted `local` binds over a live outer name -> results["captures"]
+  9. writes manifest.json + results.json + diffs/ into data/corpus/<run_id>/
 
 Note on failure attribution: ALAO's JSON report contains only findings, and its
 stdout prints just counts ("Files with parse errors: N") unless you pass -v,
@@ -39,8 +41,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from models import detect_file_encoding  # noqa: E402
+from capture_gate import flags_from_cli, scan_paths  # noqa: E402
 
 # The lab data is shared state: runs from every git worktree must land in the
 # main checkout so corpus_compare can diff across agents. Override with
@@ -339,8 +343,9 @@ def main():
     ap.add_argument("--proc-timeout", type=float, default=7200.0,
                     help="wall-clock limit per ALAO subprocess (default 7200s)")
     ap.add_argument("--use-repo-exclude", action="store_true",
-                    help="honour the repo's alao_exclude.txt (default: override it with an empty list, "
-                         "so a regression run sees every mod - note it excludes VANILLA_SCRIPTS)")
+                    help="honour the repo's alao_exclude.txt (default: override it with an empty "
+                         "list, so a regression run sees every mod whatever a local edit of that "
+                         "file says - it ships empty since I-036, it used to exclude VANILLA_SCRIPTS)")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip per-file failure attribution entirely (only relevant "
                          "for an ALAO older than I-029, which has no failure data in "
@@ -350,6 +355,8 @@ def main():
                          "against the report's failure data (slow; off by default "
                          "since I-029)")
     ap.add_argument("--no-idempotence", action="store_true", help="skip the second fix pass")
+    ap.add_argument("--no-capture-gate", action="store_true",
+                    help="skip G9, the shadowing/capture scan over the originals (I-046)")
     ap.add_argument("--out-root", type=Path, default=DEFAULT_LAB / "data" / "corpus")
     ap.add_argument("--work-root", type=Path, default=None,
                     help="where working copies live (default: <repo>/extracted/_work)")
@@ -380,8 +387,9 @@ def main():
     fix_flags = args.fix_flags.split()
     analyze_extra = args.analyze_args.split()
 
-    # the repo auto-loads alao_exclude.txt (which excludes VANILLA_SCRIPTS); a
-    # regression run should see the whole corpus, so hand it an empty list.
+    # the repo auto-loads alao_exclude.txt (it shipped with VANILLA_SCRIPTS in
+    # it until I-036); a regression run should see the whole corpus whatever
+    # someone has since put in that file, so hand it an empty list.
     common_args = []
     if not args.use_repo_exclude:
         empty_exclude = out_dir / "empty-exclude.txt"
@@ -407,6 +415,7 @@ def main():
         "findings_by_pattern": {}, "findings_by_severity": {},
         "files_modified": 0, "edits_applied": None, "edits_dropped_overlap": None,
         "compile_failures_after_fix": [], "idempotence_violations": [],
+        "captures": [],
         "differential_failures": [], "extra": {},
     }
     notes = [args.notes] if args.notes else []
@@ -551,6 +560,27 @@ def main():
             if not args.keep_work:
                 shutil.rmtree(work2, ignore_errors=True)
 
+        # 8. G9 (I-046): no insertion may bind over a live outer name. The scan
+        # asks the transformer what it inserts into each ORIGINAL (the .alao-bak
+        # sibling) and checks each name against the scope it lands in. Cheap
+        # next to the fix pass, and it catches the class of silent miscompile
+        # that G4 (it compiles) and G5 (it is idempotent) both wave through.
+        if pairs and not args.no_capture_gate:
+            print(f"[g9] capture scan over {len(pairs)} originals with {jobs} workers...")
+            t_g9 = time.perf_counter()
+            scan = scan_paths([bak for _new, bak in pairs], jobs=jobs,
+                              **flags_from_cli(fix_flags))
+            results["captures"] = [c.__dict__ for c in scan.captures]
+            info = scan.as_dict()
+            info.pop("captures", None)
+            info["seconds"] = round(time.perf_counter() - t_g9, 2)
+            results["extra"]["capture_scan"] = info
+            print(f"[g9] {scan.summary()}")
+            if scan.captures:
+                status = "failed"
+                notes.append(f"G9: {len(scan.captures)} inserted name(s) shadow a live outer "
+                             f"binding, e.g. {scan.captures[0]}")
+
     finished = datetime.now().isoformat(timespec="seconds")
 
     manifest = {
@@ -586,6 +616,10 @@ def main():
     print(f"edits applied              {results['edits_applied']}")
     print(f"compile failures after fix {len(results['compile_failures_after_fix'])}")
     print(f"idempotence violations     {len(results['idempotence_violations'])}")
+    cap_info = results["extra"].get("capture_scan") or {}
+    print(f"captures (G9)              {len(results['captures'])}"
+          + (f"  [{cap_info.get('insertions')} insertions in {cap_info.get('files')} files, "
+             f"{len(cap_info.get('advisories') or [])} advisories]" if cap_info else ""))
     print(f"findings total             {sum(results['findings_by_pattern'].values())}")
     print(f"by severity                {results['findings_by_severity']}")
     print("-" * 62)

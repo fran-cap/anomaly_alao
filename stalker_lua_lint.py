@@ -567,10 +567,18 @@ def main():
 
             if excluded_mods:
                 before_count = len(mods)
+                hit = sorted(name for name in mods if name in excluded_mods)
                 mods = {name: scripts for name, scripts in mods.items() if name not in excluded_mods}
-                excluded_count = before_count - len(mods)
-                if excluded_count > 0:
-                    print(f"Excluded {excluded_count} mods from {exclude_path.name}")
+                # I-036: say exactly what got dropped and where the list came
+                # from. The old line printed a bare count, so an auto-loaded
+                # exclude file could silently empty a run and look like "no
+                # scripts found".
+                if hit:
+                    print(f"[!] Excluded {len(hit)} of {before_count} mods "
+                          f"via {exclude_path}: {', '.join(hit)}")
+                if not mods and before_count:
+                    print("[!] That leaves NOTHING to process. Edit the exclude "
+                          "file, or pass --exclude with a different one.")
         except Exception as e:
             print(f"Warning: Could not read exclude file: {e}")
 

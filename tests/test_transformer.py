@@ -422,6 +422,42 @@ def test_a_second_fix_pass_changes_nothing(tmp_path, name):
     assert second_modified is False
 
 
+# The shape the corpus gate caught: an object cache ALAO inserted on pass 1 is
+# a nil source on pass 2, so --fix-nil wraps its first use in an `if` and the
+# transform is not a fixpoint. speed.script and 23 other GAMMA files
+# (20260919-192746-gamma-i046, --fix --fix-debug --fix-nil; the gen-3 baselines
+# ran --fix only, which is why nobody had seen it). The guard is also useless
+# as written: it protects speeds[0] and leaves the next three lines to crash on
+# the same nil.
+NIL_GUARD_ON_OUR_OWN_CACHE = """\
+local speeds = {}
+
+local function actor_on_first_update()
+    speeds[0] = db.actor:get_actor_run_coef()
+    speeds[1] = db.actor:get_actor_runback_coef()
+    speeds[2] = db.actor:get_actor_sprint_koef()
+    speeds[3] = db.actor:get_actor_jump_speed()
+end
+"""
+
+
+@pytest.mark.xfail(strict=True, reason="--fix-nil is not a fixpoint over the caching "
+                                       "families: pass 2 guards the `local actor = db.actor` "
+                                       "that pass 1 inserted (24 GAMMA files)")
+def test_fix_nil_does_not_re_guard_a_cache_we_inserted(tmp_path):
+    path = tmp_path / "speed.script"
+    path.write_text(NIL_GUARD_ON_OUR_OWN_CACHE, encoding="utf-8")
+
+    ASTTransformer().transform_file(path, backup=False, fix_nil=True)
+    after_first = path.read_text(encoding="utf-8")
+    ASTTransformer().transform_file(path, backup=False, fix_nil=True)
+    after_second = path.read_text(encoding="utf-8")
+
+    assert after_second == after_first, (
+        f"--- after first ---\n{after_first}\n--- after second ---\n{after_second}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # I-044: --fix-debug makes the transform non-idempotent on this shape
 # ---------------------------------------------------------------------------

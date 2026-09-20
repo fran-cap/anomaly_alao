@@ -21,6 +21,7 @@ pytest's `tmp_path`.
 | `test_patterns/` | One module per pattern family from the README tables |
 | `test_transformer.py` | `SourceEdit` overlap resolution, enabler groups, encoding, `.alao-bak`, idempotence |
 | `test_cli.py` | Subprocess runs of `stalker_lua_lint.py` end to end |
+| `test_capture_gate.py` | G9 (I-046), `tools/capture_gate.py`: no inserted `local` may bind over a live outer name. Every clean-at-head case is paired with a run where the fixed hole is put back, so the gate is validated against known positives |
 | `test_corpus_smoke.py` | Read-only pass over the vanilla Anomaly scripts (`--corpus` only) |
 | `test_microbench.py` | `tools/microbench.py` + the `bench/` snippet pairs. Fast half always runs; the slow half (`--bench` / `-m slow`) fails when a GREEN pattern has no bench pair |
 
