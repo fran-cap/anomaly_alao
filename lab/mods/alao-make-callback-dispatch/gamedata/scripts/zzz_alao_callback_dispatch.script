@@ -1,0 +1,201 @@
+-- ALAO: axr_main.make_callback -- sorted-pairs dispatch -> cached sorted array.
+-- Idea I-043 (measurement) / I-051 (delivery).  No file in the game is replaced;
+-- this mod adds one script and swaps four functions on the axr_main module table
+-- at on_game_start.
+--
+-- WHAT IS SLOW
+--
+-- Every scripted callback in the game funnels through one function:
+--   _g.SendScriptCallback(name, ...) -> axr_main.make_callback(name, ...)
+-- and the shipped make_callback walks its listener table with
+--   spairs(intercepts[name], sort_func_values_ascend)
+-- In GAMMA `spairs` is not the table.sort one from _g.script: the loose
+-- `_g_patches.script` overwrites _G.spairs, and for any order function other
+-- than sort_func_keys_ascend it returns `hspairs`, a min-heap.  So every single
+-- dispatch allocates a K-element keys array, a `safe_order` closure and an
+-- iterator closure, heapifies in O(K), and then pays an O(log K) sift-down per
+-- listener where every comparison is two nested Lua calls.  All of that to walk
+-- a table whose contents only change when somebody registers or unregisters.
+--
+-- `actor_on_update` alone has 73-125 listeners and fires once per frame.
+--
+-- WHAT THIS DOES
+--
+-- Keep the sorted order in an array and rebuild it when the table changes.
+-- `order_list[name]` is REPLACED, never edited in place, so a dispatch that is
+-- already running keeps iterating its own snapshot -- which is exactly what
+-- hspairs gives you, since it collects its keys before the first listener runs.
+-- Invalidation is lazy (`order_list[name] = nil`), so the ~1800 registrations
+-- that happen at load cost one sort per callback name, not one per registration.
+--
+-- WHAT IT DOES NOT CHANGE
+--
+-- Order (registration order: the Kutez priority system's `next_index` is a
+-- per-name monotone counter, so ties are impossible), arguments, table/userdata
+-- listeners dispatched as `t[name](t, ...)`, the three printf+callstack error
+-- paths, and the no-pcall behaviour where a listener that errors aborts the
+-- whole pass.
+--
+-- UNREGISTRATION during a dispatch is the subtlety that matters, and it is
+-- handled: hspairs re-reads `t[key]` on every step and skips an entry whose
+-- value has gone nil, so a listener unregistered by an EARLIER listener in the
+-- same pass never fires.  That is the `t[f] ~= nil` guard below.  A 1000-seed
+-- differential fuzz against the real dispatcher, with listeners unregistering
+-- themselves and each other mid-pass, finds zero divergence.
+--
+-- THE DIVERGENCE, stated plainly.  hspairs DRAINS A HEAP, and its comparator
+-- reads the table's current values.  So the moment a listener registers or
+-- unregisters anything for the callback that is currently dispatching, the heap
+-- invariant is broken and the order of the listeners that have not run yet
+-- becomes an artifact of the heap, not the priority order anybody declared.
+-- This patch, walking a frozen sorted array, keeps the priority order.  Because
+-- the order changes WHEN a listener is visited, and a listener unregistered
+-- mid-pass is skipped only if that happened before its visit, the set of
+-- listeners that ran in that one pass can differ too.  From the next dispatch
+-- on the two agree again, and the printed log lines are identical in every
+-- case.  Matching the shipped order bit for bit would mean reimplementing the
+-- heap, i.e. keeping the work this patch exists to remove.
+--
+-- Measured over 600 randomised scenarios built to churn mid-pass as hard as
+-- possible (an upper bound on pathology, not a frequency in a real frame):
+-- unregister mid-pass 480 identical / 96 reordered / 24 different set;
+-- register mid-pass 140 / 460 / 0.  With no mutation during the pass -- which
+-- is every listener in the game, almost every frame -- 600/600 identical.
+--
+-- See the mod README and tests/test_i051_dispatch_delivery.py in the ALAO repo.
+--
+-- MEASURED: 712.6 -> 602.5 us of script time per frame (-110 us, -15.5%), 4x120 s
+-- per arm, standing still on one save, GAMMA 0.9.4 + full ALAO.  See the README.
+
+local VERSION = "1.0"
+
+local installed   = false
+local intercepts  = nil          -- axr_main's file-local, fished out via debug
+local order_list  = {}
+local orig_make, orig_add, orig_set, orig_unset
+
+-- `intercepts` is a `local` at file scope in axr_main.script, not a field of the
+-- module table, so the only way in is as an upvalue of one of the functions that
+-- close over it.  Lua 5.1's debug.getupvalue hands it over.
+local function find_intercepts(fn)
+	if not (debug and debug.getupvalue) then return nil, "no debug library" end
+	if type(fn) ~= "function" then return nil, "make_callback is not a function" end
+	for i = 1, 60 do
+		local ok, n, v = pcall(debug.getupvalue, fn, i)
+		if not ok or n == nil then break end
+		if n == "intercepts" and type(v) == "table" then return v end
+	end
+	return nil, "no `intercepts` upvalue on axr_main.make_callback"
+end
+
+local function build(name)
+	local t = intercepts[name]
+	if (not t) then
+		order_list[name] = nil
+		return nil
+	end
+	local keys, n = {}, 0
+	for k in pairs(t) do
+		n = n + 1
+		keys[n] = k
+	end
+	table.sort(keys, function(a, b) return t[a] < t[b] end)
+	order_list[name] = keys
+	return keys
+end
+
+local function dispatch(name, ...)
+	local t = intercepts[name]
+	if (t) then
+		local list = order_list[name] or build(name)
+		for i = 1, #list do
+			local func_or_userdata = list[i]
+			if (t[func_or_userdata] ~= nil) then
+				if (type(func_or_userdata) == "function") then
+					func_or_userdata(...)
+				elseif (func_or_userdata[name]) then
+					func_or_userdata[name](func_or_userdata, ...)
+				end
+			end
+		end
+	else
+		-- unknown callback name: hand it to the stock function so the printf and
+		-- the callstack() are byte-identical to what they always were
+		orig_make(name, ...)
+	end
+end
+
+-- Anything that mutates intercepts must go through these three.  Nothing in the
+-- live script set binds them to a local (censused: 5 references, all
+-- `axr_main.f(...)` at call time), so swapping the module fields catches every
+-- caller.
+local function on_add(name)
+	orig_add(name)
+	order_list[name] = nil
+end
+
+local function on_set(name, func_or_userdata)
+	orig_set(name, func_or_userdata)
+	order_list[name] = nil
+end
+
+local function on_unset(name, func_or_userdata)
+	orig_unset(name, func_or_userdata)
+	order_list[name] = nil
+end
+
+-- For anything that reaches `intercepts` behind our back -- the only thing in
+-- the world that does is ALAO's own profiler in per-listener mode, which swaps
+-- listener keys for wrappers via debug.getupvalue.  Call this afterwards.
+function invalidate(name)
+	if name then
+		order_list[name] = nil
+	else
+		order_list = {}
+	end
+end
+
+function alao_dispatch_state()
+	return { installed = installed, version = VERSION,
+	         intercepts = (intercepts ~= nil) }
+end
+
+local function install()
+	if installed then return "already installed" end
+	if type(axr_main) ~= "table" then return "no axr_main module" end
+
+	local it, why = find_intercepts(axr_main.make_callback)
+	if not it then
+		-- leave the game exactly as it was rather than guess
+		return "not installed: " .. tostring(why)
+	end
+	intercepts = it
+
+	orig_make  = axr_main.make_callback
+	orig_add   = axr_main.callback_add
+	orig_set   = axr_main.callback_set
+	orig_unset = axr_main.callback_unset
+	if type(orig_add) ~= "function" or type(orig_set) ~= "function"
+		or type(orig_unset) ~= "function" then
+		intercepts = nil
+		return "not installed: axr_main callback_add/set/unset missing"
+	end
+
+	axr_main.make_callback  = dispatch
+	axr_main.callback_add   = on_add
+	axr_main.callback_set   = on_set
+	axr_main.callback_unset = on_unset
+	installed = (axr_main.make_callback == dispatch)
+	return installed and "installed" or "not installed: assignment did not take"
+end
+
+-- axr_main.on_game_start() walks every *.script in the scripts root and calls
+-- on_game_start() if the module has one, so nothing has to register this.
+-- The file name matters for exactly one reason: ALAO's profiler ships as
+-- `zzz_alao_profiler.script` and WRAPS make_callback, so it has to run after
+-- this one or its wrapper gets clobbered.  `zzz_alao_callback_dispatch` sorts
+-- first.  Nothing else in the game cares.
+function on_game_start()
+	local ok, res = pcall(install)
+	printf("ALAO|callback_dispatch|v%s|%s", VERSION, ok and tostring(res) or ("error: " .. tostring(res)))
+end
