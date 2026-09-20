@@ -321,6 +321,10 @@ def patch(text: str) -> str:
 
 
 def main(argv):
+    if len(argv) < 2 or argv[1].startswith("-"):
+        # it used to happily write a 65 KB file called "--help"
+        print("usage: i050b_injuries_patch.py <out.script> [src.script]")
+        return 2
     out = Path(argv[1])
     src = Path(argv[2]) if len(argv) > 2 else SRC
     text = src.read_bytes().decode("cp1251")
