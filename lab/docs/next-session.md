@@ -1,110 +1,57 @@
-# Next session: generation 3
+# Next session: generation 4 (profile-guided)
 
-Written 2026-09-11 at the end of the gen-2 run. Read this, `lab/coord/README.md` and
-`beam-ideas.md` sections 8 and 9 before starting anything.
+Written 2026-09-19 at the end of the gen-3 run. Read this, `lab/coord/README.md`,
+`lab/framework/README.md` ("Measuring a rewrite in script-ms") and `beam-ideas.md` section 10 first.
 
 ## Locked in (do not re-measure)
 
-| arm | fps avg | 1% low | p99 |
-|---|---|---|---|
-| stock GAMMA, `gammabaseline` save, standing still | 209.7 | 166.9 | 5.53 ms |
-| full ALAO (gen-1 code) = merged mod rewrites on top + rewritten vanilla `scripts.db0` at bottom | 215.2 | 170.7 | 5.41 ms |
+| arm (gammabaseline save, standing still) | script us/frame | fps avg |
+|---|---|---|
+| full ALAO = `ref3-alao-b` on top + `ref3-vanilla-bottom` at the bottom | 712.6 (cv 1.2%, 4x120 s) | 213 |
+| full ALAO + I-043 `make_callback` array dispatch (`agent-I043-b`) | 602.5 (cv 2.5%) | 210 (noise) |
 
-Gen-2 added two deltas on top of full ALAO, both null and both predicted null from site arithmetic
-before they ran: I-021 +0.35% (`20260911-153413-I-021-392bd3`), I-040 +0.09%
-(`20260911-164718-I-040-ec27c2`). Per-round spread on identical arms is 203-222 fps. The
-standing-still FPS capture cannot resolve anything below roughly 2% of a frame, and every
-per-frame rewrite ALAO can do today is worth ~0.01%. **Do not queue an FPS delta for a pattern
-rewrite again unless the site arithmetic says >0.5% of frame time.**
+Older fps baselines (stock 209.7, full ALAO 215.2) stand, with the caveat that the gen-1/2 bottom
+overlay carried a db-derived `bind_monster.script` over GAMMA's loose patched one.
 
-(Bar history, user decisions on 2026-09-19: 1% -> 0.5% because we are after gradual gains, then restated
-in absolute terms: **the bar is 25 us of script time saved per frame** on the `gammabaseline` save (0.5% of
-the 4770 us frame it was derived from). Microseconds are additive across ideas, are what the I-048 profiler
-reads directly, and do not move when the frame time does (other hardware, another scene, or our own earlier
-wins). Quote every saving as us/frame first, percent second. FPS cannot resolve under ~100 us, so anything
-between 25 and 100 us is measured in script-ms through the profiler.)
+## The rules now
 
-Reference overlays `lab/coord/overlays/ref-alao-merged-b` and `vanilla-db-bottom` were built from
-gen-1 code and no longer match `--fix` output. Rebuild them from a fresh integration corpus run
-before the first in-game request of gen-3 (`build_overlay.py --work <fix tree>`).
+- **Bar: an idea goes in-game when site arithmetic (or the listener ranking) says >= 25 us of script
+  time saved per frame.** Absolute, set by the user. Quote us/frame first, percent second.
+- **Instrument: the I-048 profiler, not fps.** Request key `profiler_overlay`
+  (`lab/coord/overlays/alao-profiler`, or `alao-profiler-listeners` for per-listener attribution, which
+  adds ~124 us/frame of its own). Protocol: **4 repeats x 120 s, round 1 of each arm dropped**
+  (`script_ms_per_frame_warm`). Launches buy certainty, minutes do not (49-run analysis, section 10).
+  FPS is a secondary readout and cannot see under ~100 us.
+- Live copy of a script = top enabled mod, else loose `Anomaly/gamedata/scripts` (66 files), else db.
+  Run `build_overlay.py` from the main checkout.
+- Gates G4-G9 as before; G9 is now built into `tools/corpus_run.py` (`captures` in results.json).
+- If the runner code changed, the user must restart `fps_runner.py`; a running runner keeps old code.
+- Create agent worktrees from the lab branch head, and check `git log -1` in each before starting.
 
-## What gen-2 established (the short version)
+## The gen-4 beam
 
-1. **Reach, not speed, is the limit.** 74 of 103 live vanilla per-frame bodies have zero
-   actionable findings; the hot live code sits one hop out from the name-based per-frame
-   classifier (`axr_main.make_callback`, `xr_logic.pick_section_from_condlist`). Two agents hit
-   this wall independently (I-041, I-005).
-2. **The safety gates are blind to a whole bug class.** Three pre-existing silent-miscompile bugs
-   in shipped GREEN caching were found by agents reading their own diffs. All three compile and
-   are idempotent. Any audit built on grep or difflib under-reports; the scope-aware scanner
-   (`lab/tools/i021_capture_scan.py`) is the only method that found all of them.
-3. **The instrument is wrong for the question.** FPS resolves the frame; ALAO changes the script
-   slice of the frame. The engine exposes `profile_timer` to Lua (`lua_help.script:1200`), so
-   script time can be measured directly in-game.
-4. **Report noise is largely gone** (GAMMA findings 15060 -> 10688 with byte-identical output),
-   which makes the remaining RED / YELLOW families worth reading again.
+| Idea | Deciding question | Instrument |
+|---|---|---|
+| **I-049** shared throttled dispatcher for `drx_da_main.script:2734` | 353 per-anomaly `actor_on_update` closures cost ~179 us/frame doing a throttle check each. Does one module-level walker over a due-time array (or bucketed queue) take that under 20 us with identical behaviour? | differential tests offline, then profiler (listener mode before/after) |
+| **I-050** top single listeners | `demonized_ledge_grabbing.script:443` 142 us and `zzz_player_injuries.script:1503` 74 us, every frame, standing still. What does plain `--fix` buy inside them, and what does a throttle / early-out buy? | microbench the bodies, then profiler |
+| **I-051** deliver I-043 | Package the dispatch patch as a standalone mod against the stock loose `axr_main.script` and draft the upstream PR (lines are the Kutez priority patch, xray-monolith PR #339). Reproduce the delta on the stock, non-ALAO baseline. **Publishing anywhere is the user's call.** | profiler |
+| **I-052** flag-combination fixpoints | Fix `--fix-nil` re-guarding inserted caches (24 violations) and the `--fix --fix-debug` two-pass case; add a `--fix --fix-debug --fix-nil` run to the integration gate. | corpus |
+| **I-053** (new, unregistered) a moving-scene save | Everything so far is standing still in a quiet spot, which starves npc/monster/squad callbacks. A second locked scene (scripted walk or a busy hub) would say whether the ranking generalises. | profiler A/A first |
 
-## The gen-3 beam: five agents
+Also worth asking once I-049 is measured: is "callback closure registered from a binder constructor /
+per-object init" detectable statically? That would be ALAO's first profile-motivated RED pattern.
 
-Pick these, one agent each, own worktree, `ALAO_AGENT` set. Each idea's entry in `ideas.json`
-has the hypothesis, change and measure; the line below is the deciding question.
+## Organizer notes (carried over, still true)
 
-| Agent | Idea | Deciding question | Instrument |
-|---|---|---|---|
-| A | **I-048 script-side profiler harness** (new) | Can a `profile_timer` wrapper around `axr_main.make_callback` dispatch (and the actor/NPC update binders) report per-callback Lua ms per frame with <5% run-to-run spread on the standing-still save? If yes, every later rewrite is measured in script-ms, not fps. | in-game, `game` lock, needs its own overlay mod that only adds the profiler; baseline = full ALAO |
-| B | **I-046 shadowing-assertion gate** | Turn `i021_capture_scan.py` into a `corpus_run.py` gate (G9) and a pytest guard that fails on the `18756a9` and `tasks_fetch` repros at `bae4b0c`. Then extend it from cache declarations to every insertion ALAO makes (`local mfloor = ...`, `local n = #t`, sqrt aliases). | corpus, no game |
-| C | **I-042 call-graph-aware per-frame classifier** | Propagating per-frame status one hop along same-file and `module.func` edges: how many interpreted functions enter the set, and do the I-040 / I-021 / debug-statement site counts inside it rise? Include the two `ENGINE_NYI_METHODS` gaps (`section_name`, `profile_name`). Report-only, like I-013. Run the census on GAMMA mods too, not only vanilla (I-041 was vanilla-only). | corpus, no game |
-| D | **I-043 `axr_main.make_callback` dispatch** | Microbench the `spairs` dispatcher shape (pairs + `table.sort` + closure per call) against a sorted parallel array at 5 / 20 / 60 listeners, interpreted. If >2x, hand-patch `axr_main.script` as a one-off overlay and measure with agent A's profiler (fps as a fallback only). Not a table-driven pattern; needs its own transform or stays a hand patch. | microbench first; in-game only via A |
-| E | **I-044 `--fix-debug` in-game arm** | Count `debug_statement` findings inside live per-frame bodies on GAMMA mods (vanilla has 34; the mod side is unknown). If the count times per-call cost clears 0.5% of frame time, build overlays from a `--fix --fix-debug` run of the merged code and queue one delta with 5 repeats. Otherwise report the count and stop. | corpus, then maybe game |
-
-Do not start **I-017** (corpus-scale differential execution) as an agent this generation: it is
-scored 9.0 but is a multi-day harness, and I-046 catches the shape I-017 cannot. Scope it as a
-plan document instead, if anyone has spare time.
-
-## The loop per idea (unchanged, with gen-2 additions)
-
-1. **Lua first, offline.** `tools/microbench.py --pattern <name>` with an `--iters` sweep; quote the
-   K at which G2 passes; never quote a number taken while the `game` lock is held (ratios drop
-   20-75% during a capture). Validate any new scanner or census tool against a **known positive**
-   before quoting its zero.
-2. **Corpus gates** under the `corpus` lock, both corpora (`extracted/gamma`, `extracted/vanilla_db`):
-   G4 0 compile failures, G5 0 idempotence, G6 within 10%, G7 subset, G8 tests green, and from
-   gen-3 **G9: 0 captures from `lab/tools/i021_capture_scan.py`** on the fix tree. Baselines are
-   `20260911-175058-gamma-integ-gen2` and `20260911-175201-vanilla-integ-gen2`. Report the
-   `jit_mode` split and the live-after-shadowing count.
-3. **In-game only through the profiler (agent A) or when site arithmetic clears 0.5% of frame time.**
-
-## Organizer notes
-
-- Run pytest with `-p no:cacheprovider --basetemp=<scratch>`; the shared temp dir throws
-  PermissionError when several agents run the suite at once.
-- Agents write scratch files under a per-agent subdirectory of the scratchpad.
-- The Bash tool's 10-minute cap kills backgrounded lock waits; launch long `coord run` jobs
-  detached (PowerShell `Start-Process`) and Git Bash rewrites `/c` to `C:/`, so pass `cmd /c` via
-  PowerShell, not bash.
-- Merge order that was conflict-light in gen-2: docs and report-only branches first, then the
-  analyzer branches; conflicts were additive in `reset()` and `_analyze_repeated_calls_in_scope()`.
-- `corpus_compare.py` warns "different corpora" for vanilla runs because the baseline was labelled
-  `vanilla-1.5.3`; it is a label mismatch only.
-
-## Kickoff prompt for the next session
-
-> Read lab/docs/next-session.md, lab/coord/README.md and beam-ideas.md sections 8-9. Spin up a
-> team of Opus agents (one per idea, own worktree, `ALAO_AGENT` set) on the gen-3 beam: I-048
-> (script-side profiler harness), I-046 (shadowing-assertion gate, G9), I-042 (call-graph
-> per-frame classifier, GAMMA census included), I-043 (make_callback dispatch, microbench then
-> hand patch measured by the profiler), I-044 (--fix-debug arm, count first). Each agent validates
-> its tools against a known positive, runs corpus gates on both corpora under the corpus lock, and
-> queues in-game work only through the profiler or when site arithmetic clears 0.5% of a frame. You
-> are the organizer: rebuild the reference overlays from a fresh integration run first, relay
-> cross-cutting findings, keep ideas.json / beam-ideas.md under the ideas lock, merge on an
-> integration branch with the full suite, both corpus runs and the capture scan as the gate, and
-> close with verdicts and the single deciding fact per idea. Do not re-measure the locked baselines.
+- pytest with `-p no:cacheprovider --basetemp=<scratch>`; agents use per-agent scratch subdirectories.
+- Bash tool 10-minute cap kills lock waits; launch long `coord run` jobs detached.
+- Corpus jobs wait on the `game` lock, so agents starve while the runner drains a queue; schedule the
+  in-game block, or accept that corpus gates land at integration.
+- Merge order that was conflict-free in gen-3: I-048, I-044, I-042, I-043, I-046.
+- Files are CRLF; conflict-resolution regexes need `\r?\n`.
 
 ## Housekeeping still open
 
-- `extracted/_work` (236 MB) and `lab/coord/overlays/agent-*` are deletable; `agent-I040-b` holds
-  broken output and must not be reused.
-- `lab/data/runs` (686 MB) is the raw FPS evidence; gitignored on purpose, archive rather than delete.
-- I-014 (stale shipped report examples) and I-036 (`alao_exclude.txt` ships with VANILLA_SCRIPTS)
-  are half-hour fixes nobody has picked up.
+- `extracted/_work` and `lab/coord/overlays/agent-*`, `ref-alao-*`, `vanilla-db-bottom` (stale) are deletable.
+- `lab/data/runs` is the raw evidence; gitignored on purpose, archive rather than delete.
+- Agent worktrees under `.claude/worktrees/` and branches `agent/gen3-*` can go once the merge is pushed.

@@ -1,0 +1,23 @@
+{
+  "run_id": "20260919-201238-vanilla-integ-gen3",
+  "alao_commit": "71ac1d0e54ae338927ca51160731d1f8dcb6056b",
+  "alao_dirty": true,
+  "corpus": "vanilla-db",
+  "corpus_files": 826,
+  "flags": [
+    "--report",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260919-201238-vanilla-integ-gen3\\alao-report.json",
+    "--timeout",
+    "10.0",
+    "--cache-threshold",
+    "4",
+    "--exclude",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260919-201238-vanilla-integ-gen3\\empty-exclude.txt",
+    "|",
+    "--fix"
+  ],
+  "started": "2026-09-19T20:12:38",
+  "finished": "2026-09-19T20:13:16",
+  "status": "done",
+  "notes": ""
+}

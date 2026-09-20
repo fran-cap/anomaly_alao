@@ -131,7 +131,7 @@ Use `py -3.12` on this machine (it has `luaparser` 4.2.0, `jinja2`, `pytest`, `l
 LuaJIT 2.0 and is the compile-checker / executor for rewritten Lua; import it as `lupa.luajit20`.
 
 ```bash
-py -3.12 -m pytest -q                 # unit + CLI tests: 473 passed, 7 skipped, 4 xfailed (2026-09-11, gen-2 merge)
+py -3.12 -m pytest -q                 # unit + CLI tests: 530 passed, 7 skipped, 6 xfailed (2026-09-19, gen-3 merge)
 py -3.12 -m pytest -q --corpus        # also analyzes the 66 vanilla scripts in the game install, read-only
 py -3.12 -m pytest -q -rx             # print the xfail reasons: each one names a real, unfixed ALAO bug
 py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
@@ -180,7 +180,7 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   - `lab/dashboard/server.py --port 8765`: stdlib HTTP dashboard over `lab/data` (Corpus tab is the
     primary view; Ideas beam; in-game Runs). Open http://127.0.0.1:8765.
   - `lab/data/ideas.json` + `lab/docs/beam-ideas.md`: the ranked beam of ALAO improvement ideas
-    (47 as of 2026-09-11 after gen-2; gen-3 beam = I-048 profiler, I-046 gate, I-042, I-043, I-044, see lab/docs/next-session.md). Score, keep or prune ideas there; new experiments should
+    (51 as of 2026-09-19 after gen-3; gen-4 beam is profile-guided: I-049 drx_da_main dispatcher, I-050 top listeners, I-051 ship make_callback patch, I-052 flag fixpoints, see lab/docs/next-session.md). Score, keep or prune ideas there; new experiments should
     trace back to an idea id.
   - `lab/framework` (`aalo` package) + `lab/tools`: in-game A/B FPS harness that launches GAMMA via
     MO2 and captures frametimes (PresentMon if installed, psutil fallback). Needs an elevated

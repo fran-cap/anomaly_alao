@@ -204,11 +204,11 @@
       "measure": "The shipped example's findings_by_pattern matches a fresh corpus run within noise, or the files are gone.",
       "expected_gain": "med",
       "risk": "low",
-      "status": "proposed",
+      "status": "done",
       "score": 7.4,
       "parent": null,
       "generation": 1,
-      "notes": "Live counts now come from data/corpus/20260910-222240-gamma-analyze, so the regeneration input already exists."
+      "notes": "Live counts now come from data/corpus/20260910-222240-gamma-analyze, so the regeneration input already exists. GEN-3 (2026-09-19): Both report examples regenerated at 52260e2 (b424e25)."
     },
     {
       "id": "I-015",
@@ -534,11 +534,11 @@
       "measure": "A run against a folder named VANILLA_SCRIPTS processes its files, and any non-empty exclusion is visible in the output.",
       "expected_gain": "med",
       "risk": "low",
-      "status": "proposed",
+      "status": "done",
       "score": 6.9,
       "parent": null,
       "generation": 1,
-      "notes": "Cheap footgun removal. Found by the corpus agent when the vanilla corpus silently produced zero files."
+      "notes": "Cheap footgun removal. Found by the corpus agent when the vanilla corpus silently produced zero files. GEN-3 (2026-09-19): alao_exclude.txt ships empty, exclusions named on stdout (agent-I046)."
     },
     {
       "id": "I-037",
@@ -621,14 +621,14 @@
       "category": "analyzer",
       "generation": 2,
       "parent": "I-013",
-      "status": "queued",
-      "score": 8.5,
+      "status": "kept",
+      "score": 5.0,
       "risk": "low",
       "expected_gain": "high",
       "hypothesis": "The hot live vanilla code is not in update bodies but in what they call (xr_logic.pick_section_from_condlist 21 abort sites, try_switch_to_another_section 7, determine_section_to_activate 5, trade_manager.update 5, axr_main.make_callback), so every mode-gated decision is gated on the wrong function set.",
       "change": "ast_analyzer.py - after _analyze_trace_aborts(), propagate per-frame status one hop along same-file and module.func call edges, re-run the classifier over the closure. Report-only first, as I-013 shipped.",
       "measure": "Count of interpreted functions entering the per-frame set; whether I-040 / I-021 site counts rise inside it.",
-      "notes": "Proposed by agent-I041 (vanilla census, lab/reports/vanilla-per-frame-census.md, commit 759956b). Independently required by I-005 (agent-I005): the intra-procedural classifier cannot gate rewrites. Top of the gen-3 queue. Also: ENGINE_NYI_METHODS lacks section_name and profile_name, so bodies using them classify as compiled (agent-I021); one-line fix to do alongside. Gen-3 scope: run the census on GAMMA mods as well as vanilla."
+      "notes": "Proposed by agent-I041 (vanilla census, lab/reports/vanilla-per-frame-census.md, commit 759956b). Independently required by I-005 (agent-I005): the intra-procedural classifier cannot gate rewrites. Top of the gen-3 queue. Also: ENGINE_NYI_METHODS lacks section_name and profile_name, so bodies using them classify as compiled (agent-I021); one-line fix to do alongside. Gen-3 scope: run the census on GAMMA mods as well as vanilla. GEN-3 (2026-09-19): KEPT report-only; do not wire propagation into ALAO. local function + RegisterScriptCallback was invisible to the classifier (36 of 145 live per-frame registrations), fixed. One hop doubles the per-frame set (340 -> 795 bodies) but all GREEN rewrites inside it are worth 1-3 us/frame against a 25 us bar: per-site value, not reach, is the limit."
     },
     {
       "id": "I-043",
@@ -636,14 +636,14 @@
       "category": "transform",
       "generation": 2,
       "parent": "I-041",
-      "status": "queued",
-      "score": 8.0,
+      "status": "kept",
+      "score": 9.0,
       "risk": "med",
       "expected_gain": "high",
       "hypothesis": "make_callback does a pairs walk plus a type() test per listener for every SendScriptCallback, i.e. per online NPC per frame via npc_on_update; likely the highest-frequency Lua function in the game, and it aborts its trace on pairs.",
       "change": "Maintain a parallel listener array next to the keyed table and dispatch with a numeric for. Keys are functions/userdata, so I-005 cannot derive it; own pattern or a measured hand patch.",
       "measure": "Microbench the dispatcher at 5/20/60 listeners interpreted and compiled, then an FPS delta arm (it is in the standing-still frame chain).",
-      "notes": "Proposed by agent-I041. agent-I005: make_callback goes through spairs, which does pairs + table.sort + a closure per dispatch; not matchable by any table-driven pattern. Gen-3 scope: microbench the spairs dispatcher at 5/20/60 listeners first; measure any hand patch with I-048, fps only as fallback."
+      "notes": "Proposed by agent-I041. agent-I005: make_callback goes through spairs, which does pairs + table.sort + a closure per dispatch; not matchable by any table-driven pattern. Gen-3 scope: microbench the spairs dispatcher at 5/20/60 listeners first; measure any hand patch with I-048, fps only as fallback. GEN-3 (2026-09-19): KEPT as hand patch / upstream PR, not a transform (1 of 99 live spairs sites is per-frame). Live dispatcher is the hspairs min-heap from loose _g_patches.script, not _g.script spairs. In-game 20260919-192703-I-043-3f2729 (4x120 s, profiler): script time 712.6 -> 602.5 us/frame, -110 us (-15.5%), no overlap between arms; fps unmoved (-1.4% avg, +3.4% 1% low, noise). make_callback funnels every SendScriptCallback (7.5 dispatches/frame) and actor_on_update really has ~425 listeners on the save (353 are per-anomaly closures from drx_da_main.script:2734)."
     },
     {
       "id": "I-044",
@@ -651,14 +651,14 @@
       "category": "experiment",
       "generation": 2,
       "parent": "I-041",
-      "status": "queued",
-      "score": 7.0,
+      "status": "pruned",
+      "score": 3.0,
       "risk": "low",
       "expected_gain": "med",
       "hypothesis": "34 debug_statement findings sit inside the 103 live vanilla per-frame bodies (mod-side count unknown, likely larger), each a call plus concatenation and sometimes game.translate_string; plain --fix leaves them.",
       "change": "No code. Build overlays from a --fix --fix-debug run on both corpora and queue a delta vs the full-ALAO baseline.",
       "measure": "FPS delta with 5 repeats; the 1% low must move with the avg.",
-      "notes": "Proposed by agent-I041; cheapest untested lever in the census. Gen-3 scope: count debug_statement sites in live per-frame bodies on GAMMA mods first; queue the delta only if the arithmetic clears 1% of frame time."
+      "notes": "Proposed by agent-I041; cheapest untested lever in the census. Gen-3 scope: count debug_statement sites in live per-frame bodies on GAMMA mods first; queue the delta only if the arithmetic clears 1% of frame time. GEN-3 (2026-09-19): PRUNED (in-game arm). 57 debug sites in live per-frame bodies; all 44 printf are guarded or conditional, 3 printd reached standing still; 0.2-19.6 us/frame, under the 25 us bar. Found: --fix --fix-debug is not idempotent on sr_monster.script (strict xfail)."
     },
     {
       "id": "I-045",
@@ -681,14 +681,14 @@
       "category": "safety",
       "generation": 2,
       "parent": "I-017",
-      "status": "queued",
-      "score": 8.5,
+      "status": "kept",
+      "score": 9.0,
       "risk": "low",
       "expected_gain": "high",
       "hypothesis": "All three gen-2 silent-rewrite bugs compiled and were idempotent; the tasks_fetch.script capture (inserted local actor = db.actor shadowing a parameter named actor in a nested closure) would also pass a differential run because the two values coincide under any stub. A scope-aware assertion catches this class directly.",
       "change": "tools/corpus_run.py (and a pytest guard): for every zero-width insertion edit the transformer emits, resolve the function it lands in and assert the introduced name is not a local, parameter or upvalue of any ancestor scope, nor read later in the same scope tree from an outer binding. Prototype exists as scratchpad/agent-I021/capture4.py.",
       "measure": "Zero violations on both corpora at the merged head; must flag the 18756a9 repro and the tasks_fetch site when run against bae4b0c.",
-      "notes": "Proposed by agent-I021 after its own zero-capture scans proved to be artifacts. Cheaper and narrower than I-017; do both. Prototype merged as lab/tools/i021_capture_scan.py (sys.path fixed to the repo root); at the merged head on both integration fix trees: 788 originals, 1203 inserted declarations, 0 captures. Remaining work: make it a corpus_run.py gate and a pytest guard. Gen-3 scope: G9 in corpus_run.py plus a pytest guard on the two repros; extend from cache declarations to every insertion ALAO makes."
+      "notes": "Proposed by agent-I021 after its own zero-capture scans proved to be artifacts. Cheaper and narrower than I-017; do both. Prototype merged as lab/tools/i021_capture_scan.py (sys.path fixed to the repo root); at the merged head on both integration fix trees: 788 originals, 1203 inserted declarations, 0 captures. Remaining work: make it a corpus_run.py gate and a pytest guard. Gen-3 scope: G9 in corpus_run.py plus a pytest guard on the two repros; extend from cache declarations to every insertion ALAO makes. GEN-3 (2026-09-19): KEPT, shipped as G9 (tools/capture_gate.py, corpus_run gate, 35 tests). Found a fourth shipped silent miscompile on its first run: cache names could shadow a file GLOBAL (4 live per-frame sites, factionID_hud_mcm tg = time_global() became tg = tg). Fixed (file globals join the taken-name set). 8 captures at the pre-fix code, 0 at head on ~1200 insertions. Also I-036 done here."
     },
     {
       "id": "I-048",
@@ -696,14 +696,74 @@
       "category": "lab",
       "generation": 3,
       "parent": "I-010",
-      "status": "queued",
-      "score": 9.0,
+      "status": "kept",
+      "score": 9.5,
       "risk": "med",
       "expected_gain": "high",
       "hypothesis": "FPS resolves the whole frame (+-2% noise, 203-222 fps spread on identical arms) while every ALAO rewrite changes only the script slice, so all per-frame deltas read null. The engine exposes profile_timer (lua_help.script:1200, start/stop/time) to Lua, so script time per callback can be measured directly, at far higher sensitivity.",
       "change": "lab/framework: an overlay mod that wraps axr_main.make_callback dispatch (and the actor / NPC update binders) with profile_timer, accumulates per-callback-name totals per frame, and dumps them to the log or a file every N seconds; a parser that turns the dump into per-callback ms/frame with run-to-run spread; fps_runner support for a profiler arm.",
       "measure": "On the standing-still save: run-to-run spread of total script ms/frame (<5% is the target), and per-callback ranking. Then re-measure the I-021 and I-040 overlays in script-ms to see whether the 0.01%-of-frame prediction holds.",
-      "notes": "Registered 2026-09-11 for gen-3 by the organizer. Deciding question: is script-ms per frame stable enough to be an instrument? If yes, I-043 and I-044 are measured with it, not with fps."
+      "notes": "Registered 2026-09-11 for gen-3 by the organizer. Deciding question: is script-ms per frame stable enough to be an instrument? If yes, I-043 and I-044 are measured with it, not with fps. GEN-3 (2026-09-19): KEPT. Script time is 0.71-0.75 ms of the 4.78 ms frame (15.7%), 94% of it actor_on_update. Run-to-run cv of script ms/frame 5.5% cold, 1.2-1.6% with round 1 of each arm dropped (protocol: 4 repeats, drop round 1; 120 s captures are enough). profile_timer = microseconds (calibrated 998 units/ms), instrument 200 ns/call. Per-listener mode (WRAP_LISTENERS) validated in-game in 20260919-193557-I-048-b1325e: 1407 listeners wrapped, +124 us/frame overhead, cv 0.5-2%."
+    },
+    {
+      "id": "I-049",
+      "title": "Shared throttled dispatcher for per-object actor_on_update closures (drx_da_main)",
+      "category": "hand-patch",
+      "generation": 4,
+      "parent": "I-048",
+      "status": "queued",
+      "score": 9.0,
+      "risk": "med",
+      "expected_gain": "high",
+      "hypothesis": "drx_da_main.script:2734 registers one actor_on_update closure per anomaly binder: 353 listeners per frame on the gammabaseline save, 179 us/frame (listener-mode, includes ~70 us instrument), each doing only `if tg < self.on_update_time then return end`. It is the single largest consumer of script time.",
+      "change": "One module-level actor_on_update that walks an array (or a time-bucketed queue) of due anomalies; binders add/remove themselves. Hand patch first, measured with the profiler; then ask whether 'N closures registered from a binder constructor' is a detectable RED report pattern.",
+      "measure": "script us/frame delta with the I-048 profiler, 4x120 s, round 1 dropped. Bar 25 us.",
+      "notes": "From the per-listener run 20260919-193557-I-048-b1325e."
+    },
+    {
+      "id": "I-050",
+      "title": "Profile and patch the top single listeners: demonized_ledge_grabbing (142 us), zzz_player_injuries (74 us)",
+      "category": "hand-patch",
+      "generation": 4,
+      "parent": "I-048",
+      "status": "queued",
+      "score": 8.5,
+      "risk": "med",
+      "expected_gain": "high",
+      "hypothesis": "Two actor_on_update listeners cost 142 and 74 us per frame each, 30% of all script time, every frame, standing still. ALAO's existing findings inside them are the first thing to read; a throttle or an early-out is likely worth more than any pattern rewrite.",
+      "change": "Read both bodies with the ALAO report + jit_mode; try (a) plain --fix output, (b) a hand throttle/early-out; measure each with the profiler in listener mode.",
+      "measure": "per-listener us/frame before/after. Bar 25 us.",
+      "notes": "Listener ranking in lab/docs/beam-ideas.md section 10."
+    },
+    {
+      "id": "I-051",
+      "title": "Ship the make_callback array dispatch: upstream PR / standalone mod",
+      "category": "delivery",
+      "generation": 4,
+      "parent": "I-043",
+      "status": "queued",
+      "score": 8.5,
+      "risk": "low",
+      "expected_gain": "high",
+      "hypothesis": "The -110 us/frame patch touches lines that are already an upstream patch (Kutez priority callbacks, xray-monolith PR #339), so the right home is upstream; a standalone MO2 mod is the interim.",
+      "change": "Package lab/coord/overlays/agent-I043-b axr_main.script as a mod against the stock loose file, with the differential tests; draft the upstream PR text.",
+      "measure": "Differential tests green; profiler delta reproduces on the stock (non-ALAO) baseline.",
+      "notes": "User decides whether/where to publish."
+    },
+    {
+      "id": "I-052",
+      "title": "--fix-nil / --fix-debug are not fixpoints over what --fix inserts",
+      "category": "safety",
+      "generation": 4,
+      "parent": "I-046",
+      "status": "proposed",
+      "score": 7.5,
+      "risk": "low",
+      "expected_gain": "med",
+      "hypothesis": "--fix-nil re-guards the `local actor = db.actor` that --fix inserted (24 GAMMA idempotence violations); --fix --fix-debug needs two passes on sr_monster.script. Both are strict xfails now. The integration gates only run --fix, so flag combinations are ungated.",
+      "change": "Fix both; add a --fix --fix-debug --fix-nil corpus run to the integration gate.",
+      "measure": "G5 0 under every flag combination.",
+      "notes": "Found by agent-I046 and agent-I044."
     }
   ]
 }

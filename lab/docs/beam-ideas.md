@@ -727,3 +727,60 @@ Cross-cutting facts this generation established:
   changes that sit directly in the per-NPC frame chain.
 - **Bench naming hole closed.** `pytest --bench` failed on the base commit because the GREEN
   `append_loop_counter` pattern's bench file was named `counter_append`; renamed.
+
+## 10. Generation-3 results (2026-09-19, five parallel agents)
+
+Five Opus agents, own worktrees, merged on `integrate/gen3`. Suite 530 passed / 7 skipped / 6 xfailed,
+lab 145 passed. Integration gate (`--fix`, quiet box) `20260919-201124-gamma-integ-gen3` and
+`20260919-201238-vanilla-integ-gen3` vs the `-gen3-base` runs at 52260e2: G4 0, G5 0, **G9 0 captures**
+(753 / 449 landed insertions), files modified and edits unchanged (571 / 6493, 217 / 3620), G6 +2% / +9%,
+G7 only `per_frame_callback` +38 and `jit_mode` +29 (report-only, the I-042 `local function` fix).
+
+**The bar changed (user, 2026-09-19): an idea goes in-game when site arithmetic says >= 25 us of script
+time saved per frame.** Absolute on purpose; quote us/frame first, percent second.
+
+| Idea | Verdict | Deciding fact |
+|---|---|---|
+| I-048 script-side profiler | **kept**, it is the instrument now | Script time is 0.71-0.75 ms of the 4.78 ms frame (15.7%); 94% of it is `actor_on_update`. Run-to-run cv of script ms/frame is 5.5% cold and 1.2-1.6% with round 1 of each arm dropped, so the protocol is 4 repeats, drop round 1. `profile_timer` counts microseconds (998 units/ms, calibrated in-game); the instrument costs 200 ns per call. |
+| I-043 `make_callback` dispatch | **kept as a hand patch / upstream PR** | Queue item `20260919-192703-I-043-3f2729`, 4x120 s per arm: **712.6 -> 602.5 us/frame, -110 us (-15.5%)**, no overlap between arms (700-720 vs 588-622). FPS did not move (-1.4% avg, +3.4% 1% low): 110 us is 2.3% of the frame, at the edge of what fps resolves. Not a transform: 1 of 99 live `spairs(` sites is per-frame. |
+| I-046 shadowing gate (G9) | **kept**, shipped | Found a fourth shipped silent miscompile on its first run: a cache name could shadow a **global the file uses** (`tg = time_global()` became `local tg = ...; tg = tg`, 4 live per-frame sites). Fixed. 8 captures at the pre-fix code, 0 at head. |
+| I-042 call-graph classifier | **kept report-only** | One hop doubles the per-frame set (340 -> 795 bodies) and the GREEN findings it adds are worth 1-3 us/frame. Per-site value, not reach, is the limit. Side find: `local function` + `RegisterScriptCallback` was invisible to the classifier (36 of 145 live registrations), fixed. |
+| I-044 `--fix-debug` arm | **pruned** (in-game arm) | 57 debug sites in live per-frame bodies, all 44 `printf` guarded or conditional, 3 `printd` reached standing still: 0.2-19.6 us/frame, under the bar. |
+| I-014, I-036 | done | examples regenerated; `alao_exclude.txt` ships empty. |
+
+Per-listener attribution (queue item `20260919-193557-I-048-b1325e`, `WRAP_LISTENERS`, 1407 listeners,
+listener mode adds ~124 us/frame of instrument): where the `actor_on_update` time actually goes.
+
+| listener | us/frame | calls/frame |
+|---|---:|---:|
+| `drx_da_main.script:2734` (one closure **per anomaly binder**, each only a throttle check) | 179 | 353 |
+| `demonized_ledge_grabbing.script:443` | 142 | 1 |
+| `zzz_player_injuries.script:1503` | 74 | 1 |
+| `actor_effects.script:1640` | 13 | 1 |
+| `fluid_aim.script:33` | 13 | 1 |
+| `liz_inertia_expanded.script:196` | 12 | 1 |
+| `light_gem_mcm.script:20`, `battery_warning.script:39`, `sound_ambient.script:277` | 8-10 each | 1 |
+
+Cross-cutting facts:
+
+- **The script slice is where ALAO competes, and it is 15% of the frame.** Three listeners own half of it.
+  Pattern rewrites are worth 1-3 us; structural fixes to named scripts are worth 50-180 us each. Gen-4 is
+  profile-guided: read the ranking, fix the top, measure in script-us.
+- **`actor_on_update` has ~425 listeners on this save, not 73**: the static census cannot see closures
+  registered per object at runtime. That is also why I-043 saved 110 us where 6-43 us was predicted.
+- **GAMMA patches the game in place.** 66 loose scripts in `Anomaly/gamedata/scripts` beat the db archives
+  (`axr_main`, `_g_patches`, `bind_monster`...). Live copy = top enabled mod, else loose, else db.
+  `build_overlay.py --bottom` ignored the loose layer and shipped a db-derived `bind_monster.script` over
+  the patched one; fixed (d259f77). The gen-1/2 `vanilla-db-bottom` overlay had the same flaw, so the
+  locked 215.2 fps full-ALAO figure was measured with a downgraded monster binder.
+- **The live `spairs` is `hspairs`** (min-heap, `_g_patches.script:1049`), semantically different from
+  `_g.script`'s (it skips a listener unregistered mid-pass). I-005's closing note was about the wrong one.
+- **Capture length does not buy certainty, launches do.** Over 49 runs the launch-to-launch sd of fps is
+  3.1-3.3% whether 60 s or 300 s of each run is used; within-run 30 s windows have sd 0.9 fps. Default is
+  now 120 s captures with more repeats.
+- **Flag combinations are ungated.** `--fix-nil` re-guards what `--fix` inserted (24 idempotence violations)
+  and `--fix --fix-debug` is a two-pass fixpoint on `sr_monster.script`; both are strict xfails (I-052).
+- A claim that `microbench.py` understates allocation-heavy rewrites was made and **retracted** by its
+  author within the run (clean re-bench: 27.6 us, matching the measured per-dispatch saving to 8% at K=12).
+  It stays an untested hypothesis.
+- Worktrees were created off `main`, which was 100+ commits behind; `main` was fast-forwarded on the day.
