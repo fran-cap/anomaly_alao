@@ -270,6 +270,33 @@ def test_mcm_variants_identical(scripts, mcm):
         assert queries(la) == queries(lb), f"engine work diverged at frame {i} with {mcm}"
 
 
+def test_alt_detection_off_keeps_the_original_guard(scripts):
+    """With alternativeClimbDetection off the mod's OWN guard does the skipping.
+
+    The new guard sits in front of it, not instead of it, so a creep that is
+    inside the original's 2 cm tolerance but outside the new guard's 0.1 mm one
+    must still be skipped - by the original guard, in both arms.
+    """
+    a, b = both(scripts, {"alternativeClimbDetection": False})
+    for arm in (a, b):
+        arm.state.ledge_z = 0.4
+    base = dict(cam=(0, 1.70, 0.0), dirv=(0, 0, 1), actor=(0, 0, 0), tg=1000)
+    sa, la = step(a, **dict(base)); sb, lb = step(b, **dict(base))
+    assert sa == sb and queries(la) == queries(lb)
+    for i in range(1, 4):
+        z = 0.005 * i                      # 5 mm a frame: under 2 cm, over 0.1 mm
+        st = dict(cam=(0, 1.70, z), actor=(0, 0, z), tg=1000 + 16 * i)
+        sa, la = step(a, **dict(st))
+        sb, lb = step(b, **dict(st))
+        assert sa == sb, f"diverged at creep {z}"
+        assert la == [] and lb == [], "both arms should skip on the original guard"
+    # and once the creep passes the original's own 2 cm tolerance, both scan
+    st = dict(cam=(0, 1.70, 0.05), actor=(0, 0, 0.05), tg=1100)
+    sa, la = step(a, **dict(st))
+    sb, lb = step(b, **dict(st))
+    assert sa == sb and queries(la) == queries(lb) and lb != []
+
+
 def test_mcm_change_midway_rescans(scripts):
     a, b = both(scripts)
     for arm in (a, b):
