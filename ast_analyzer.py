@@ -4671,7 +4671,8 @@ class ASTAnalyzer:
                             'guarded_statements': guarded,
                             'suggestion': (
                                 f"hoist '{flag}' to module level if the work really is "
-                                f"once-per-session, or drop the latch"
+                                f"once-per-session, or drop the latch - but check "
+                                f"first, the repeat may be load-bearing by accident"
                             ),
                         },
                         source_line=self._get_source_line(decl_line),
