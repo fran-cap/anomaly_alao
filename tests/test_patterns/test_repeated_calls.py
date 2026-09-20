@@ -805,3 +805,151 @@ end
 
 def test_method_cache_survives_a_field_write_on_the_receiver(analyze):
     assert find_one(analyze(OBJ_FIELD_WRITE), "repeated_obj_id()")
+
+
+# ---------------------------------------------------------------------------
+# I-055: the first use inside a multi-line argument list / table constructor
+#
+# _edit_repeated_calls used to bail whenever the line of the first call sat at
+# bracket depth > 0, so every repeated_* finding in a function like
+# demonized_ledge_grabbing.script's checkLedgeGrabbing (5x device(), 8x
+# db.actor, second-hottest listener in the game) was reported and never fixed.
+# The declaration now goes to the start of the statement that contains the use.
+# ---------------------------------------------------------------------------
+
+MULTILINE_ARGS = """
+function f()
+    local pos = vector():set(
+        device().time_delta,
+        device().precache_frame,
+        device().time_delta
+    )
+    local d = device().precache_frame
+    return pos.x, pos.y, pos.z, d
+end
+"""
+
+
+def test_first_use_inside_a_multiline_call_still_caches(analyze, transform, compiles):
+    assert find_one(analyze(MULTILINE_ARGS), "repeated_device")
+    out = transform(MULTILINE_ARGS)
+    assert "local dev = device()" in out
+    # the declaration must sit before the statement, not inside its arguments
+    decl_at = out.index("local dev = device()")
+    stmt_at = out.index("local pos = vector():set(")
+    assert decl_at < stmt_at
+    assert "device()" not in out[stmt_at:]
+    compiles(out)
+
+
+def test_multiline_call_rewrite_behaves_the_same(transform, run_both):
+    run_both(MULTILINE_ARGS, transform(MULTILINE_ARGS), "f")
+
+
+def test_multiline_call_rewrite_is_idempotent(transform, write_script):
+    once = transform(MULTILINE_ARGS)
+    twice = transform(once, name="again")
+    assert twice == once
+
+
+MULTILINE_TABLE = """
+function f()
+    local t = {
+        hp = db.actor.health,
+        id = db.actor:id(),
+        nm = db.actor:name(),
+    }
+    local s = db.actor:section()
+    return t.hp, t.id, t.nm, s
+end
+"""
+
+
+def test_first_use_inside_a_table_constructor_still_caches(analyze, transform, compiles):
+    assert find_one(analyze(MULTILINE_TABLE), "repeated_db_actor")
+    out = transform(MULTILINE_TABLE)
+    assert "local actor = db.actor" in out
+    assert out.index("local actor = db.actor") < out.index("local t = {")
+    compiles(out)
+
+
+def test_multiline_table_rewrite_behaves_the_same(transform, run_both):
+    run_both(MULTILINE_TABLE, transform(MULTILINE_TABLE), "f")
+
+
+# The statement itself may start on an earlier line than the one that opens the
+# bracket ("local x =" then "combine(" on the next line). Inserting between the
+# two would produce `local x =\nlocal dev = device()\ncombine(...`, so the walk
+# steps back over continuation lines.
+CONTINUED_STATEMENT = """
+local function combine(a, b, c, d) return a + b + c + d end
+
+function f()
+    local x =
+        combine(
+            device().time_delta,
+            device().precache_frame,
+            device().time_delta,
+            device().precache_frame)
+    return x
+end
+"""
+
+
+def test_hoist_steps_back_over_a_continuation_line(transform, compiles, run_both):
+    out = transform(CONTINUED_STATEMENT)
+    compiles(out)
+    if "local dev = device()" in out:
+        assert out.index("local dev = device()") < out.index("local x =")
+    run_both(CONTINUED_STATEMENT, out, "f")
+
+
+# A closure passed as an argument: the function scope STARTS mid-statement, so
+# the statement start lies outside the closure. Hoisting there would move the
+# call out of the closure body (evaluated once instead of per invocation), so
+# the hoist must be refused.
+CLOSURE_ARGUMENT = """
+local kept
+local function register(fn, n) kept = fn; return n end
+
+function f()
+    register(function()
+        local a = device().time_delta
+        local b = device().precache_frame
+        local c = device().time_delta
+        local d = device().precache_frame
+        return a + b + c + d
+    end, 1)
+    return kept()
+end
+"""
+
+
+def test_a_closure_argument_is_never_hoisted_out_of_its_body(transform, compiles, run_both):
+    out = transform(CLOSURE_ARGUMENT)
+    compiles(out)
+    before_closure = out.split("register(function()", 1)[0]
+    assert "local dev = device()" not in before_closure
+    run_both(CLOSURE_ARGUMENT, out, "f")
+
+
+# The short-circuit guard that keeps a method cache honest can sit on an
+# earlier line of the same multi-line statement; the guard scan follows the
+# statement, not the line.
+GUARDED_METHOD_IN_MULTILINE_ARGS = """
+local function pick(a, b, c, d) return a or b or c or d end
+
+function f(o)
+    local t = pick(
+        o and o:id(),
+        o:id(),
+        o:id(),
+        o:id())
+    return t
+end
+"""
+
+
+def test_a_guard_on_an_earlier_line_of_the_statement_still_blocks_the_cache(transform):
+    out = transform(GUARDED_METHOD_IN_MULTILINE_ARGS)
+    assert "local o_id = o:id()" not in out

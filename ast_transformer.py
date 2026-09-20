@@ -2182,6 +2182,10 @@ class ASTTransformer:
             # is this a method cache (obj:method()) vs global cache (func())
             is_method_cache = ':' in call_pattern
 
+            # I-055: set when the declaration was hoisted to the start of a
+            # multi-line statement (argument list / table constructor)
+            stmt_hoist_line = None
+
             # check if first call is inside a table constructor or function call arguments
             # look for unbalanced { or ( in lines before this one within scope
             if scope and hasattr(scope, 'start_line'):
@@ -2208,11 +2212,39 @@ class ASTTransformer:
                             if stripped.startswith(('for ', 'while ', 'repeat')):
                                 has_loop_before_first_call = True
 
-                if brace_depth > 0:
-                    return  # inside table constructor, skip optimization
-                
-                if paren_depth > 0:
-                    return  # inside function call arguments, skip optimization
+                # I-055: the first use sits inside a multi-line argument list or
+                # table constructor. We used to give up here, which killed every
+                # repeated_* fix in functions like checkLedgeGrabbing (5x device()
+                # + 8x db.actor, second-hottest listener in the game) because the
+                # first device() happens to be an argument of a `vector():set(`
+                # that spans four lines.
+                #
+                # There is nothing special about it: for a SINGLE-line statement
+                # we already insert the declaration on that statement's own line,
+                # i.e. already ahead of any earlier argument. Hoisting to the
+                # start of the *statement* is exactly the same edit, just written
+                # across several lines. It stays inside the same block (nothing
+                # but the one statement lies between the insert point and the
+                # use), so no control flow is crossed - unlike the hoist-to-
+                # function-top path below, which is the riskier one and already
+                # shipped.
+                if brace_depth > 0 or paren_depth > 0:
+                    stmt_line = self._find_statement_start_line(
+                        scope.start_line, first_call.line)
+                    if stmt_line is None:
+                        return
+                    if in_condition and control_keyword_line is not None:
+                        # a multi-line if/while condition with an unbalanced `(`:
+                        # both walks agree in practice, take the outer one
+                        stmt_line = min(stmt_line, control_keyword_line)
+                    stmt_pos = self._get_line_start(stmt_line)
+                    if stmt_pos is None:
+                        return
+                    if self._is_inside_multiline_comment(stmt_pos):
+                        return
+                    insert_pos = stmt_pos
+                    indent = self._get_indent_at_line(stmt_line)
+                    stmt_hoist_line = stmt_line
 
                 # SAFETY CHECK: detect nil-guarded method calls
                 # Pattern: "obj and obj:method()" or "if obj and ... obj:method()"
@@ -2220,6 +2252,14 @@ class ASTTransformer:
                 if is_method_cache:
                     first_ls, first_le = self._get_line_span(first_call.line)
                     if first_ls is not None:
+                        # I-055: when the declaration is hoisted to the start of a
+                        # multi-line statement the `obj and` guard may sit on an
+                        # earlier line of that same statement, so scan the whole
+                        # statement prefix, not just the call's line.
+                        if stmt_hoist_line is not None:
+                            gs = self._get_line_start(stmt_hoist_line)
+                            if gs is not None:
+                                first_ls = gs
                         first_line_text = self.source[first_ls:first_le]
                         # extract object name from call_pattern: "obj:method()" -> "obj"
                         obj_name = call_pattern.split(':')[0]
@@ -2382,6 +2422,48 @@ class ASTTransformer:
                 replacement=new_name,
             ))
 
+
+    def _find_statement_start_line(self, scope_start_line: int,
+                                   target_line: int) -> Optional[int]:
+        """First line of the statement that contains `target_line` (I-055).
+
+        Walks the function from its header counting bracket depth on masked
+        lines (comments and strings blanked, so a `--` or a `(` inside a string
+        cannot lie to us). Every line that *begins* at depth 0 is a statement
+        boundary; the last such line at or before the target is the start of the
+        statement we are in the middle of.
+
+        Returns None when there is no usable boundary inside the function - in
+        particular when the function scope is a closure passed as an argument
+        (`foo(function() ... end, x)`), where depth never comes back to 0 and
+        hoisting would wrongly move the declaration out of the closure.
+
+        If the chosen line is itself a continuation of the previous one (an
+        expression broken by a trailing `=` / `..` / `or`), step back to earlier
+        boundaries; that only ever walks over continuation lines, never over an
+        `end` or an `else`, so it cannot leave the block.
+        """
+        boundaries = []
+        depth = 0
+        for line_num in range(scope_start_line, target_line + 1):
+            if depth == 0 and line_num > scope_start_line:
+                boundaries.append(line_num)
+            text = self._masked_line(line_num)
+            if text is None:
+                return None
+            depth += (text.count('(') + text.count('{') + text.count('[')
+                      - text.count(')') - text.count('}') - text.count(']'))
+            if depth < 0:
+                return None  # brackets do not nest the way we assumed: bail
+        if not boundaries:
+            return None
+        for line_num in reversed(boundaries[-10:]):
+            pos = self._get_line_start(line_num)
+            if pos is None:
+                continue
+            if self._is_safe_local_insert_pos(pos):
+                return line_num
+        return None
 
     def _is_safe_local_insert_pos(self, insert_pos: int) -> bool:
         """True if a `local x = ...` line can be inserted at insert_pos without
