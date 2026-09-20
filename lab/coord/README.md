@@ -105,6 +105,25 @@ the `game` lock; you will see the result on the board and in the queue item.
    212 fps avg / 147 fps 1% low / 6.1 ms p99 with per-30 s windows within 207-215, so treat a
    delta inside +-2% avg as noise unless the 1% low moves with it.
 
+## Parking the queue while something else needs the box
+
+An fps run and a timed corpus run exclude each other, and agents working on the
+box cost the profiler about 2 points of baseline cv. To give a corpus job (or a
+bench) a quiet window without cancelling anything:
+
+```
+coord queue hold --all                  # every pending item -> queue/held/
+coord queue hold 20260920-1124 --owner agent-I059   # or just one (id prefix is fine)
+coord queue list --state held
+coord queue release --all               # back to pending, same place in line
+```
+
+`held` is a parking bay, not a pipeline stage. `queue claim` only ever looks at
+`pending`, so a running `fps_runner.py` simply idles while items are held and
+needs no restart; release puts them back with their original priority and
+submit time, so the ordering is exactly what it was. An item that is already
+`running`, `done` or `failed` is refused - holding those would race the runner.
+
 ## Draining the queue (organizer / whoever has the elevated shell)
 
 ```
