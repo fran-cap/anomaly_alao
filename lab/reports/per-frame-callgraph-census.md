@@ -245,29 +245,34 @@ At a realistic 6 ns average: 1.1 us, 0.022%. To clear 23.9 us at 6 ns per execut
 ~4000 site-executions per frame; there are 178 sites, so each would have to run 22 times
 every frame. Hop 2 adds 28 more sites and changes nothing.
 
-Two corrections from agent-I043's measured run `20260919-192703-I-043-3f2729`, both of which
-tighten the margin and neither of which changes the verdict:
+One correction and one open question from agent-I043's measured run
+`20260919-192703-I-043-3f2729`. Neither changes the verdict.
 
-- **The real denominator for a script-side rewrite is now measured: total Lua is ~712 us of
-  the 4770 us frame** (I-048's profiler, `gammabaseline`, standing still). The generous 2.8 us
-  is 0.39% of *script* time, not just 0.059% of the frame. Still far under a frame-based gate,
-  but the honest framing is that ALAO is competing for a 712 us slice, not a 4770 us one.
-- **`tools/microbench.py` is a lower bound for allocation-heavy rewrites**, by I-043's
-  argument: the protocol's mandatory `collectgarbage()` before each timed run plus best-of-9
-  excludes exactly the GC cost that an allocating rewrite removes, and their bench
-  under-predicted the measured saving by 2.2–3.7x. Most patterns in the table above are
-  scalar caching that allocates nothing, so the factor should not apply to them — but if it
-  applied in full to all of them, the generous bound becomes ~11 us, which lands **just under
-  the 11.9 us near-miss floor**. That is a thinner margin than a 40x gap and it is worth
-  saying out loud.
+- **Correction, measured: the real denominator for a script-side rewrite is total Lua, ~712 us
+  of the 4770 us frame** (I-048's profiler, `gammabaseline`, standing still). The generous
+  2.8 us is 0.39% of *script* time, not just 0.059% of the frame. Still far under a
+  frame-based gate, but the honest framing is that ALAO is competing for a 712 us slice, not a
+  4770 us one.
+- **Open question, NOT established: whether `tools/microbench.py` under-reports allocating
+  rewrites.** The argument is that the protocol's mandatory `collectgarbage()` before each
+  timed run excludes exactly the GC cost such a rewrite removes. I-043 raised it off a large
+  bench-vs-in-game gap and has since **retracted it as a finding**: their clean re-bench moved
+  the headline figure from 43.1 to 27.6 us, and at K=12 the clean bench matched the measured
+  per-dispatch saving to 8%. One outlier plus one good match is not a result. Treat it as an
+  untested hypothesis; the clean test is a mean-of-9 variant or `collectgarbage('count')`
+  deltas.
+
+  It matters least here of anywhere: every pattern in the table above is scalar caching that
+  allocates nothing (`repeated_db_actor` removes a table index, `repeated_time_global` a call,
+  `uncached_globals_summary` a global read), so there is no GC cost for the protocol to hide.
+  `table_insert_append` is the only arguable case, at 8 sites.
 
 **Nothing in the GREEN set clears 0.5% of the frame, before or after the propagation, and
-nothing is in the 0.25–0.5% near-miss band** — though under the worst-case reading of the
-microbench caveat the generous bound arrives within ~7% of that floor rather than an order of
-magnitude below it. The realistic estimate (1.1 us, or ~4.4 us with a 4x GC factor) stays well
-clear. This is the same verdict I-021 and I-040 already got in-game, now with the enlarged
-set. If anyone wants to overturn it, the thing to attack is the allocation question, not the
-site count.
+nothing is in the 0.25–0.5% near-miss band.** The generous bound is 2.8 us against an 11.9 us
+floor, and the hypothetical GC factor does not plausibly apply to non-allocating rewrites. This
+is the same verdict I-021 and I-040 already got in-game, now with the enlarged set. If anyone
+wants to overturn it, the honest attack is to settle the allocation question first and then
+show it applies to scalar caching — not to assume it does.
 
 `debug_statement` is the one family where the arithmetic is not obviously dead, and only
 because its per-call cost is two orders of magnitude larger. Measured Lua-side cost of one
@@ -298,11 +303,13 @@ many NPCs are online — which a static census cannot answer. Classify it as
 **near miss / above gate, pending measured call frequency from the I-048 profiler**: the
 per-call cost is measured, the frequency is not.
 
-The 770 ns is itself a **lower** bound, for two independent reasons that both point the same
-way. The engine `log()` write is stubbed out here. And by I-043's microbench argument the
-protocol's `collectgarbage()` excludes GC cost, which `printf` generates in quantity — a
-`{...}` varargs table, the `sr` closure and the `string.gsub` result string, per call. So the
-threshold count is at most 31 and realistically lower.
+The 770 ns is itself a **lower** bound, for one solid reason and one speculative one. Solid:
+the engine `log()` write is stubbed out here, and it is a file write. Speculative: *if*
+I-043's microbench-under-reports-allocation hypothesis survives testing, it would apply to
+`printf` more than to anything else in this report — it allocates a `{...}` varargs table, the
+`sr` closure and the `string.gsub` result string on every call — but that hypothesis is
+currently retracted by its author and untested. So the threshold count of 31 is a ceiling on
+the strength of the first reason alone.
 
 ### What the profiler (I-048) should instrument
 
