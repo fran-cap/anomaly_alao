@@ -127,6 +127,9 @@ def highlight_code_match(line_content: str, details: dict, pattern_name: str) ->
         var = details.get('variable')
         if var:
             match_text = var
+    elif pattern_name == 'once_latch_local_to_function':
+        # the source line is the declaration, so point at the flag itself
+        match_text = details.get('flag_name')
     elif pattern_name == 'expensive_in_hotpath':
         ops = details.get('operations', [])
         if ops:
