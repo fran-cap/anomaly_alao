@@ -778,7 +778,7 @@
       "hypothesis": "Every number so far is standing still in a quiet spot, which starves npc/monster/squad callbacks and makes I-050a's cold-camera guard look its best. A second scene says whether the listener ranking and the gen-4 wins generalise.",
       "change": "User makes and locks a second save (busy hub, or a scripted walk); A/A it with the profiler, then re-run the gen-4 arms on it.",
       "measure": "A/A cv < 5% warm, then per-arm script us/frame.",
-      "notes": "Needs the user in-game. Carried over from the gen-4 plan."
+      "notes": "Needs the user in-game. Carried over from the gen-4 plan. 2026-09-20 exploratory moving run 20260920-110221-I-053-5895a5 (user playing, listener mode, 2x180 s): 851 -> 413 us/frame (-438, -51%), fps avg +3.7%; ranking in beam-ideas.md 11.1. A LOCKED moving scene still does not exist."
     },
     {
       "id": "I-054",
@@ -839,6 +839,21 @@
       "change": "Only worth doing as one arm, and only after I-053 exists.",
       "measure": "profiler, one combined arm.",
       "notes": "Estimates by agent-I050b, unmeasured."
+    },
+    {
+      "id": "I-058",
+      "title": "Hitch attribution: per-call max / p99 for event callbacks",
+      "category": "instrument",
+      "generation": 5,
+      "parent": "I-048",
+      "status": "proposed",
+      "score": 8.0,
+      "risk": "low",
+      "expected_gain": "high",
+      "hypothesis": "The profiler reports per-frame means, which hide what the player feels. The moving run shows ActorMenu_on_before_init_mode at 8-10 ms per call (every inventory open), actor_on_jump 1.5-2.8 ms, actor_on_land 1.2-1.6 ms, actor_on_leave_dialog 2.9 ms; the user reports a large stutter on first PDA / inventory open.",
+      "change": "Add per-name and per-listener max and a small histogram (or top-N slowest single calls with frame time) to zzz_alao_profiler; rank listeners inside ActorMenu_on_before_init_mode, actor_on_jump, actor_on_land. Separate first-open cost (UI construction, texture loads: engine side) from every-open cost (script side).",
+      "measure": "ms per call by listener, first open vs later opens; a scripted open/close sequence makes it repeatable.",
+      "notes": "Motivated by the user's observation on 2026-09-20. 8 ms of script in one frame is ~2 frames at 215 fps."
     }
   ]
 }

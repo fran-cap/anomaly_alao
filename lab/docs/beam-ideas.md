@@ -861,3 +861,37 @@ Cross-cutting facts:
 - ALAO gaps surfaced: `repeated_*` hoists are dropped when the first use is inside a multi-line argument list
   (I-055); `ini_file_ex:r_value` never caches false (I-056); a "do once" latch declared `local` inside a
   per-frame function resets every frame (`zzz_player_injuries.script:1575`), a candidate RED pattern.
+
+### 11.1 Moving scene, exploratory (2026-09-20, `20260920-110221-I-053-5895a5`)
+
+The user played (ran, jumped, opened PDA / inventory, some combat) through every capture, so this is **not a locked
+measurement**: 2 x 180 s per arm, listener-mode profiler (`alao-profiler-listeners-inv`, which calls the dispatch
+mod's `invalidate()` after wrapping; the user saw nothing broken in either arm), no round dropped.
+
+| | full ALAO (`ref3-alao-b`) | all gen-4 patches (`gen4-all-b`) |
+|---|---:|---:|
+| script us/frame (per run) | 846.6 / 855.9 | 410.3 / 415.3 |
+| `actor_on_update` | 773.3 | 359.2 |
+| fps avg / 1% low / p99 ms | 219.5 / 146.2 / 5.96 | 227.6 / 155.9 / 5.58 |
+
+**-438 us/frame (-51%) while moving**, so the standing-still result generalises, and run-to-run agreement was under 1%
+even with a human driving. Per listener, baseline -> variant: `drx_da_main` 175.9 (353 calls) -> 22.3 (1 call);
+`demonized_ledge_grabbing` 101.9 -> 68.2 (the guard cannot fire while moving, so this is the one-ray-object hoist
+plus standing moments); `zzz_player_injuries` 71.0 -> 42.3 (more than the -16 measured standing still; the HUD
+does more while moving). `actor_on_update` is still 87-91% of script time when moving; npc/squad callbacks stayed
+small (`npc_on_update` 13-16 us, `npc_on_choose_weapon` 9-12, `npc_on_hear_callback` 5-7, `squad_on_update` 4-6).
+
+What is left in the variant, top of the ranking: ledge grabbing 68, player injuries 42, the drx walker 22,
+`fluid_aim:33` 15, `liz_inertia_expanded:196` 11.5, `light_gem_mcm:20` 11.5, `actor_effects:1640` 8, `sound_ambient:277` 8,
+`battery_warning:39` 7, then a long tail of 3-6 us listeners. Seen only in the baseline run: `bind_campfire.script:176`
+at 25 us (scene-dependent, near a fire). Ledge grabbing while moving is now the top single target again.
+
+**Hitches are a different axis the per-frame mean hides.** `ActorMenu_on_before_init_mode` costs 8.3-10.0 ms **per
+call** (every inventory open), `actor_on_jump` 1.5-2.8 ms, `actor_on_land` 1.2-1.6 ms, `actor_on_leave_dialog` 2.9 ms,
+`actor_on_footstep` 0.2-0.6 ms. The user reported a large stutter the first time the PDA / inventory is opened, in
+both arms. Candidate I-058: per-call max / p99 attribution for event callbacks.
+
+Reported by the user, both arms: the New Player Experience caps-lock tutorial prompt did not appear. ALAO's edits to
+the `npe_*` scripts are `table.insert` -> `t[#t+1]`, one `string.find` plain flag and a `tostring` alias, so the
+rewrite is an unlikely cause; the harness launches into a cloned `aalo-src-*` profile straight into the save, which
+is the first suspect. Unverified.
