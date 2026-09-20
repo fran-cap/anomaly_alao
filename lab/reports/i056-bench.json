@@ -1,0 +1,276 @@
+{
+ "iters": 300000,
+ "best_of": 9,
+ "crossing_us": 0.25,
+ "self_check": {
+  "jit_ms": 1.4772000722587109,
+  "interp_ms": 6.749799940735102,
+  "ratio": 4.569320072137777
+ },
+ "rows": [
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT on",
+   "arm": "live",
+   "lua_us_per_read": 0.08494166696133713,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.5849416669613371,
+   "saved_vs_live_us": 0.0
+  },
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT on",
+   "arm": "vanilla",
+   "lua_us_per_read": 0.1145426669002821,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.6145426669002821,
+   "saved_vs_live_us": -0.02960099993894505
+  },
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT on",
+   "arm": "fixed",
+   "lua_us_per_read": 0.03759633322867254,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03759633322867254,
+   "saved_vs_live_us": 0.5473453337326646
+  },
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT on",
+   "arm": "cached",
+   "lua_us_per_read": 0.03629200005282958,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03629200005282958,
+   "saved_vs_live_us": 0.5486496669085075
+  },
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT off",
+   "arm": "live",
+   "lua_us_per_read": 0.08654433341386418,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.5865443334138641,
+   "saved_vs_live_us": 0.0
+  },
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT off",
+   "arm": "vanilla",
+   "lua_us_per_read": 0.11329333336713414,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.6132933333671341,
+   "saved_vs_live_us": -0.02674899995326996
+  },
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT off",
+   "arm": "fixed",
+   "lua_us_per_read": 0.03796499998619159,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03796499998619159,
+   "saved_vs_live_us": 0.5485793334276725
+  },
+  {
+   "key": "stealth/icon",
+   "class": "false-valued (light_gem, 1/frame)",
+   "mode": "JIT off",
+   "arm": "cached",
+   "lua_us_per_read": 0.03593266669971248,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03593266669971248,
+   "saved_vs_live_us": 0.5506116667141516
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT on",
+   "arm": "live",
+   "lua_us_per_read": 0.09055400034412742,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.5905540003441274,
+   "saved_vs_live_us": 0.0
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT on",
+   "arm": "vanilla",
+   "lua_us_per_read": 0.12006499998581906,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.6200649999858191,
+   "saved_vs_live_us": -0.029510999641691682
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT on",
+   "arm": "fixed",
+   "lua_us_per_read": 0.04010166662434737,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.04010166662434737,
+   "saved_vs_live_us": 0.5504523337197801
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT on",
+   "arm": "cached",
+   "lua_us_per_read": 0.03769033316833278,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03769033316833278,
+   "saved_vs_live_us": 0.5528636671757946
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT off",
+   "arm": "live",
+   "lua_us_per_read": 0.09116266660081843,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.5911626666008184,
+   "saved_vs_live_us": 0.0
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT off",
+   "arm": "vanilla",
+   "lua_us_per_read": 0.12096566652568679,
+   "crossings_per_read": 2.0,
+   "engine_us": 0.5,
+   "total_us_per_read": 0.6209656665256867,
+   "saved_vs_live_us": -0.029802999924868345
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT off",
+   "arm": "fixed",
+   "lua_us_per_read": 0.042484000247592725,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.042484000247592725,
+   "saved_vs_live_us": 0.5486786663532257
+  },
+  {
+   "key": "body_health_system/TEXT_BASED_PATCH",
+   "class": "false-valued (injuries, 1/frame)",
+   "mode": "JIT off",
+   "arm": "cached",
+   "lua_us_per_read": 0.03901899986279508,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03901899986279508,
+   "saved_vs_live_us": 0.5521436667380233
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT on",
+   "arm": "live",
+   "lua_us_per_read": 0.04959533301492532,
+   "crossings_per_read": 1.0,
+   "engine_us": 0.25,
+   "total_us_per_read": 0.2995953330149253,
+   "saved_vs_live_us": 0.0
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT on",
+   "arm": "vanilla",
+   "lua_us_per_read": 0.06606699976449211,
+   "crossings_per_read": 1.0,
+   "engine_us": 0.25,
+   "total_us_per_read": 0.3160669997644921,
+   "saved_vs_live_us": -0.016471666749566793
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT on",
+   "arm": "fixed",
+   "lua_us_per_read": 0.03698833364372452,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03698833364372452,
+   "saved_vs_live_us": 0.2626069993712008
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT on",
+   "arm": "cached",
+   "lua_us_per_read": 0.03722399977656703,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03722399977656703,
+   "saved_vs_live_us": 0.26237133323835826
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT off",
+   "arm": "live",
+   "lua_us_per_read": 0.050027333199977875,
+   "crossings_per_read": 1.0,
+   "engine_us": 0.25,
+   "total_us_per_read": 0.3000273331999779,
+   "saved_vs_live_us": 0.0
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT off",
+   "arm": "vanilla",
+   "lua_us_per_read": 0.06487500000124177,
+   "crossings_per_read": 1.0,
+   "engine_us": 0.25,
+   "total_us_per_read": 0.3148750000012418,
+   "saved_vs_live_us": -0.014847666801263926
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT off",
+   "arm": "fixed",
+   "lua_us_per_read": 0.036703000077977777,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.036703000077977777,
+   "saved_vs_live_us": 0.2633243331220001
+  },
+  {
+   "key": "control/general/aim_toggle",
+   "class": "ABSENT key (fluid_aim, 1/frame)",
+   "mode": "JIT off",
+   "arm": "cached",
+   "lua_us_per_read": 0.03788566682487726,
+   "crossings_per_read": 0.0,
+   "engine_us": 0.0,
+   "total_us_per_read": 0.03788566682487726,
+   "saved_vs_live_us": 0.2621416663751006
+  }
+ ]
+}
