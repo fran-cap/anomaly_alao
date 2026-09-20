@@ -134,6 +134,52 @@ which are file-locals this mod cannot reach.
   `actor_on_first_update` itself costs 1272 ms at frame 7 and the key prompt is
   at frame 62.
 
+## The rest of the cold-signature sweep, and what was left out
+
+Over all four I-058 captures, every callback/listener whose worst single call
+reached 3 ms, excluding the ones that run behind the loading screen by
+construction (`actor_on_first_update`, `load_state`, `on_game_load`,
+`on_loading_screen_key_prompt`, `on_option_change`). Maxes are per capture.
+
+| listener | maxes, ms | diagnosis | in this mod? |
+|---|---|---|---|
+| `actor_on_update#lam2.script:271` | 54.1 / 10.6 / 10.2 / 9.2 | FDDA Redone's action machine. `go_to_next_action` -> `set_current_action` -> `get_template_action_play_animation`'s `enter`, which does `game.get_motion_length(sec, anm, speed)`, `game.play_hud_motion(...)`, `level.add_cam_effector(ini_sys:r_string_ex(sec,"cam"), 2190, ...)` and `sound_object(ini_sys:r_string_ex(sec,"snd"))`. That is the engine loading a HUD model, a motion set, a camera `.anm` and a sound the first time you use a given item section. Registered on `actor_on_update` only while a sequence runs (6-8% of frames). | **no** - see below |
+| `npc_on_update#aaaa_script_fixes_mp.script:741` | 6.3 / 5.1 / 6.1 / 5.2 | not cold: 23 calls above the floor out of 87k, in every capture. A periodic sweep, not a first-call. Needs its own idea. | no |
+| `actor_on_info_callback#info_portions.script:58` | 2.0 / 4.5 / 5.4 / 2.9 | `if (info == "ui_pda") then pda.calculate_rankings() end`, i.e. every PDA open recomputes the rankings. Genuinely recomputed, not lazy-built; caching it would make the rankings stale. Not a prewarm. | no |
+| `on_key_release#ui_hud_dotmarks.script:5924` | 0.2 / 0.2 / 7.3 / - | `do_use_release_action_manually` -> `use_obj_by_id` / `xr_effects.force_talk`, i.e. the first time a *different* UI singleton gets built by an interaction. Same family; whichever singleton it is, it is not one of the three here. | no |
+| `actor_on_update#sound_ambient.script:277` | 9.2 / 2.7 / 2.2 / 2.5 | cold in every capture (`first_ms == max_ms`), and it is the ambient-track sound objects. Prewarmable in principle, but the path set is level- and weather-dependent rather than a fixed table, so it needs a different mechanism. | no |
+| `actor_on_update#logic_enforcer.script:56` | 5.2 once | a one-shot; fires once per session at an arbitrary frame. | no |
+| `actor_on_update#drx_da_main.script:1656` / `:1665` | 21.1 / 20.8 | one call each, at frame 7 - already behind the loading screen. | n/a |
+| `actor_on_update#demonized_ledge_grabbing.script:443` | 3.4 / 0.6 | I-057's territory. | no |
+
+### lam2.script:271 in more detail, and a proposed cut
+
+The 54 ms frame in capture 1 (frame 13033) and the 9-10 ms ones in the other
+three are the same event, not an outlier: it is the **first FDDA-animated use of
+a given item section in the session**. Capture 1 was the first game launch of
+the sitting, so the `.ogf` / `.omf` / `.ogg` were cold in the OS file cache too;
+captures 2-4 launched minutes later and hit that cache, which is exactly the
+same 5x that the footstep row shows (4.5 / 2.7 / 0.9 / 0.8). So the rate is
+"once per distinct consumable you use, per session", which for a normal play
+session is several times, at 9-54 ms each.
+
+What could be prewarmed is only the part with no visible effect:
+
+  * `sound_object(ini_sys:r_string_ex(sec, "snd"))` for every animated section -
+    safe, same mechanism as the footstep queue here.
+  * `game.get_motion_length(sec, anm, speed)` - a query, and plausibly what
+    forces the motion set to load. Unverified: it may or may not touch the
+    resource, and it cannot be checked offline.
+
+What cannot: `game.play_hud_motion` draws, and `level.add_cam_effector` moves
+the camera. So a full prewarm is out; the honest options are (a) prewarm the
+sound and the motion length only, which leaves the cam effector and the hud
+visual cold, or (b) time-slice nothing and instead have FDDA warm the *next*
+likely section in the background while the current animation plays, which is a
+change to someone else's state machine. Neither is in this mod. The section set
+also has to come from somewhere - it is driven by which item the player uses -
+so (a) needs an enumeration pass over the FDDA config first.
+
 ## Tests
 
 `lab/tests/test_i063_prewarm.py`, stub engine under `lupa.luajit20`
