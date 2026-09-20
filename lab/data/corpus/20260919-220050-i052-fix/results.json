@@ -1,0 +1,93 @@
+{
+  "analyze_s": 1.32,
+  "fix_s": 2.63,
+  "parse_failures": [],
+  "timeouts": [],
+  "crashes": [],
+  "findings_by_pattern": {
+    "debug_statement": 113,
+    "table_insert_append": 59,
+    "potential_nil_access": 41,
+    "unnecessary_else": 37,
+    "unused_local_variable": 35,
+    "uncached_globals_summary": 18,
+    "string_concat_in_loop": 15,
+    "append_loop_counter": 12,
+    "string_len": 10,
+    "global_write": 8,
+    "per_frame_callback": 6,
+    "repeated_db_actor": 6,
+    "jit_mode": 4,
+    "repeated_db_storage": 3,
+    "string_find_plain": 3,
+    "unused_local_function": 3,
+    "redundant_not_eq": 3,
+    "repeated_db_offline_objects": 2,
+    "distance_to_comparison": 2,
+    "pow_op_simple": 2,
+    "repeated_self_object_id()": 1,
+    "repeated_time_global": 1,
+    "repeated_obj_section()": 1,
+    "pairs_to_ipairs": 1
+  },
+  "findings_by_severity": {
+    "GREEN": 111,
+    "YELLOW": 143,
+    "RED": 17,
+    "DEBUG": 115
+  },
+  "files_modified": 17,
+  "edits_applied": 316,
+  "edits_dropped_overlap": 0,
+  "compile_failures_after_fix": [],
+  "idempotence_violations": [],
+  "captures": [],
+  "differential_failures": [],
+  "extra": {
+    "analyze_returncode": 0,
+    "stdout_counts": {
+      "files_analyzed": 66,
+      "files_with_issues": 22,
+      "files_skipped": null,
+      "parse_errors": null,
+      "files_modified": null,
+      "edits_applied": null
+    },
+    "report_summary": {
+      "total": 386,
+      "green": 111,
+      "yellow": 143,
+      "red": 17,
+      "debug": 115
+    },
+    "failure_source": "alao-report",
+    "fix_returncode": 0,
+    "fix_stdout_counts": {
+      "files_analyzed": 66,
+      "files_with_issues": 22,
+      "files_skipped": null,
+      "parse_errors": null,
+      "files_modified": 17,
+      "edits_applied": 316
+    },
+    "edits_generated": 316,
+    "diffs_written": 17,
+    "idempotence_second_pass_modified": 0,
+    "capture_scan": {
+      "files": 17,
+      "errors": [],
+      "insertions": 31,
+      "declared_names": 35,
+      "insertions_by_kind": {
+        "repeated_calls[repeated_db_actor]": 6,
+        "repeated_calls[repeated_db_offline_objects]": 2,
+        "repeated_calls[repeated_db_storage]": 3,
+        "repeated_calls[repeated_self_object_id()]": 1,
+        "repeated_calls[repeated_time_global]": 1,
+        "uncached_globals": 18
+      },
+      "advisories": [],
+      "seconds": 2.32
+    }
+  }
+}

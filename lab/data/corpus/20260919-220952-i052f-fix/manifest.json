@@ -1,0 +1,23 @@
+{
+  "run_id": "20260919-220952-i052f-fix",
+  "alao_commit": "9b5bf26e56ef23d514947aa5455fcff37fbfc043",
+  "alao_dirty": false,
+  "corpus": "gamma-0.9.4",
+  "corpus_files": 1503,
+  "flags": [
+    "--report",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260919-220952-i052f-fix\\alao-report.json",
+    "--timeout",
+    "10.0",
+    "--cache-threshold",
+    "4",
+    "--exclude",
+    "C:\\code\\GIT\\anomaly_alao\\lab\\data\\corpus\\20260919-220952-i052f-fix\\empty-exclude.txt",
+    "|",
+    "--fix"
+  ],
+  "started": "2026-09-19T22:09:52",
+  "finished": "2026-09-19T22:11:13",
+  "status": "done",
+  "notes": ""
+}

@@ -784,3 +784,75 @@ Cross-cutting facts:
   author within the run (clean re-bench: 27.6 us, matching the measured per-dispatch saving to 8% at K=12).
   It stays an untested hypothesis.
 - Worktrees were created off `main`, which was 100+ commits behind; `main` was fast-forwarded on the day.
+
+## 11. Generation-4 results (2026-09-19, five parallel agents, profile-guided)
+
+Five Opus agents, own worktrees off `main` 94b61fc, merged conflict-free on `integrate/gen4` in the order
+I-052, I-051, I-049, I-050a, I-050b. Suite 671 passed / 7 skipped / 4 xfailed, lab 210 passed. Integration gate
+(`tools/corpus_matrix.py`, quiet box) `20260919-2316xx..2320xx-integ-gen4-*` on GAMMA and `20260919-2321xx..2323xx-integ-gen4-*`
+on vanilla-db, four flag combinations each: G4 0, G5 0, G9 0 everywhere; `--fix` 571 / 6493 and 217 / 3628. Every in-game number below is script us/frame from the I-048 profiler,
+4 x 120 s per arm on `gammabaseline`, **round 1 of each arm dropped**, profiler in both arms.
+
+| Idea | Verdict | Queue item | baseline -> variant (warm) | delta | arms overlap? |
+|---|---|---|---|---:|---|
+| I-049 shared dispatcher for `drx_da_main`'s 353 per-anomaly closures | **kept** | `20260919-210108-I-049-35365e` | 742.2 -> 519.8 | **-222 us (-30%)** | no (710-796 vs 502-535) |
+| I-050a `demonized_ledge_grabbing` cold-camera guard | **kept** | `20260919-211043-I-050-025a5a` | 710.7 -> 604.0 | **-107 us (-15%)** | no (696-725 vs 563-611) |
+| I-051 `make_callback` dispatch as a mod, on **stock** GAMMA | **kept, deliverable** | `20260919-211347-I-051-21408e` | 713.5 -> 624.4 | **-89 us (-12.5%)** | no (692-732 vs 615-633) |
+| I-050b `zzz_player_injuries` crossing cut (104 -> 45 Lua->C calls) | **under the bar** | `20260919-211144-I-050-34ad1e` | 701.7 -> 686.0 | -15.7 us (-2.2%) | **yes**, inside cv 3.6 / 2.7% |
+| I-052 flag-combination fixpoints | **done** | corpus | | G5 24 -> 0, 1 -> 0 | |
+
+FPS did not resolve any of them on its own (avg -0.9% to -2.2%, all inside the 3% launch-to-launch sd); I-049's
+1% low read +7.0% and p99 -7.0%, which at 222 us may be real and is not claimed.
+
+What each one found:
+
+- **I-049.** The closure body is lifted byte-for-byte into one listener that walks a registration-ordered array;
+  `time_global()` is per-frame constant so one sample per pass is what all 353 calls returned, throttles are not
+  re-phased, mid-pass register/unregister matches `hspairs`. One honest non-identity: 353 dispatch slots become
+  one. Bench K=353: 286.5 -> 33.3 us interpreted, 52.8 -> 7.9 compiled; in-game landed inside the predicted
+  100-250 band. Baseline cv was 4.0% in this run because four agents were still working on the box. The RED
+  "closure registered per object" detector is cheap and would find nothing else: 7 binder-context sites in the
+  corpus, 1 in a `net_spawn`.
+- **I-050a.** Not a code smell, a configuration interaction: the mod already has a nothing-moved early-out, but
+  `alternativeClimbDetection` (default true) disables it and `throttleCheck` defaults to 0, so 15 ray objects are
+  built and 15 rays cast every frame over a band that cannot hit. Plain `--fix` buys 0 us there. The guard uses
+  tolerances (1e-4 m, 1e-5 per direction component), so it is bounded-stale, not bit-exact, and assumes static
+  geometry is immutable within a level. Landed 30 us short of the 135-142 prediction, and the variant arm drifted
+  up over rounds (563, 592, 609, 611) while the baseline did not; unexplained, needs a listener-mode pair.
+- **I-050b.** The frame is 104 Lua->C crossings and almost nothing else (Lua-only cost with stubs: 3.4 -> 2.0 us),
+  and removing 59 of them bought 16 us, not the 34 us central estimate: **crossings are not equally priced**, the
+  cheap getters (`get_hud`, `time_global`) are ~0.25 us and the UI calls left in place carry the 74 us. Use the
+  pessimistic read when pricing getter removal. The `for i=1,68` concat loops are cold (answers I-039).
+- **I-051.** The I-043 "semantically identical" claim was wrong under mid-pass churn, and then better than wrong:
+  `hspairs` seeds its heap from `pairs()` over function keys, so after a mid-pass register/unregister the shipped
+  order is **pointer-order nondeterministic** (14 distinct orders in 30 replays; the patch gives 1, the declared
+  priority order). No mutation mid-pass => bit-identical, 600/600. Live exposure: one listener, two sites, in
+  `drx_da_main`. Delivered as a monkey-patch mod that replaces no file (`lab/mods/alao-make-callback-dispatch`,
+  A-vs-B bench 0.98-1.03x), PR draft in `lab/docs/i051-upstream-pr-draft.md`. **Publishing is the user's call.**
+  Correction to section 10: the protocol readout of the I-043 run is 712.3 -> 607.3, **-105.1 us**; -110.1 was
+  all four rounds.
+- **I-052.** Neither defect was a fixpoint artifact. `_edit_repeated_calls` cut each line at the first `--`
+  before looking at string literals, so `printf("... --- ...")` unbalanced the paren scan and blocked a hoist
+  under plain `--fix` too; `--fix-debug` merely removed the line. And `--fix-nil` guarded one use of several
+  (a useless guard) while missing `x and f(x:m())` short-circuits. Gates at 9b5bf26: GAMMA x 4 combos and
+  vanilla-db x 8 combos all G4 0 / G5 0 / G9 0; `--fix` output byte-identical on GAMMA, 2 of 826 vanilla-db
+  files change (the unblocked hoists); `potential_nil_access` -475 / -223 false positives; fix wall time +7.7%.
+  `tools/corpus_matrix.py` is the multi-flag gate from now on. The second gate corpus is
+  `extracted/vanilla_db` (826 files), not `extracted/vanilla` (66).
+
+Cross-cutting facts:
+
+- **Three structural fixes are worth ~400 us of a ~710 us script budget** if they stack (unmeasured; I-054).
+  Generation 1-3 pattern rewrites were worth 1-3 us each. Profile first.
+- **Check the locks after a bench as well as before.** Two benches started clean and finished under I-052's
+  corpus lock; one would have invented a 10% penalty (0.89x where the clean run says 1.00x).
+- **`jit.off()` is the global switch; `jit.off(true, true)` is a no-op for code loaded afterwards** (scalar loop
+  under lupa: on 1.50 ms, `jit.off()` 6.75 ms, `jit.off(true,true)` 1.52 ms). Both I-050 benches had it wrong,
+  fixed at integration. A plain scalar loop is only ~4.5-5.6x slower interpreted; the ~20x self-check figure
+  belongs to `microbench.py`'s heavier loop.
+- **Agents working on the box cost the profiler about 2 points of cv** (baseline cv 4.0% with five agents busy,
+  2.0% quiet). Corpus jobs and fps runs still exclude each other, so the organizer parked queue items
+  (`lab/coord/queue/held/`) to give I-052 its window; a `hold` verb in `coord.py` would make that official.
+- ALAO gaps surfaced: `repeated_*` hoists are dropped when the first use is inside a multi-line argument list
+  (I-055); `ini_file_ex:r_value` never caches false (I-056); a "do once" latch declared `local` inside a
+  per-frame function resets every frame (`zzz_player_injuries.script:1575`), a candidate RED pattern.
