@@ -87,7 +87,11 @@ function SendScriptCallback(name, ...)
 end
 function listener_count(name) return #(CALLBACKS[name] or {}) end
 
-function printf(...) end
+__PRINTED = {}
+function printf(fmt, ...)
+    local ok, s = pcall(string.format, fmt, ...)
+    __PRINTED[#__PRINTED + 1] = ok and s or tostring(fmt)
+end
 function strformat(...) return string.format(...) end
 function shuffle_table(t) return t end
 function clamp(v, a, b) if v < a then return a end if v > b then return b end return v end
@@ -144,12 +148,37 @@ end
 UI_BUILDS = 0
 ENC_BUILDS = 0
 
+-- The ruck.  RUCK_N items; ParseInventory hands them back.
+RUCK_N = 19
+
 ui_inventory = {GUI = nil}
 function ui_inventory.UIInventory()
     UI_BUILDS = UI_BUILDS + 1
     effect("UIInventory()")
-    local gui = {shown = false}
+    local gui = {shown = false, CC = {}}
     gui.IsShown = function(self) return self.shown end
+    -- actor_bag is the lazy one: built empty, grown on the first open
+    gui.CC["actor_bag"] = MAKE_CC("actor_bag", gui)
+    -- actor_equ / belt / quick get their cells here, like InitControls does
+    for _, name in ipairs({"actor_equ", "actor_belt", "actor_quick"}) do
+        local cc = MAKE_CC(name, gui)
+        cc.disable_callback["On_CC_Add"] = true
+        cc.disable_callback["On_CC_Remove"] = true
+        for i = 1, 13 do cc.cell[i] = utils_ui.UICellItem(cc, cc.st, i, true) end
+        gui.CC[name] = cc
+    end
+    gui.ParseInventory = function(self, npc, all, id_list, ignore_kind)
+        local t = {}
+        for i = 1, RUCK_N do t[i] = "item_" .. i end
+        return t
+    end
+    -- the only On_CC_Add subscriber in the live stack: sets a flag, nothing else
+    gui.On_CC_Add = function(self, bag, idx, on_area) self.update_info = true end
+    -- what an "inventory" mode open does: IMode_ResetInventories
+    gui.IMode_Init = function(self)
+        self.CC["actor_bag"]:Reinit(self:ParseInventory(db.actor))
+        effect("IMode_Init")
+    end
     -- the twelve listeners UIInventory:__init registers
     for _, n in ipairs({"actor_item_to_ruck", "actor_item_to_slot", "actor_item_to_belt",
                         "actor_on_item_drop", "actor_on_item_use", "actor_on_item_put_in_box",
@@ -161,10 +190,136 @@ function ui_inventory.UIInventory()
 end
 function ui_inventory.start(mode)
     if not ui_inventory.GUI then ui_inventory.GUI = ui_inventory.UIInventory() end
+    if mode == "inventory" then ui_inventory.GUI:IMode_Init() end
     effect("inventory start " .. tostring(mode))
 end
+
+-- What FDDA Redone / SortingPlus do at actor_on_first_update, ahead of us.
+function OTHER_MOD_BUILDS_GUI()
+    if not ui_inventory.GUI then ui_inventory.GUI = ui_inventory.UIInventory() end
+end
+
+-- ---------------------------------------------------------------------------
+-- the engine tutorial sequencer
+-- ---------------------------------------------------------------------------
+
+TUTORIALS = {alao_prewarm_noop = true,
+             tutorial_campfire_ignite = true, tutorial_campfire_extinguish = true}
+TUT_ACTIVE = nil
+TUT_STARTS = {}
+TUT_WARM = false          -- the engine's one-time sequencer cost
+TUT_COLD_COST = 0         -- bumped by the test to represent the 700 ms
+
+game = game or {}
+function game.start_tutorial(name)
+    TUT_STARTS[#TUT_STARTS + 1] = name
+    effect("start_tutorial " .. tostring(name))
+    if not TUTORIALS[name] then
+        effect("start_tutorial UNKNOWN " .. tostring(name))
+        return
+    end
+    if not TUT_WARM then
+        TUT_WARM = true
+        SIM_US = SIM_US + TUT_COLD_COST
+        effect("sequencer cold load")
+    end
+    TUT_ACTIVE = name
+end
+function game.stop_tutorial()
+    effect("stop_tutorial " .. tostring(TUT_ACTIVE))
+    TUT_ACTIVE = nil
+end
+function game.has_active_tutorial() return TUT_ACTIVE ~= nil end
 -- what a level change does
 function ui_inventory.net_destroy() ui_inventory.GUI = nil end
+
+-- ---------------------------------------------------------------------------
+-- UICellContainer, modelled on the live utils_ui.script closely enough to be
+-- wrong in the same ways: Reset() hides cells but NEVER removes one, Grow()
+-- only extends the grid, and AddItemInCell constructs a UICellItem only when
+-- self.cell[indx] is nil.  That is the whole mechanism the pool prewarm is for.
+-- ---------------------------------------------------------------------------
+
+CELL_BUILDS = 0
+CC_ADD_FIRED = 0
+COLS = 5
+
+local celmt = {}
+celmt.__index = celmt
+function celmt:Reset() self.ID = nil self.area = nil effect("cell reset " .. self.indx) end
+function celmt:Set(obj, area) self.ID = obj self.area = area return true end
+function celmt:Show(v) end
+
+utils_ui = {}
+function utils_ui.UICellItem(container, st, indx, manual)
+    CELL_BUILDS = CELL_BUILDS + 1
+    effect("UICellItem " .. indx)
+    -- four xml:InitStatic in the real InitControls
+    for _ = 1, 4 do effect("InitStatic") end
+    return setmetatable({container = container, indx = indx, manual = manual}, celmt)
+end
+
+local ccmt = {}
+ccmt.__index = ccmt
+
+function ccmt:Callback(func, ...)
+    if self.disable_callback[func] then return end
+    if func == "On_CC_Add" then CC_ADD_FIRED = CC_ADD_FIRED + 1 end
+    if self.owner and self.owner[func] then return self.owner[func](self.owner, ...) end
+end
+
+function ccmt:Grow()
+    local rows = #self.grid + 1
+    self.grid[rows] = {}
+    for i = 1, COLS do self.grid[rows][i] = true end
+end
+
+function ccmt:Reset()
+    -- keeps self.cell, exactly like the real one
+    for _, ci in pairs(self.cell) do ci:Reset() end
+    self.idxer = 0
+    empty_table(self.indx_id)
+    for _, v in pairs(self.grid) do
+        for col in pairs(v) do v[col] = true end
+    end
+end
+
+function ccmt:AddItem(obj)
+    local id = tostring(obj)
+    if self.indx_id[id] then return end
+    -- one free row per item, growing when full (the quadratic scan is not
+    -- modelled; what matters here is WHEN a cell gets constructed)
+    local placed = nil
+    for r = 1, #self.grid do
+        if self.grid[r][1] then self.grid[r][1] = false placed = r break end
+    end
+    if not placed then
+        self:Grow()
+        placed = #self.grid
+        self.grid[placed][1] = false
+    end
+    local indx = self.idxer + 1
+    if not self.cell[indx] then
+        self.cell[indx] = utils_ui.UICellItem(self, self.st, indx)
+    end
+    self.cell[indx]:Set(obj, {y = placed, x = 1, w = 1, h = 1})
+    self.idxer = indx
+    self.indx_id[id] = indx
+    self:Callback("On_CC_Add", self.ID, indx, true)
+end
+
+function ccmt:Reinit(t)
+    self:Reset()
+    if not t then return end
+    for _, obj in pairs(t) do self:AddItem(obj) end
+end
+
+function MAKE_CC(id, owner)
+    return setmetatable({ID = id, owner = owner, st = {}, cell = {}, grid = {},
+                         indx_id = {}, idxer = 0, disable_callback = {}}, ccmt)
+end
+
+function empty_table(t) for k in pairs(t) do t[k] = nil end return t end
 
 local ENC_SINGLETON = nil
 ui_pda_encyclopedia_tab = {}
@@ -220,8 +375,20 @@ class Arm:
             self.mod.on_game_start()
 
     # -- driving ----------------------------------------------------------
-    def first_update(self):
+    def first_update(self, others_build_gui=True):
+        """FDDA / SortingPlus build the GUI first; then our listener runs."""
+        if others_build_gui:
+            self.g.OTHER_MOD_BUILDS_GUI()
         self.g.SendScriptCallback("actor_on_first_update")
+
+    def open_inventory(self):
+        self.g.ui_inventory.start("inventory")
+
+    def pool(self):
+        cc = self.g.ui_inventory.GUI.CC["actor_bag"]
+        cells = sum(1 for _ in cc.cell.items()) if cc.cell is not None else 0
+        grid = sum(1 for _ in cc.grid.items()) if cc.grid is not None else 0
+        return {"cells": cells, "grid": grid, "idxer": int(cc.idxer)}
 
     def frame(self, n=1):
         for _ in range(n):
@@ -253,6 +420,11 @@ class Arm:
     def cold_in_play(self, after_frame: int):
         """Cold constructions that happened at or after *after_frame*."""
         return [c for c in self.constructions() if c["cold"] and c["frame"] >= after_frame]
+
+    def report(self):
+        """The [alao_prewarm] lines the mod would print to the engine log."""
+        n = int(self.lua.eval("#__PRINTED"))
+        return [self.lua.eval("__PRINTED")[i] for i in range(1, n + 1)]
 
     def clear_effects(self):
         self.g.EFFECTS, self.g.EFFN = self.lua.table(), 0

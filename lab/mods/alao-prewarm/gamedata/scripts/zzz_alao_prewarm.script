@@ -104,7 +104,7 @@
 --     `UIInventory()`, one `pda_encyclopedia_tab()` and N `sound_object()`
 --     constructions, out of play and into the loading screen.
 
-local VERSION = "1.1"
+local VERSION = "1.2"
 
 -- ---------------------------------------------------------------------------
 -- configuration
@@ -113,6 +113,43 @@ local VERSION = "1.1"
 local PREWARM_INVENTORY    = true
 local PREWARM_ENCYCLOPEDIA = true
 local PREWARM_SOUNDS       = true
+
+-- v1.2, TARGET 1.  Grow the actor_bag cell pool behind the loading screen.
+--
+-- The v1.0 inventory prewarm was a no-op on GAMMA, because FDDA Redone
+-- (custom_functor_autoinject.script:435) and SortingPlus
+-- (zzz_rax_sortingplus_mcm.script:108) both build ui_inventory.GUI at
+-- actor_on_first_update already.  But they build the OBJECT with an EMPTY cell
+-- pool, and the per-call trace of the walk-out run 20260920-185607-I-062-a1c78b
+-- shows that the pool is the actual cost:
+--
+--   open 1   cells 0 -> 19, grid 0 -> 7    17.4 / 9.2 / 7.9 / 12.0 ms
+--   every later open, cells 19 -> 19, grid 7 -> 7    3.5 - 4.9 ms
+--
+-- So grow the pool at first update instead.  See the README for why this fires
+-- no callback anybody listens to.
+local PREWARM_INV_POOL     = true
+-- Spare empty cells to build beyond what the ruck needs right now, so the first
+-- few loots do not have to grow the pool either.  Each one is one UICellItem,
+-- i.e. four xml:InitStatic calls, paid at frame 7.  0 disables headroom.
+local POOL_HEADROOM        = 12
+
+-- v1.2, TARGET 2.  Warm the engine's tutorial sequencer.
+--
+-- bind_campfire.script:176 (G.A.M.M.A. Cooking Overhaul) calls
+-- game.start_tutorial("tutorial_campfire_ignite" / "_extinguish") when the actor
+-- walks near a campfire.  In the walk-out run that listener had EXACTLY ONE call
+-- of 705 / 716 ms per capture - a 786 ms frame, which the player felt - and
+-- every other call was under 0.8 ms.  One call per session, whichever tutorial
+-- came first, is the signature of a one-time engine cost: the tutorial
+-- sequencer parsing ui\game_tutorials.xml and loading its UI.
+--
+-- So start and immediately stop a tutorial at first update, behind the loading
+-- screen.  TUTORIAL_NAME is the no-op sequence this mod injects into
+-- game_tutorials.xml through DXML (modxml_zzz_alao_prewarm_tutorial.script);
+-- point it at an existing tutorial only if that injection is unavailable.
+local PREWARM_TUTORIAL     = true
+local TUTORIAL_NAME        = "alao_prewarm_noop"
 
 -- Time-slice the sound queue onto actor_on_update instead of building it in
 -- one go at first update.  DEFAULT OFF, and it should stay off: see the
@@ -298,6 +335,109 @@ local function prewarm_inventory()
 	end
 end
 
+-- TARGET 1: grow CC["actor_bag"]'s cell pool and grid to cover the ruck.
+--
+-- Only actor_bag is lazy.  `IMode_ResetInventories` is one line -
+-- `self.CC["actor_bag"]:Reinit(self:ParseInventory(db.actor))` - and it is the
+-- ONLY Reinit an "inventory" mode open performs; actor_equ, actor_belt and
+-- actor_quick get their cells in InitControls via AddItemManual, so they are
+-- already built by whoever built the GUI, and npc_*/actor_trade_* belong to the
+-- loot/trade modes.
+--
+-- ignore_kind = true, the fourth argument, bypasses the sorter's kind filter, so
+-- the pool ends up covering the whole ruck rather than whichever sort tab is
+-- selected - a superset of any first open.  That matters because the sorter
+-- state is not set up yet at first update.
+local function prewarm_inv_pool()
+	local m = rawget(_G, "ui_inventory") or ui_inventory
+	local gui = type(m) == "table" and m.GUI
+	local cc = gui and gui.CC and gui.CC["actor_bag"]
+	if not cc then return note("inv pool: no GUI.CC.actor_bag") end
+	if not (db and db.actor) then return note("inv pool: no db.actor") end
+
+	local before = 0
+	for _ in pairs(cc.cell or {}) do before = before + 1 end
+	if before > 0 then
+		return note("inv pool: already %s cells, nothing to do", before)
+	end
+
+	-- UICellContainer:Callback dispatches ONLY to self.owner[func], and the
+	-- owner is this UIInventory.  The one subscriber, UIInventory:On_CC_Add,
+	-- just sets self.update_info = true.  Suppressing it anyway costs nothing
+	-- and is the mod's own documented mechanism - ui_inventory.script uses it
+	-- for actor_equ, actor_belt, actor_quick and picker.
+	local dc = cc.disable_callback
+	local had_add, had_rm
+	if dc then
+		had_add, had_rm = dc["On_CC_Add"], dc["On_CC_Remove"]
+		dc["On_CC_Add"], dc["On_CC_Remove"] = true, true
+	end
+
+	local ok, err = pcall(function()
+		cc:Reinit(gui:ParseInventory(db.actor, nil, nil, true))
+	end)
+
+	local grown, rows = 0, 0
+	for _ in pairs(cc.cell or {}) do grown = grown + 1 end
+	for _ in pairs(cc.grid or {}) do rows = rows + 1 end
+
+	-- Headroom: spare empty cells, built exactly the way AddItemInCell builds
+	-- them (non-manual, so they use the container's own xml path).  A cell that
+	-- was never :Set has no area, and UICellItem:Reset handles that - it falls
+	-- through to Show(false) instead of FreeRoom.
+	local extra = 0
+	if ok and POOL_HEADROOM > 0 and utils_ui and utils_ui.UICellItem then
+		local base = cc.idxer or grown
+		for i = 1, POOL_HEADROOM do
+			local idx = base + i
+			if not cc.cell[idx] then
+				local ok2 = pcall(function()
+					cc.cell[idx] = utils_ui.UICellItem(cc, cc.st, idx)
+				end)
+				if ok2 then extra = extra + 1 else break end
+			end
+		end
+	end
+
+	-- Leave nothing visible behind.  Reset() clears the index tables, frees the
+	-- grid and hides every cell but KEEPS the cells - which is the whole point,
+	-- and is exactly what the real open's Reinit does to them first anyway.
+	pcall(function() cc:Reset() end)
+
+	if dc then
+		dc["On_CC_Add"], dc["On_CC_Remove"] = had_add, had_rm
+	end
+
+	if ok then
+		note("inv pool: %s cells + %s headroom, %s grid rows", grown, extra, rows)
+	else
+		note("inv pool: FAILED: %s", tostring(err))
+	end
+end
+
+-- TARGET 2: warm the engine's tutorial sequencer.
+local function prewarm_tutorial()
+	if not (game and game.start_tutorial and game.stop_tutorial
+	        and game.has_active_tutorial) then
+		return note("tutorial: engine has no tutorial api")
+	end
+	if game.has_active_tutorial() then
+		return note("tutorial: one is already active, skipped")
+	end
+	local ok, err = pcall(game.start_tutorial, TUTORIAL_NAME)
+	if not ok then
+		return note("tutorial: start_tutorial(%s) FAILED: %s", TUTORIAL_NAME, tostring(err))
+	end
+	-- Did the sequence actually exist?  This is the only way to find out, and
+	-- it is why the line is worth printing: offline nothing can tell us whether
+	-- the injected node parsed.
+	local started = game.has_active_tutorial()
+	pcall(game.stop_tutorial)
+	local still = game.has_active_tutorial()
+	note("tutorial: %s started=%s stopped=%s", TUTORIAL_NAME,
+	     tostring(started), tostring(not still))
+end
+
 local function prewarm_encyclopedia()
 	local m = rawget(_G, "ui_pda_encyclopedia_tab") or ui_pda_encyclopedia_tab
 	if type(m) ~= "table" or type(m.get_ui) ~= "function" then
@@ -376,7 +516,12 @@ end
 -- ui_inventory.GUI back to nil.
 function actor_on_first_update()
 	if PREWARM_INVENTORY then prewarm_inventory() end
+	-- after prewarm_inventory, and after FDDA / SortingPlus: this mod's script
+	-- name sorts last, so its listener runs last in the actor_on_first_update
+	-- pass and GUI is there to grow.
+	if PREWARM_INV_POOL then prewarm_inv_pool() end
 	if PREWARM_ENCYCLOPEDIA then prewarm_encyclopedia() end
+	if PREWARM_TUTORIAL then prewarm_tutorial() end
 
 	local queued = 0
 	if PREWARM_SOUNDS and not sounds_done then

@@ -40,10 +40,15 @@ def boot(with_mod: bool, frames_behind_screen: int = 55) -> Arm:
 # the mod compiles and is self-contained
 # ---------------------------------------------------------------------------
 
-def test_mod_is_one_script_and_replaces_nothing():
+def test_mod_adds_only_new_scripts_and_replaces_nothing():
     root = MOD.parent.parent.parent
     files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
-    assert files == ["README.md", "gamedata/scripts/zzz_alao_prewarm.script", "meta.ini"]
+    assert files == [
+        "README.md",
+        "gamedata/scripts/modxml_zzz_alao_prewarm_tutorial.script",
+        "gamedata/scripts/zzz_alao_prewarm.script",
+        "meta.ini",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -63,13 +68,19 @@ def test_inventory_singleton_is_built_behind_the_loading_screen():
     assert "UIInventory()" not in a.effects()
 
 
-def test_without_the_mod_the_first_open_pays_for_it():
-    a = boot(False)
+def test_without_the_mod_and_without_the_other_mods_the_first_open_pays_for_it():
+    """The install this mod's inventory prewarm was written for.
+
+    On GAMMA it is not that install - FDDA Redone and SortingPlus build the GUI
+    at first update anyway - which is why the object prewarm reported
+    "GUI already built, nothing to do" in every capture.
+    """
+    a = Arm(False)
     a.frame(IN_PLAY_FRAME)
     a.clear_effects()
     a.g.ui_inventory.start("inventory")
     assert int(a.g.UI_BUILDS) == 1
-    assert "UIInventory()" in a.effects(), "this is the hitch the mod removes"
+    assert "UIInventory()" in a.effects()
 
 
 def test_encyclopedia_singleton_is_built_behind_the_loading_screen():
@@ -167,19 +178,34 @@ def test_prewarmed_objects_are_never_handed_to_the_scripts():
     assert all(not c["cold"] for c in new), "but every one of them is warm"
 
 
-def test_the_twelve_inventory_listeners_are_the_named_non_identity():
-    """Registering them early is a real difference; pin it so it stays known."""
-    names = ["actor_item_to_ruck", "actor_item_to_slot", "actor_item_to_belt",
-             "actor_on_item_drop", "actor_on_item_use", "actor_on_item_put_in_box",
-             "actor_on_item_take_from_box", "npc_on_item_take", "npc_on_item_drop",
-             "npc_on_use", "physic_object_on_use_callback", "actor_on_net_destroy"]
+TWELVE = ["actor_item_to_ruck", "actor_item_to_slot", "actor_item_to_belt",
+          "actor_on_item_drop", "actor_on_item_use", "actor_on_item_put_in_box",
+          "actor_on_item_take_from_box", "npc_on_item_take", "npc_on_item_drop",
+          "npc_on_use", "physic_object_on_use_callback", "actor_on_net_destroy"]
+
+
+def test_the_twelve_listeners_are_not_a_non_identity_on_this_install():
+    """`UIInventory:__init` registers twelve listeners, three of which do work
+    outside their `IsShown()` guard.  Building GUI early was therefore listed as
+    this mod's one behavioural non-identity - but on GAMMA it is not one, because
+    FDDA Redone and SortingPlus already build the GUI at first update, so the
+    listeners exist at exactly the same moment with or without this mod."""
     a, b = boot(True, 55), boot(False, 55)
-    for n in names:
+    for n in TWELVE:
+        assert int(a.g.listener_count(n)) == int(b.g.listener_count(n)) == 1, n
+
+
+def test_the_twelve_listeners_still_move_on_an_install_without_those_mods():
+    """Where it IS a non-identity, pin it so it stays known."""
+    a, b = Arm(True), Arm(False)
+    a.first_update(others_build_gui=False)
+    b.g.SendScriptCallback("actor_on_first_update")
+    for n in TWELVE:
         assert int(a.g.listener_count(n)) == 1, n
         assert int(b.g.listener_count(n)) == 0, n
     # and after the first open the two agree again
     b.g.ui_inventory.start("inventory")
-    for n in names:
+    for n in TWELVE:
         assert int(a.g.listener_count(n)) == int(b.g.listener_count(n)) == 1, n
 
 
@@ -281,3 +307,177 @@ def test_prewarm_is_a_noop_when_the_gui_already_exists():
     assert int(a.g.UI_BUILDS) == 1
     a.first_update()
     assert int(a.g.UI_BUILDS) == 1
+
+
+# ---------------------------------------------------------------------------
+# v1.2 TARGET 1: the actor_bag cell pool
+#
+# The walk-out run 20260920-185607-I-062-a1c78b traced every inventory open:
+#   open 1   cells 0 -> 19, grid 0 -> 7    17.4 / 9.2 / 7.9 / 12.0 ms
+#   later    cells 19 -> 19, grid 7 -> 7    3.5 - 4.9 ms
+# so the pool, not the GUI object, is what costs.  These tests count cell
+# CONSTRUCTIONS, which is the thing that moves; no timing is claimed.
+# ---------------------------------------------------------------------------
+
+def test_the_first_open_builds_the_pool_without_the_prewarm():
+    a = Arm(False)
+    a.g.OTHER_MOD_BUILDS_GUI()          # FDDA / SortingPlus: GUI, but empty pool
+    assert a.pool() == {"cells": 0, "grid": 0, "idxer": 0}
+    before = int(a.g.CELL_BUILDS)
+    a.open_inventory()
+    assert a.pool()["cells"] == int(a.g.RUCK_N)
+    assert int(a.g.CELL_BUILDS) - before == int(a.g.RUCK_N), (
+        "this is the 17 ms: one UICellItem, four InitStatic, per stack")
+
+
+def test_the_prewarm_grows_the_pool_at_first_update():
+    a = Arm(True)
+    a.first_update()
+    p = a.pool()
+    assert p["cells"] >= int(a.g.RUCK_N), p
+    assert p["grid"] >= 1, p
+
+
+def test_the_first_open_then_constructs_nothing():
+    """The pass condition of the in-game run, as a construction count."""
+    a = Arm(True)
+    a.first_update()
+    pre = a.pool()
+    before = int(a.g.CELL_BUILDS)
+    a.open_inventory()
+    post = a.pool()
+    assert int(a.g.CELL_BUILDS) == before, "the first open must build no cells"
+    assert pre["cells"] == post["cells"], f"{pre} -> {post}"
+
+
+def test_headroom_covers_looting_a_few_more_stacks():
+    a = Arm(True)
+    a.first_update()
+    before = int(a.g.CELL_BUILDS)
+    a.g.RUCK_N = int(a.g.RUCK_N) + 8     # looted eight new stacks
+    a.open_inventory()
+    assert int(a.g.CELL_BUILDS) == before, "headroom should absorb this"
+
+
+def test_the_prewarm_leaves_no_content_behind():
+    """Pool retained, contents cleared: cc:Reset() is the last thing we do."""
+    a = Arm(True)
+    a.first_update()
+    cc = a.g.ui_inventory.GUI.CC["actor_bag"]
+    assert int(cc.idxer) == 0, "idxer must be back to 0"
+    assert sum(1 for _ in cc.indx_id.items()) == 0, "no item may still be indexed"
+    assert a.pool()["cells"] > 0, "but the cells stay"
+
+
+def test_no_on_cc_add_callback_escapes_the_prewarm():
+    """The non-identity, resolved twice over.
+
+    `UICellContainer:Callback` dispatches only to `self.owner[func]`, so the one
+    subscriber is `UIInventory:On_CC_Add`, whose whole body is
+    `self.update_info = true`.  Nothing on the live stack overrides it (checked:
+    29 `UIInventory.<x> =` assignments across the 1346 live winners, none of them
+    `On_CC_Add`).  We suppress it anyway with `disable_callback` - the mod's own
+    mechanism, already used for actor_equ / belt / quick / picker - and put the
+    flags back afterwards.
+    """
+    a = Arm(True)
+    a.first_update()
+    assert int(a.g.CC_ADD_FIRED) == 0
+    cc = a.g.ui_inventory.GUI.CC["actor_bag"]
+    assert cc.disable_callback["On_CC_Add"] is None, "the flag must be restored"
+    assert cc.disable_callback["On_CC_Remove"] is None
+    # and a real open still fires it normally
+    a.open_inventory()
+    assert int(a.g.CC_ADD_FIRED) > 0
+
+
+def test_the_pool_prewarm_is_a_noop_when_the_pool_already_exists():
+    a = Arm(True)
+    a.g.OTHER_MOD_BUILDS_GUI()
+    a.open_inventory()                   # something opened it first
+    before = int(a.g.CELL_BUILDS)
+    a.first_update()
+    assert int(a.g.CELL_BUILDS) == before
+
+
+def test_the_prewarm_survives_nobody_else_building_the_gui():
+    a = Arm(True)
+    a.first_update(others_build_gui=False)   # nobody built it; ours does
+    assert a.g.ui_inventory.GUI is not None
+    assert a.pool()["cells"] >= int(a.g.RUCK_N)
+
+
+# ---------------------------------------------------------------------------
+# v1.2 TARGET 2: the tutorial sequencer
+#
+# `bind_campfire.script:176` had exactly ONE call of 705 / 716 ms per capture
+# and every other call under 0.8 ms - the signature of a one-time engine cost,
+# paid by whichever tutorial starts first.
+# ---------------------------------------------------------------------------
+
+def _campfire_walkup(arm):
+    """What bind_campfire.script:176 does when the actor nears a campfire."""
+    if not arm.g.game.has_active_tutorial():
+        arm.g.game.start_tutorial("tutorial_campfire_ignite")
+
+
+def test_without_the_prewarm_the_campfire_pays_the_cold_load():
+    a = Arm(False)
+    a.lua.execute("TUT_COLD_COST = 705000")     # 705 ms in harness microseconds
+    a.g.OTHER_MOD_BUILDS_GUI()
+    a.g.SendScriptCallback("actor_on_first_update")
+    start = int(a.g.SIM_US)
+    _campfire_walkup(a)
+    assert int(a.g.SIM_US) - start == 705000, "this is the 786 ms frame"
+
+
+def test_with_the_prewarm_the_campfire_is_free():
+    a = Arm(True)
+    a.lua.execute("TUT_COLD_COST = 705000")
+    a.first_update()
+    assert "start_tutorial alao_prewarm_noop" in a.effects()
+    start = int(a.g.SIM_US)
+    _campfire_walkup(a)
+    assert int(a.g.SIM_US) - start == 0, "the sequencer was already warm"
+
+
+def test_the_prewarm_stops_the_tutorial_it_started():
+    a = Arm(True)
+    a.first_update()
+    assert a.g.game.has_active_tutorial() is False
+    eff = a.effects()
+    i = eff.index("start_tutorial alao_prewarm_noop")
+    assert eff[i + 1] == "sequencer cold load"
+    assert eff[i + 2] == "stop_tutorial alao_prewarm_noop", (
+        "stop must follow start immediately, with nothing in between")
+
+
+def test_an_unknown_tutorial_name_is_survivable():
+    """If the DXML injection did not take, nothing breaks and the log says so."""
+    a = Arm(True)
+    a.lua.execute("TUTORIALS = {}")
+    a.first_update()
+    assert "start_tutorial UNKNOWN alao_prewarm_noop" in a.effects()
+    assert a.g.game.has_active_tutorial() is False
+    rep = " ".join(a.report())
+    assert "started=false" in rep, rep
+
+
+def test_the_prewarm_yields_to_a_tutorial_already_running():
+    a = Arm(True)
+    a.lua.execute('TUT_ACTIVE = "something_else"')
+    a.first_update()
+    assert a.g.TUT_ACTIVE == "something_else", "must not stop someone else's"
+    assert "already active" in " ".join(a.report())
+
+
+def test_the_dxml_script_replaces_no_file_and_is_side_effect_free():
+    dxml = MOD.parent / "modxml_zzz_alao_prewarm_tutorial.script"
+    assert dxml.is_file()
+    src = dxml.read_text(encoding="utf-8")
+    # the modpack-author protocol modxml_tutorial_hooks.script documents
+    assert "modxml_tutorial_hooks.exceptions" in src
+    node = src.split("local NODE = [[")[1].split("]]")[0]
+    for forbidden in ("guard_key", "function_on_start", "function_on_stop",
+                      "sound", "pause"):
+        assert forbidden not in node, f"the no-op node must not carry {forbidden}"
