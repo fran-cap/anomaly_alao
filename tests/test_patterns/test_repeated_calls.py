@@ -953,3 +953,33 @@ end
 def test_a_guard_on_an_earlier_line_of_the_statement_still_blocks_the_cache(transform):
     out = transform(GUARDED_METHOD_IN_MULTILINE_ARGS)
     assert "local o_id = o:id()" not in out
+
+
+# A multi-line `elseif` condition has no legal insert point in front of it, and
+# the line before it belongs to the previous branch - a declaration dropped
+# there would not dominate the use in the condition at all (the use would read
+# a nil global). The statement walk must stop at the branch keyword.
+MULTILINE_ELSEIF_CONDITION = """
+local function check(a, b, c, d) return a + b + c + d > 0 end
+
+function f(a)
+    if a == 1 then
+        a = 2
+    elseif check(
+        device().time_delta,
+        device().precache_frame,
+        device().time_delta,
+        device().precache_frame) then
+        a = 3
+    end
+    return a
+end
+"""
+
+
+def test_a_multiline_elseif_condition_is_left_alone(transform, compiles, run_both):
+    out = transform(MULTILINE_ELSEIF_CONDITION)
+    assert "local dev = device()" not in out
+    compiles(out)
+    run_both(MULTILINE_ELSEIF_CONDITION, out, "f", 1)
+    run_both(MULTILINE_ELSEIF_CONDITION, out, "f", 5)

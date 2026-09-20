@@ -2440,8 +2440,12 @@ class ASTTransformer:
 
         If the chosen line is itself a continuation of the previous one (an
         expression broken by a trailing `=` / `..` / `or`), step back to earlier
-        boundaries; that only ever walks over continuation lines, never over an
-        `end` or an `else`, so it cannot leave the block.
+        boundaries. That only ever walks over continuation lines - a line ending
+        in an operator is never an `end` or an `else` - so it cannot leave the
+        block. It does stop dead at an `elseif` / `else` / `until`: a multi-line
+        `elseif` condition has no legal insert point in front of it, and walking
+        past it would drop the declaration into the previous branch, where it
+        would not dominate the use at all.
         """
         boundaries = []
         depth = 0
@@ -2458,9 +2462,15 @@ class ASTTransformer:
         if not boundaries:
             return None
         for line_num in reversed(boundaries[-10:]):
+            text = self._masked_line(line_num)
+            if text is None:
+                return None
+            word = re.match(r'\s*([A-Za-z]+)', text)
+            if word and word.group(1) in ('elseif', 'else', 'until'):
+                return None
             pos = self._get_line_start(line_num)
             if pos is None:
-                continue
+                return None
             if self._is_safe_local_insert_pos(pos):
                 return line_num
         return None
