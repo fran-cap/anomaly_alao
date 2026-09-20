@@ -197,12 +197,45 @@ def test_camera_moves_after_being_frozen(scripts):
     assert scanned == [True, False, False, True, False, True, False, True], scanned
 
 
+def _vec(s):
+    assert s != "nil"
+    return [float(x) for x in s.strip("()").split(",")]
+
+
+def test_sub_epsilon_jitter_is_bounded(scripts):
+    """The guard's tolerance is a bound on staleness, and this measures it.
+
+    CC_EPS_POS is 1e-4 m. That is not bit-exact, so this pins what it buys and
+    what it costs: the patched arm stops working while the camera wanders
+    inside the tolerance, and its answer then lags the original's by at most
+    that much - against a scan that samples geometry every 87 mm.
+    """
+    import i050a_ledge_patch as P
+    eps = float(P.EPS_POS)
+    a, b = both(scripts)
+    for arm in (a, b):
+        arm.state.ledge_z = 0.4
+    base = dict(cam=(0, 1.70, 0.0), dirv=(0, 0, 1), actor=(0, 0, 0), tg=1000)
+    step(a, **dict(base)); step(b, **dict(base))
+    worst, skipped = 0.0, 0
+    for i in range(1, 10):
+        jitter = eps * 0.4 * (1 if i % 2 else -1)
+        st = dict(cam=(jitter, 1.70 + jitter, jitter), tg=1000 + 16 * i)
+        sa, _ = step(a, **dict(st))
+        sb, lb = step(b, **dict(st))
+        if lb == []:
+            skipped += 1
+        worst = max(worst, max(abs(x - y) for x, y in zip(_vec(sa[0]), _vec(sb[0]))))
+    assert skipped == 9, "the guard should absorb jitter inside its tolerance"
+    assert worst <= eps, f"staleness {worst} exceeds the tolerance {eps}"
+
+
 @pytest.mark.parametrize("field,val", [
-    ("cam", (0.001, 1.70, 0.0)),
-    ("cam", (0, 1.70, 0.001)),
-    ("cam", (0, 1.701, 0.0)),
-    ("dirv", (0.001, 0, 0.9999995)),
-    ("actor", (0, 0.001, 0)),
+    ("cam", (0.01, 1.70, 0.0)),
+    ("cam", (0, 1.70, 0.01)),
+    ("cam", (0, 1.71, 0.0)),
+    ("dirv", (0.01, 0, 0.99995)),
+    ("actor", (0, 0.01, 0)),
 ])
 def test_any_input_change_rescans(scripts, field, val):
     a, b = both(scripts)
