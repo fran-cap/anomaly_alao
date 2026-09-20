@@ -895,3 +895,77 @@ Reported by the user, both arms: the New Player Experience caps-lock tutorial pr
 the `npe_*` scripts are `table.insert` -> `t[#t+1]`, one `string.find` plain flag and a `tostring` alias, so the
 rewrite is an unlikely cause; the harness launches into a cloned `aalo-src-*` profile straight into the save, which
 is the first suspect. Unverified.
+
+## 12. Generation-5 results (2026-09-20, five parallel agents)
+
+Five Opus agents, own worktrees off `main` 672d813, merged conflict-free on `integrate/gen5` in the order
+I-055, I-059, I-058, I-057, I-056. In-game numbers are script us/frame from the I-048 profiler, 4 x 120 s per arm on
+`gammabaseline`, standing still, **round 1 of each arm dropped** unless it says otherwise.
+Suite 711 passed / 7 skipped / 4 xfailed, lab 260 passed. Integration gate (`tools/corpus_matrix.py`, quiet box)
+`20260920-1244xx..1248xx-integ-gen5-*` on GAMMA and `20260920-1250xx..1252xx-integ-gen5v-*` on vanilla-db, four flag
+combinations each: G4 0, G5 0, G9 0 everywhere; `--fix` 571 / 6536 and 217 / 3645 (gen-4: 6493 and 3628, the difference is
+I-055); findings 10283 (+3, all `once_latch_local_to_function`) and 4485.
+
+| Idea | Verdict | Evidence | Number |
+|---|---|---|---:|
+| I-054 listener-mode pair (`ref3-alao-b` vs `gen4-all-b`) | **closed** | `20260920-112405-I-054-69d4e1` | 885 -> 340 (listener mode, ~124 us of instrument inside both) |
+| I-057 ledge scan on demand + small-listener bundle | **kept, under the bar standing; deciding run is moving** | `20260920-114512-I-057-e8b3e2` | 309.7 -> 291.8 warm (**-17.9**, no overlap); 307.1 -> 294.7 all rounds (-12.4, overlap) |
+| I-058 hitch attribution | **kept, instrument + suspects; attended run prepared** | moving run `20260920-110221-I-053-5895a5` re-read | one listener per event callback, 4-37 ms per inventory open |
+| I-055 multi-line-argument hoist gap | **kept as coverage / correctness, not performance** | matrix `i055g` / `i055v` | +43 / +17 edits, ~1.2 us/frame |
+| I-056 `ini_file_ex:r_value` never caches false | **pruned** (upstream note only) | `lab/reports/i056-*` | 1.4 us/frame |
+| I-059 RED `once_latch_local_to_function` + `coord queue hold/release` | **done** | matrix `i059b` | 3 hits / 2395 files, 3 true |
+
+What each one found:
+
+- **I-054.** Per listener, before -> after: `drx_da_main` 213.7 (353 calls) -> 23.7 (1 call); `demonized_ledge_grabbing`
+  170.0 -> 6.0; `zzz_player_injuries` 75.6 -> 45.7. What is left standing still: injuries 46, the drx walker 24,
+  `fluid_aim` 16, `light_gem_mcm` 12, `liz_inertia_expanded` 12, `battery_warning` 10, `actor_effects` 8,
+  `sound_ambient` 8, then a flat 4-7 us tail. **Standing still there is no single per-frame target over the 25 us bar
+  left except player injuries**, whose remaining cost is UI calls (I-050b). Ledge grabbing is 6 us standing and 68 us
+  moving, so the scene decides what is worth doing next.
+- **I-057.** The 15-ray ledge scan is a cache: its only outputs are file-locals read by `tryToClimb` / `onScreenCheck`,
+  which only run from the climb keybind paths. The patch gates the `actor_on_update` listener and scans on demand at
+  the four reader sites; `debugMode` keeps the per-frame path; the scan body is untouched. Non-identities: inputs up to
+  one frame fresher on the key-event path, and the scan's cross-frame state advances only on scan frames. The bundle
+  (`fluid_aim` one `section()` + memoised `SYS_GetParam` + cached option, `light_gem_mcm` `Show()` on change,
+  `battery_warning` throttle first, `actor_effects` fog-rect latch) removes 9.1 engine calls per frame.
+  `liz_inertia_expanded` and `sound_ambient` analysed and left alone. The bench is a crossing count, not a timing,
+  because every engine call offline is a stub. The standing run read -12 to -18 where 3-11 was predicted: the fog latch
+  is live on this save and the gen-4 cold-camera guard still paid its prologue every frame. The moving request is
+  `lab/coord/i057-moving-request.json`, pass condition: the ledge row collapses from ~68 us to under 1.
+- **I-058.** Each event callback is carried by one listener: `ActorMenu_on_before_init_mode` = `ui_inventory.script:93`
+  (single-call windows 6.4, 37.4, 15.2, 6.8, 20.1, 6.0, 4.0, 4.2 ms - bimodal, and the old data cannot separate first
+  open from later ones); `actor_on_leave_dialog` = `ui_pda_encyclopedia_tab.script:407` (7-8.7 ms when an article
+  unlocks, 0.01 otherwise); `actor_on_jump` / `actor_on_land` = `eft_jump_sounds.script:71/89` and `actor_on_footstep`
+  = `footstep_sounds.script:87`, which build a fresh `sound_object` per call. Proposed cuts: prewarm `UIInventory()`
+  behind the loading screen, memoise `sound_object`s by path, later the mod's own incremental refresh on reopen. No
+  microbench on purpose: the cost is engine-side. Instrument `lab/profiler-hitch`: max per call, 14-bucket log2
+  histogram, first slow call, all **run-scoped** so the first-open hitch survives the dropped first window; one numeric
+  compare on the hot path, 0.96x the I-048 build; overlays `alao-profiler-hitch` and `-hitch-listeners-inv`;
+  `profile_report.py --hitch`; `fps_runner.py` untouched. **Proposed hitch bar: >= 5 ms off the worst single call of a
+  routine player action** (one frame at 215 fps). Not yet adopted by the user.
+- **I-055.** The beam overstated the gap about 12x: 14 of 549 `repeated_*` findings are declined on an open paren or
+  brace on GAMMA, 12 of 668 on vanilla-db; "177 `device()` calls" was the corpus-wide repetition total. The
+  declaration now goes at the start of the containing statement. Two traps closed, one of which **compiles and is
+  wrong**: stepping back past an `elseif` put the `local` in the previous branch; lifting out of a `while` header
+  changes how often the call runs. G4 0 / G5 0 / G9 0 on 8 runs, G7 unmoved, no new files touched.
+- **I-056.** Not live: GAMMA's Modded Exes `_g_patches.script` replaces `ini_file_ex` with an uncached class on purpose.
+  The vanilla bug is real (`false`, `nil` and absent keys all miss; `remove_line` does not invalidate). Exactly three
+  option reads run every frame standing still. 0.55 us per false read, 0.26 per absent key, 1.4 us/frame.
+- **I-059.** Precision-first rules (one constant flip at the tail of one else-less `if`, no loop between, no closure
+  capture): 3 hits, all copies of `zzz_player_injuries`, and the repeat may be load-bearing for keeping the HUD hidden,
+  which is why it stays RED. `--fix` output byte-identical to main on 1503 files.
+
+Cross-cutting facts:
+
+- **Per-frame work on the standing scene is close to exhausted.** What is left is ledge grabbing while moving (68 us),
+  hitches (a different axis, ms per event), and whatever a crowd scene exposes.
+- **Opposite-direction arm drift is now seen twice** (I-050a, I-057: baseline 299, 305, 303, 321 vs variant 304, 299,
+  297, 279). New I-061. Until it is explained, quote the all-rounds delta next to the warm one when they disagree.
+- **The profiler only sees `SendScriptCallback` listeners.** `visual_memory_manager.get_visible_value` is called by the
+  engine directly and does 8 uncached MCM reads per NPC visibility evaluation (new I-062, needs the busy-hub save).
+  `SYS_GetParam` is uncached on Modded Exes too, ~10-19 reads/frame, est. 5-10 us.
+- New I-060: `_apply_edits` can drop a `repeated_*` cache declaration while keeping its replacements (no `group_id`);
+  not triggered in either corpus, same compiles-yet-wrong class as the `elseif` trap.
+- Known flakes: `test_cli.py::test_txt_report_is_written` under load; `test_i049_dispatcher.py::test_mid_pass_destroy_and_spawn_match_hspairs`
+  1 in 4 (the documented `hspairs` pointer-order nondeterminism).
