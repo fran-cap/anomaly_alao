@@ -131,7 +131,7 @@ Use `py -3.12` on this machine (it has `luaparser` 4.2.0, `jinja2`, `pytest`, `l
 LuaJIT 2.0 and is the compile-checker / executor for rewritten Lua; import it as `lupa.luajit20`.
 
 ```bash
-py -3.12 -m pytest -q                 # unit + CLI tests: 609 passed, 7 skipped, 4 xfailed (2026-09-19, I-052)
+py -3.12 -m pytest -q                 # unit + CLI tests: 612 passed, 7 skipped, 4 xfailed (2026-09-19, I-052)
 py -3.12 -m pytest -q --corpus        # also analyzes the 66 vanilla scripts in the game install, read-only
 py -3.12 -m pytest -q -rx             # print the xfail reasons: each one names a real, unfixed ALAO bug
 py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
@@ -158,7 +158,9 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
     literal faked an unbalanced `(` and killed the hoist; `mask_lua_code()` (new `keep_strings`
     flag) now masks comments and strings in one offset-preserving pass. And `--fix-nil` only
     offers its one-line `if var then ... end` when no other unguarded access of the same nil
-    source exists - it used to guard use #1 of an inserted cache and leave #2..#4 to crash.
+    source exists - it used to guard use #1 of an inserted cache and leave #2..#4 to crash -
+    and it treats `item and <expr using item>` as the guard Lua's short-circuit makes it
+    (-475 GAMMA / -223 vanilla-db false-positive `potential_nil_access`, the only G7 movement).
     `tools/corpus_matrix.py` runs the corpus gate once per flag combination, which is the only
     way that class of bug is visible (every gate before gen-4 ran plain `--fix`).
   - ~~`stalker_lua_lint.py:738` reports timeouts as parse errors; `transform_file_worker`
