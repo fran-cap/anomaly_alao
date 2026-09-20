@@ -247,6 +247,49 @@ unset by the original function still finds its wrapper. Rows come out labelled
 second independent timer. Validated offline against the real `axr_main.script`
 but **not yet in-game** - run it once with `--listeners` before quoting it.
 
+### The tail, not the mean (`lab/profiler-hitch`, idea I-058)
+
+Script ms/frame is an average, and an average is exactly the wrong statistic for
+the thing the player complains about. In the moving run
+`20260920-110221-I-053-5895a5`, `ActorMenu_on_before_init_mode` is 0.001 ms/frame
+- invisible - and **8-11 ms per inventory open**, which at 215 fps is two whole
+frames dropped every time you press I.
+
+`lab/profiler-hitch` is the same overlay with a second half bolted on. Per
+callback **and** per listener it records the worst single call, a fixed log2
+histogram the parser reads a coarse p99 off, and the time / frame / cost of the
+**first** call that crossed the floor - which is what separates "the first
+inventory open of the session cost 37 ms" from "every open costs 5 ms".
+
+All of it hides behind one numeric compare against a 0.1 ms floor. A call under
+the floor pays that compare and nothing else: no table lookup, no allocation.
+That matters because `drx_da_main` alone is 353 listener calls per frame. Over
+240000 sub-floor calls offline it comes out at 0.96x the I-048 build (best of 5,
+fresh runtime per arm, collect before each timed round), i.e. unchanged.
+
+Two consequences worth knowing before quoting a number:
+
+- The hitch numbers describe calls **at or above the floor** only. Everything
+  below is counted by `calls` on the ordinary `cb` / `lst` line and the parser
+  recovers bucket 0 as `calls - above`. So "first call" means first call above
+  the floor - for an inventory open, every one of which is milliseconds, that is
+  the first open.
+- `hit` lines are **run-scoped cumulative**, not per window, because the
+  interesting hitch lives in the first window and every report drops that.
+
+```
+py -3.12 lab/tools/i058_build_overlays.py          # builds both overlays
+py -3.12 lab/tools/profile_report.py --queue <id> --listeners --hitch
+```
+
+`alao-profiler-hitch` is callback level; `alao-profiler-hitch-listeners-inv` is
+per subscriber and `invalidate()`s the I-051 dispatch mod afterwards. They sit
+beside `alao-profiler*`, which nothing here modifies - every locked gen-3/gen-4
+number was taken with those.
+
+Hitches need someone to press the key: an unattended `gammabaseline` run never
+opens an inventory, so a hitch capture is an **attended** run.
+
 ### Running an arm with it
 
 Add one key to the queue request. The profiler is the **instrument, not the
