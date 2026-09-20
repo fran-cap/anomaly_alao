@@ -1,0 +1,57 @@
+{
+  "label": "I-063-prewarm-bundle-v11",
+  "baseline_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I057-b",
+  "variant_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I063-b",
+  "baseline_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "variant_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler-hitch-listeners-inv",
+  "repeats": 2,
+  "duration_s": 180,
+  "warmup_s": 30,
+  "save": "gammabaseline",
+  "notes": "ATTENDED RUN, RE-RUN OF 20260920-165259-I-063-953526 WITH THE MOD AT v1.1. THE USER MUST BE AT THE KEYBOARD FOR ALL FOUR CAPTURES. The arms differ by exactly one file: the variant overlay is agent-I057-b plus gamedata/scripts/zzz_alao_prewarm.script (lab/mods/alao-prewarm); nothing is replaced and no function is patched. WHAT CHANGED SINCE THE FIRST RUN: v1.0 time-sliced the ~160 sound_object() constructions onto actor_on_update at a 0.5 ms/frame budget. That was wrong and the first run proved it - 109 slices over the 0.1 ms floor, 37 frames at 1.6-3.2 ms, 27 at 3.2-6.4, 3 over 6.4, worst 17.7 ms, spread over ~110 frames from frame 7 so about half landed after the key prompt, and the player (blind to arm order) called that capture the worst of the four. One cold sound_object costs 2-18 ms, so a time budget can only decide whether to START another item, never bound the one it starts. v1.1 builds the whole queue synchronously inside actor_on_first_update next to the inventory and encyclopedia prewarm and registers NO actor_on_update listener at all. WHAT IS SETTLED AND WHAT IS RETRACTED: the sound half is confirmed - actor_on_footstep had no call reach the 0.1 ms floor in either variant capture against a baseline max of 0.81 with 15 calls over the floor, eft_jump_sounds:71 0.56 -> 0.16 and :89 0.50 -> 0.15 - so holding a constructed sound_object really does keep the engine resource. The INVENTORY claim is RETRACTED: this mod's inventory prewarm has never run on this install, because every variant xray.log prints '[alao_prewarm]   inventory: GUI already built, nothing to do' at frame 7 (custom_functor_autoinject.script:435 from 447- FDDA Redone and zzz_rax_sortingplus_mcm.script:108 from 110- SortingPlus both build ui_inventory.GUI at actor_on_first_update, ahead of this mod). The 19.6/17.8 -> 5.5/7.2 ms figure quoted earlier was two hand-driven captures of a cost that is bimodal 4-20 ms, i.e. noise. The encyclopedia row is partial: baselines 7.39/7.08 in run 2, but the v1.1 variant capture that had a dialog recorded no leave_dialog row, so the 1.9/1.9 stands from run 1 only. This is a HITCH comparison, not an fps or ms/frame one: the player drives the workload by hand, so the mean script ms/frame and the fps delta between the arms mean nothing and must not be quoted. SCRIPTED ROUTINE, identical in every capture, exactly as in i058-hitch-request.json and the first I-063 run: do NOTHING until the 30 s warm-up is over and open NOTHING before the capture starts (the first inventory open of the session must land inside the capture); then (1) open the inventory (I), wait ~2 s, close it; repeat 5 times with ~10 s between opens; (2) open the PDA (P), wait ~3 s, close it; twice; (3) jump 10 times, a couple of seconds apart, on the ground you are standing on; (4) walk ~15 s so footsteps fire; (5) talk to an NPC and leave the dialog twice if one is within reach, otherwise skip and say so. Finish ~30 s before the end and stand still. Read it back with: py -3.12 lab/tools/profile_report.py --queue <id> --listeners --hitch --top 400",
+  "pass_conditions": [
+    {
+      "row": "lst ActorMenu_on_before_init_mode#ui_inventory.script:93 - NO CLAIM, DO NOT SCORE",
+      "baseline": "bimodal 4-20 ms with no reliable relation to being the first open: run 20260920-171714-I-063-ef2deb baseline capture 1 max 5.19 with the first open AT 5.19, baseline capture 3 max 19.26 with the first open at only 8.30; per-window singles earlier the same day 6.4, 37.4, 15.2, 6.8, 20.1, 6.0, 4.0, 4.2",
+      "variant_expected": "IDENTICAL to baseline. The inventory prewarm in this mod NEVER RUNS on this install: every variant xray.log prints '[alao_prewarm]   inventory: GUI already built, nothing to do' at frame 7, because custom_functor_autoinject.script:435 (447- FDDA Redone) and zzz_rax_sortingplus_mcm.script:108 (110- SortingPlus) both build ui_inventory.GUI at actor_on_first_update, before this mod's listener. An earlier version of this file claimed 19.6/17.8 -> 5.5/7.2 for this row; that was two hand-driven captures of a bimodal cost, i.e. noise, and it is RETRACTED.",
+      "passes_if": "nothing. This row is reported for the record only and must not be used to score the arm either way.",
+      "fails_if": "nothing. The real question - why an open is 4 ms or 19 ms - needs the per-call trace overlay alao-profiler-hitch-trace-inv (lab/tools/i063_build_trace_overlay.py), not this A/B."
+    },
+    {
+      "row": "lst actor_on_leave_dialog#ui_pda_encyclopedia_tab.script:407",
+      "baseline": "8.8 / 7.7 ms in the first I-063 run (6.4-9.5 in I-058); variant read 1.9 / 1.9, so this one is already settled and only has to hold",
+      "variant_expected": "the pda_encyclopedia_tab() singleton is gone from this path; what is left is InitCategories() + SelectCategory + SelectArticle + set_notification",
+      "passes_if": "variant max_ms is at least 3 ms below the same capture's baseline max",
+      "fails_if": "unchanged - then the singleton is not the expensive part and the cost is InitCategories over all categories, which prewarm cannot remove. Only meaningful in captures where an article actually unlocked; if above_floor is 0 in a capture, that capture says nothing about this row."
+    },
+    {
+      "row": "cb actor_on_jump / lst eft_jump_sounds.script:71",
+      "baseline": "max 3.5 / 3.1 / 0.9 / 0.9 ms; the first jump of the session was the max in captures 1 and 2",
+      "variant_expected": "the sound_object construction is warm, so what is left is the 5 geometry raycasts of get_material(), which this mod does not touch",
+      "passes_if": "variant max_ms <= ~1.0 ms (the captures-3-and-4 band) in the captures where the baseline was above 3 ms",
+      "fails_if": "regresses. The per-construction assumption is CONFIRMED by the first run (jump/land ~1.1 -> ~0.6 ms), so this row is now a regression check, not a question."
+    },
+    {
+      "row": "cb actor_on_land / lst eft_jump_sounds.script:89 and cb actor_on_footstep / lst footstep_sounds.script:87",
+      "baseline": "land max 3.0 / 1.2 / 0.8 / 1.2 ms; footstep max 4.5 / 2.7 / 0.9 / 0.8 ms, and its first above-floor call was NOT always its max (capture 1: first 1.76, max 4.45) because each new surface material is its own cold path",
+      "variant_expected": "flat: every material's paths were built during the load. In the first I-063 run actor_on_footstep had NO call reach the 0.1 ms floor in either variant capture (baseline 0.9 ms max, 12-18 calls over the floor), i.e. the row vanished from the hitch table.",
+      "passes_if": "the actor_on_footstep row is absent or its max_ms <= ~0.5 ms in both variant captures, and land max_ms <= ~1.0 ms",
+      "fails_if": "regresses; same reasoning as the jump row"
+    },
+    {
+      "row": "where the prewarm cost shows up - THE ROW THIS RE-RUN EXISTS FOR",
+      "baseline": "n/a",
+      "variant_expected": "ALL of it on lst actor_on_first_update#zzz_alao_prewarm.script at frame 7. v1.0 read 44.7 / 43.9 ms there with the sounds sliced out; v1.1 measured 31.7 / 32.4 ms for the WHOLE bundle, which is less than v1.0's first_update alone - the sound queue was already OS-cache warm in both v1.1 captures, and the inventory prewarm is a no-op here. Expect a larger number, a few hundred ms, on a genuinely cold first launch.",
+      "passes_if": "there is NO lst actor_on_update#zzz_alao_prewarm.script row in the hitch table at all, in either variant capture, and no unnamed actor_on_update listener appears that was not in the baseline. The first_update row's first_frame is 7.",
+      "fails_if": "an actor_on_update#zzz_alao_prewarm row exists - then SLICE_SOUNDS was left on in the built overlay. The v1.0 failure it replaces was: 109 calls over the floor, histogram [0,0,39,2,37,27,3,1,...], max 17.7 ms, half of them after frame 62."
+    },
+    {
+      "row": "engine log sanity",
+      "baseline": "n/a",
+      "variant_expected": "one [alao_prewarm 1.1] done block in xray.log per level load, listing the inventory / encyclopedia results and a 'sounds: N built, M failed, synchronous at first update' line",
+      "passes_if": "the sounds line says 'synchronous at first update' (not 'queued for slicing'), failed == 0 (or a small number, each one naming a path this install does not ship), and the inventory line says 'UIInventory() built'",
+      "fails_if": "'UIInventory() FAILED' - then building it at first update hits something the constructor needs that is not ready yet, and the hook has to move to on_loading_screen_key_prompt (frame ~62, still behind the screen)."
+    }
+  ]
+}

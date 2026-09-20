@@ -63,6 +63,27 @@ local HITCH             = true
 local HITCH_FLOOR_MS    = 0.1   -- bucket 1 is [floor, 2*floor)
 local HITCH_BUCKETS     = 14    -- 0.1 ms .. 819 ms, last bucket is open-ended
 
+-- --- per-call trace for a named listener (I-063) -----------------------------
+-- max / first / histogram is the right summary for "is this listener a hitch",
+-- and the wrong one for "WHY is this one call 19 ms and that one 4". For
+-- ui_inventory's open the answer is suspected to be state that grows between
+-- opens (the cell pool, the grid), and a summary cannot show a correlation.
+--
+-- So: name a listener (or a prefix of its label) here and every one of its
+-- calls gets one `ALAOPROF|1|trace|` line with its duration, the frame, and a
+-- pair of cheap covariates sampled immediately BEFORE and AFTER the call - both
+-- outside the timer, so the trace never inflates the number it is reporting.
+--
+-- This is deliberately NOT general. It is for listeners that fire a handful of
+-- times a session. Point it at actor_on_update and it will write a line per
+-- frame until it hits TRACE_MAX_LINES and stops.
+--
+-- nil (the default) means the whole thing costs one upvalue read and one `if`
+-- per wrapped call - the same class of cost as the hitch floor compare, and the
+-- default overlays keep that cost whether or not they use the feature.
+local TRACE_LISTENERS   = nil   -- e.g. {"ActorMenu_on_before_init_mode#ui_inventory.script"}
+local TRACE_MAX_LINES   = 400   -- hard cap, so a bad pattern cannot flood the log
+
 -- ---------------------------------------------------------------------------
 -- state (all local and flat: this runs a few thousand times a second and I do
 -- not want the instrument to become the thing I am measuring)
@@ -392,15 +413,57 @@ local function listener_label(name, f)
 	return name .. "#" .. src .. ":" .. line
 end
 
+-- Does this label want a per-call trace line? Decided ONCE, at wrap time.
+local function trace_wanted(label)
+	if not TRACE_LISTENERS then return false end
+	for i = 1, #TRACE_LISTENERS do
+		if string.sub(label, 1, #TRACE_LISTENERS[i]) == TRACE_LISTENERS[i] then
+			return true
+		end
+	end
+	return false
+end
+
+-- Cheap covariates, sampled outside the timer. Whatever it returns is opaque to
+-- the parser: the trace line is read by grepping the engine log, not by
+-- aalo/profiler.py, which ignores `kind` values it does not know.
+--
+-- This one is aimed at the ui_inventory open: the hypothesis is that the cost
+-- tracks the size of the UICellContainer cell pool and its grid, both of which
+-- are high-water marks that only grow within a session (UICellContainer:Reset
+-- calls ci:Reset() on every cell but never removes one, and AddItemInCell only
+-- constructs a UICellItem when self.cell[indx] is nil).
+local function trace_probe()
+	local gui = ui_inventory and ui_inventory.GUI
+	local cc = gui and gui.CC and gui.CC["actor_bag"]
+	if not cc then return "na" end
+	local cells, grid = 0, 0
+	for _ in pairs(cc.cell or {}) do cells = cells + 1 end
+	for _ in pairs(cc.grid or {}) do grid = grid + 1 end
+	return "cells=" .. cells .. ",grid=" .. grid .. ",idxer=" .. tostring(cc.idxer)
+end
+
+local trace_lines = 0
+
+local function trace_emit(label, d, pre, post)
+	if trace_lines >= TRACE_MAX_LINES then return end
+	trace_lines = trace_lines + 1
+	printf("ALAOPROF|1|trace|n=%s|name=%s|units=%s|frame=%s|t=%s|pre=%s|post=%s",
+	       trace_lines, label, d, dev.frame, time_global(), pre, post)
+end
+
 local function wrap_listener(name, f)
 	if wrapped_by[f] then return wrapped_by[f] end
 	local label = listener_label(name, f)
 	local is_fn = (type(f) == "function")
+	local traced = trace_wanted(label)
 	local wrapper = function(...)
 		if ldepth > 0 then
 			if is_fn then return f(...) end
 			return f[name](f, ...)
 		end
+		-- sampled before the timer starts, so it cannot inflate `d`
+		local pre = traced and trace_probe() or nil
 		ldepth = 1
 		ltimer:start()
 		if is_fn then f(...) else f[name](f, ...) end
@@ -414,6 +477,7 @@ local function wrap_listener(name, f)
 		if d >= hfloor then
 			hitch_hit(lhmax, lhfirst_t, lhfirst_f, lhfirst_u, lhbuckets, label, d)
 		end
+		if traced then trace_emit(label, d, pre, trace_probe()) end
 	end
 	wrapped_by[f] = wrapper
 	orig_by[wrapper] = f
