@@ -71,6 +71,61 @@ def census_refs(winners) -> dict:
                         for k in ("called", "bound", "other")}}
 
 
+SELF_REG = re.compile(r'\b(Un)?RegisterScriptCallback\s*\(\s*"([^"]+)"')
+REG_NAMED = re.compile(r'RegisterScriptCallback\s*\(\s*"([^"]+)"\s*,\s*([A-Za-z_][\w.:]*)\s*\)')
+TOP_END = re.compile(r"^end\s*$")
+
+
+def census_self_churn(winners) -> dict:
+    """Does any live script register or unregister for the callback it is
+    CURRENTLY INSIDE?
+
+    That is the one situation where the cached-array dispatcher can differ from
+    the shipped hspairs one (see lab/reports/i051-make-callback-delivery.md),
+    so it is the number the safety case actually needs.
+
+    The resolution is deliberately crude and deliberately over-counts: for each
+    `RegisterScriptCallback("X", f)` where `f` is a NAME, find `function f(` at
+    the top level of the same file, take its body up to the next line that is
+    bare `end`, and look for a Register/UnregisterScriptCallback for "X" inside
+    it.  It cannot see a listener registered as an inline closure, a listener
+    that churns X from a function it calls, or a listener defined in another
+    file - so a zero here is "no direct, same-file, same-callback churn", not
+    "impossible".  Those blind spots are reported as counts of their own.
+    """
+    direct, unresolved, inline = [], 0, 0
+    for name, (path, tag) in sorted(winners.items()):
+        try:
+            src = read(path)
+        except OSError:
+            continue
+        lines = src.splitlines()
+        inline += len(re.findall(r'RegisterScriptCallback\s*\(\s*"[^"]+"\s*,\s*function\b', src))
+        bodies = {}
+        for i, line in enumerate(lines):
+            m = re.match(r"^function\s+([A-Za-z_][\w]*)\s*\(", line)
+            if m:
+                j = i + 1
+                while j < len(lines) and not TOP_END.match(lines[j]):
+                    j += 1
+                bodies[m.group(1)] = (i, j)
+        for m in REG_NAMED.finditer(src):
+            cb, fn = m.group(1), m.group(2)
+            if fn not in bodies:
+                unresolved += 1
+                continue
+            i, j = bodies[fn]
+            for k in range(i, min(j + 1, len(lines))):
+                for mm in SELF_REG.finditer(lines[k]):
+                    if mm.group(2) == cb:
+                        direct.append({"file": name, "tag": tag, "callback": cb,
+                                       "listener": fn, "line": k + 1,
+                                       "op": "unregister" if mm.group(1) else "register",
+                                       "text": lines[k].strip()[:140]})
+    return {"direct": direct, "unresolved_listener_names": unresolved,
+            "inline_closure_registrations": inline}
+
+
 def census_axr_main_copies() -> dict:
     live_mods, all_mods = [], []
     for mod in read_modlist(DEFAULT_MODLIST):
@@ -102,6 +157,18 @@ def main() -> int:
     print(f"references to axr_main.<patched fn>: {refs['by_kind']}")
     for h in refs["hits"]:
         print(f"  [{h['kind']:7}] {h['file']}:{h['line']} ({h['tag']})  {h['text']}")
+    churn = census_self_churn(winners)
+    print()
+    print("listeners that register/unregister for the callback they are inside")
+    print(f"  direct, same-file, resolvable : {len(churn['direct'])}")
+    for h in churn["direct"]:
+        print(f"    {h['file']}:{h['line']} {h['callback']} <- {h['listener']} "
+              f"({h['op']}) {h['text']}")
+    print(f"  listener names not resolvable to a top-level function: "
+          f"{churn['unresolved_listener_names']}")
+    print(f"  registrations of an inline closure (invisible to this scan): "
+          f"{churn['inline_closure_registrations']}")
+
     print()
     print("axr_main.script copies")
     print(f"  loose            : {copies['loose_exists']}")
@@ -112,7 +179,8 @@ def main() -> int:
           f"{copies['extracted_gamma_mods_shipping_axr_main']}")
 
     if a.json:
-        Path(a.json).write_text(json.dumps({"refs": refs, "copies": copies}, indent=2),
+        Path(a.json).write_text(json.dumps({"refs": refs, "copies": copies,
+                                            "self_churn": churn}, indent=2),
                                 encoding="utf-8")
         print(f"\nwrote {a.json}")
     return 0
