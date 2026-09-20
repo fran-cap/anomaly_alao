@@ -14,13 +14,13 @@ the locked +-2% noise band and disagreeing in sign. The saving is real and repro
 in script-ms; no frame-rate win is demonstrated. Both halves of that sentence are the
 result.
 
-Two things I got wrong, both instructive. My site arithmetic priced **3** dispatches per
-frame when `make_callback` is the funnel for **7.49** — patching it makes every callback
-cheaper, not just the per-frame ones. And the microbench under-predicted the big
-dispatch by 2.2-3.7x because the protocol's mandatory `collectgarbage()` before each
-timed run excludes the GC cost of the K-element table and two closures `hspairs`
-allocates per call; see §6, it makes `tools/microbench.py` a **lower bound** for
-allocation-heavy rewrites.
+Three things I got wrong, all instructive. My site arithmetic priced **3** dispatches
+per frame when `make_callback` is the funnel for **7.49** — patching it makes every
+callback cheaper, not just the per-frame ones. The microbench under-predicted the big
+dispatch by 1.5-3.5x, with allocation the leading but untested suspect (§6). And I
+published a headline saving from a **contended** bench run: 43.1 us at K=73, where the
+clean run says **27.6** — a 56% over-statement that stood for several hours, and exactly
+what the lab's "never quote a bench taken under a lock" rule is for (§3).
 
 What this is *not* is a pattern: exactly one `spairs(` site in the whole live GAMMA
 script set runs per frame, and it is this one.
@@ -196,37 +196,36 @@ The `?` is load-bearing: 4 and 12 are counted register sites, 73-125 is a *range
 because 52 of the 125 actor_on_update registrations are churn and nothing static says
 how many are live at once.
 
-### Neither run was taken on an idle machine
+### Three runs, and only the third one counts
 
-Say this before the numbers, because the lab rule is not to quote a microbench taken
-while a lock is held and **I could not get a clean window**. Run **A** (22:41Z) ran with
-agent-I044's `corpus` lock held; run **B** (23:57Z) ran with the fps-runner's `game`
-lock held for `20260919-193557-I-048-b1325e`, which took the lock while the bench was
-already in flight. Run B has much the better jitter (1.01-1.14 vs 1.04-1.59), so the two
-are not simply "contended" and "clean".
+Run **A** (22:41Z) ran with agent-I044's `corpus` lock held. Run **B** (23:57Z) ran with
+the fps-runner's `game` lock, which was taken for `20260919-193557-I-048-b1325e` while
+the bench was already in flight. Run **C** (00:05Z) ran with **no lock held before,
+during or after** — that is the one to quote, and the lab rule is why A and B are kept
+here only as a consistency check.
 
-They agree on every ratio to within about 10%, and that agreement is the only claim I
-will make for them. On the absolute per-dispatch saving they are further apart — 43.1 vs
-26.5 us at K=73 interpreted, a 39% spread — so the honest microbench prediction is a
-**range, 26-43 us**, not a point. Both runs are in the repo history; neither should be
-promoted to `lab/reports/microbench-baseline.json` without a re-run on a quiet box.
+B and C agree to within 4% on the absolute saving. **A is the outlier, and it is the one
+I had published**: 43.1 us at K=73 interpreted against 26.5 (B) and 27.6 (C). The
+contended run over-stated the headline saving by 56%, which is exactly the failure the
+"no locks" rule exists to catch, and I quoted it for several hours before I could get a
+clean window. Corrected: **the interpreted saving at K=73 is 27.6 us**, not 43.1.
 
-### Speedups (run A / run B)
+### Speedups (A / B / **C**)
 
 | K | listeners | JIT on | JIT off |
 |---|---|---|---|
-| 4 (monster_on_update) | trivial | 64.8x / 60.1x | 10.8x / 8.2x |
-| 12 (npc_on_update) | trivial | 4.3x / 3.9x | 16.2x / 13.1x |
-| 20 | trivial | 4.4x / 4.3x | 13.1x / 15.8x |
-| 60 | trivial | 5.1x / 6.6x | 25.8x / 20.1x |
-| **73 (actor_on_update, permanent)** | trivial | **4.9x / 4.7x** | **30.6x / 20.5x** |
-| **125 (actor_on_update, all sites)** | trivial | **5.8x / 6.9x** | **27.2x / 25.9x** |
-| 4 | working | 5.2x / 4.7x | 2.5x / 2.6x |
-| 12 | working | 3.2x / 3.2x | 3.7x / 3.7x |
-| 20 | working | 3.4x / 3.3x | 4.3x / 4.2x |
-| 60 | working | 3.3x / 3.2x | 5.7x / 5.7x |
-| 73 | working | 3.0x / 3.4x | 6.2x / 5.8x |
-| 125 | working | 4.0x / 3.7x | 7.2x / 6.7x |
+| 4 (monster_on_update) | trivial | 64.8 / 60.1 / **62.0x** | 10.8 / 8.2 / **9.0x** |
+| 12 (npc_on_update) | trivial | 4.3 / 3.9 / **3.5x** | 16.2 / 13.1 / **13.5x** |
+| 20 | trivial | 4.4 / 4.3 / **4.8x** | 13.1 / 15.8 / **15.5x** |
+| 60 | trivial | 5.1 / 6.6 / **7.4x** | 25.8 / 20.1 / **20.5x** |
+| **73 (actor, permanent)** | trivial | 4.9 / 4.7 / **6.0x** | 30.6 / 20.5 / **20.6x** |
+| **125 (actor, all sites)** | trivial | 5.8 / 6.9 / **8.0x** | 27.2 / 25.9 / **27.2x** |
+| 4 | working | 5.2 / 4.7 / **4.7x** | 2.5 / 2.6 / **2.6x** |
+| 12 | working | 3.2 / 3.2 / **2.8x** | 3.7 / 3.7 / **3.6x** |
+| 20 | working | 3.4 / 3.3 / **3.0x** | 4.3 / 4.2 / **4.3x** |
+| 60 | working | 3.3 / 3.2 / **3.3x** | 5.7 / 5.7 / **5.9x** |
+| 73 | working | 3.0 / 3.4 / **3.2x** | 6.2 / 5.8 / **5.6x** |
+| 125 | working | 4.0 / 3.7 / **3.4x** | 7.2 / 6.7 / **6.6x** |
 
 The 60-65x at K=4 compiled is an artifact — at four trivial listeners the candidate's
 whole loop folds into one trace — and is not the monster_on_update win; the absolute
@@ -241,21 +240,22 @@ identical in the trivial and working pairs (6.4 vs 5.8 us at K=73 compiled): dis
 overhead is **additive**, independent of what the listeners do. That is what makes it
 legitimate to price it per call.
 
-| K | mode | saved, run A (us) | saved, run B (us) | in game |
-|---|---|---|---|---|
-| 4 | compiled | 0.58 | 0.52 | |
-| 4 | interpreted | 0.88 | 0.60 | 2.72 (monster_on_update) |
-| 12 | compiled | 1.17 | 0.74 | |
-| 12 | interpreted | 3.58 | 2.77 | **2.80** (npc_on_update) |
-| 73 | compiled | 6.44 | 5.46 | |
-| 73 | interpreted | 43.13 | 26.48 | **96.75** (actor_on_update) |
-| 125 | compiled | 11.95 | 14.06 | |
-| 125 | interpreted | 60.55 | 57.71 | |
+| K | mode | A (us) | B (us) | **C, clean (us)** | in game |
+|---|---|---|---|---|---|
+| 4 | compiled | 0.58 | 0.52 | **0.55** | |
+| 4 | interpreted | 0.88 | 0.60 | **0.71** | 2.72 (monster_on_update, cpf 0.05, noisy) |
+| 12 | compiled | 1.17 | 0.74 | **0.74** | |
+| 12 | interpreted | 3.58 | 2.77 | **3.03** | **2.80** (npc_on_update) |
+| 73 | compiled | 6.44 | 5.46 | **7.48** | |
+| 73 | interpreted | 43.13 | 26.48 | **27.63** | **96.75** (actor_on_update) |
+| 125 | compiled | 11.95 | 14.06 | **17.17** | |
+| 125 | interpreted | 60.55 | 57.71 | **62.65** | **96.75** (same, if K is 125) |
 
-The "in game" column is from §6 and is put here to be read against the prediction, not
-to replace it. At K=12 the bench nailed it. At K=73 it under-predicts by 2.2-3.7x, and
-§6 argues that is the `collectgarbage()` in the protocol excluding the GC cost of what
-`hspairs` allocates per call.
+The "in game" column is from §6, put here to be read against the prediction rather than
+to replace it. **At K=12 the clean bench is accurate to 8%** (3.03 predicted, 2.80
+measured) — which is the strongest evidence that the bench models the right thing. The
+`actor_on_update` gap is 1.5x if its true listener count is 125 and 3.5x if it is 73;
+since K is only bounded, so is the gap.
 
 ---
 
@@ -452,8 +452,8 @@ to 125:
 
 | callback | K (perm/all) | calls/frame | saved/dispatch | bench predicts |
 |---|---|---|---|---|
-| actor_on_update | 73 / 125 | 1.000 | **96.75 us** | 26-43 us |
-| npc_on_update | 11 / 12 | 0.502 | 2.80 us | 2.8-3.6 us |
+| actor_on_update | 73 / 125 | 1.000 | **96.75 us** | 27.6 us (K=73) / 62.7 (K=125) |
+| npc_on_update | 11 / 12 | 0.502 | 2.80 us | **3.03 us — within 8%** |
 | squad_on_update | 1 / 5 | 0.434 | 3.57 us | ~0.9 us |
 | npc_on_hear_callback | 1 / 3 | 0.842 | 2.74 us | ~0.9 us |
 | actor_on_update_pickup | 0 / 3 | 1.000 | 2.27 us | ~0.9 us |
@@ -466,32 +466,40 @@ things my patch could reach except through the funnel. That is the mechanism con
 itself, not contamination. The rule was right to fire; what it caught was that **my site
 arithmetic modelled 3 of the 7.49 dispatches per frame**.
 
-### What the bench got wrong, and why it matters to the lab
+### What the bench got wrong
 
-`actor_on_update` is the one real outlier: **96.75 us saved per dispatch against a bench
-prediction of 26-43 us**, a factor of 2.2-3.7. The two bench runs (see §3) disagree with
-each other by 39% at that K, so the prediction interval was already wide, but the
-in-game number sits outside even its top end.
+`actor_on_update` is the one real outlier: **96.75 us saved per dispatch against a clean
+bench prediction of 27.6 us at K=73 or 62.7 us at K=125** — a factor of 1.5x to 3.5x,
+and the range is that wide only because K itself is bounded rather than known.
 
-The likely reason is structural and worth recording: `hspairs` allocates a K-element
-`keys` array plus a `safe_order` closure plus an iterator closure **on every dispatch**.
-At K=73-125 that is a kilobyte-scale table created and discarded every frame. The
-microbench protocol runs `collectgarbage('collect')` immediately before every timed run
-and reports **best of 9** — which is exactly right for comparing steady-state work, and
-which systematically excludes the GC cost that this allocation churn creates in a live
-frame. The profiler measures inclusive wall time inside `make_callback`, so a GC step
-that fires during a dispatch lands in the number.
+Everything else lines up. `npc_on_update`, the one other callback whose listener count I
+know well (11 permanent of 12 static), comes in at 2.80 us against a predicted 3.03 —
+**within 8%**. So the bench is not systematically wrong; it models the dispatcher
+correctly at the listener counts where I can check it.
 
-Note the under-prediction scales with K: near-exact at K=1-12 where the allocation is
-tiny, 2-4x at K=73-125 where it is not. That is the signature of an allocation cost, not
-of a measurement error.
+The obvious structural candidate for the large-K gap is allocation: `hspairs` builds a
+K-element `keys` array plus a `safe_order` closure plus an iterator closure **on every
+dispatch**, so at K=73-125 that is a kilobyte-scale table created and discarded every
+frame. The microbench protocol runs `collectgarbage('collect')` immediately before every
+timed run and reports **best of 9** — exactly right for comparing steady-state work, and
+it systematically excludes the GC cost that churn creates in a live frame, while the
+profiler's inclusive wall time inside `make_callback` includes any GC step that fires
+during a dispatch.
 
-**So `collectgarbage()` before every timed run makes `tools/microbench.py` a lower bound
-for allocation-heavy rewrites.** The rule exists because its absence once produced a 23%
-over-claim on `table.insert`; here its presence produced a 2-4x under-claim. Both
-directions are worth knowing. I am not proposing to change the protocol — a
-bench that included GC would be far noisier — but a snippet whose arms differ in
-allocations per iteration should say so, and its number should be read as a floor.
+**I did not test that hypothesis and the evidence for it is weaker than I first wrote.**
+My earlier draft claimed the under-prediction "scales with K"; with the clean run C the
+ratios are 0.92x at K=12, then 1.5x or 3.5x at the top depending on the true K, which is
+not a clean monotone trend — it is one outlier plus one good match. The honest statement
+is: *the bench is accurate where I can check it, it under-predicts the one callback
+whose K I do not know, and allocation is the leading suspect.* Testing it properly means
+a bench variant reporting the mean of all 9 runs rather than the best, or tracking
+`collectgarbage('count')` deltas per arm. That is the first thing I would do next.
+
+If it holds up, the lesson for the lab is that `collectgarbage()` before every timed run
+makes `tools/microbench.py` a **lower bound** for allocation-heavy rewrites — the rule
+exists because its absence once produced a 23% over-claim on `table.insert`, and it
+would be worth knowing that it can err the other way. I am not proposing to change the
+protocol; a bench that included GC would be far noisier.
 
 ### The honest part: fps did not move
 
@@ -566,17 +574,18 @@ re-file the patch as an upstream/hand-patch item.**
 * No corpus run, no G4-G9: this branch adds a bench pair, a test module and two lab
   tools. It does not touch `ast_analyzer.py`, `ast_transformer.py` or `reporter.py`, so
   ALAO's output is byte-identical and those gates have nothing to compare.
-* **Neither microbench run was taken on an idle machine** (§3), and they disagree by 39%
-  on the absolute saving at K=73. I tried twice and lost the window twice; the numbers
-  should be re-taken on a quiet box before any of them is promoted to a baseline.
+* Run C is clean and is the one quoted; A and B were taken under locks and A was wrong
+  by 56% at K=73. I published A's number before I could get a clean window. Nothing from
+  any of the three should go into `microbench-baseline.json` without an independent
+  re-run — one clean run is one clean run.
 * The listener count K is still **static** — 73 and 125 are bounds, never observed
   running, and `@corpus_k` marks the bucket estimated. The profiler reports calls/frame,
   not listeners/dispatch, so the run does not pin K either.
-* **Why the in-game saving is 2.2-3.7x the bench is argued, not proven.** The GC
-  explanation fits (the gap scales with K, which is what the allocation does) but I did
-  not test it — the clean way would be a bench variant that reports the mean of all 9
-  runs rather than the best, or one that counts `collectgarbage('count')` deltas. That
-  is a real loose end and it is the one I would pull first.
+* **Why the in-game saving is 1.5-3.5x the bench is argued, not proven**, and with the
+  clean run the evidence is weaker than my first draft claimed — it is one outlier
+  (`actor_on_update`) plus one good match (`npc_on_update`, within 8%), not a trend.
+  The GC explanation is a hypothesis; the test is a mean-of-9 bench variant or
+  `collectgarbage('count')` deltas per arm. Biggest loose end here.
 * No corpus / G4-G9 numbers: nothing here changes ALAO's output.
 * My first queue item `20260919-184412-I-043-b1d614` ran on the pre-I-048 runner with no
   profiler installed, so it measures fps only and I read nothing into it.
