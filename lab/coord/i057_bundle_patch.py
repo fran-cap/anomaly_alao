@@ -103,6 +103,13 @@ LIVE = {
 NL = "\r\n"
 
 
+def fresh(text):
+    """Refuse an already-patched file. battery_warning's edit is a block move,
+    which would otherwise apply a second time and duplicate the comment."""
+    assert "I-057" not in text, "this file is already patched"
+    return text
+
+
 def sub(text, old, new, count=1):
     old = old.replace("\n", NL)
     new = new.replace("\n", NL)
@@ -158,6 +165,7 @@ end
 
 
 def fluid_aim(text):
+    text = fresh(text)
     text = sub(text, """
 -- Actor On Update(Every tick)
 local function actor_on_update()""", FLUID_HEAD + """
@@ -216,6 +224,7 @@ local function actor_on_update()""")
 
 # ------------------------------------------------------------- actor_effects
 def actor_effects(text):
+    text = fresh(text)
     text = sub(text, """local zbias = Frect():set(0,0,1024,1024)
 function HUD_fog(enabled, actor, rect)
 """, """local zbias = Frect():set(0,0,1024,1024)
@@ -252,6 +261,7 @@ function HUD_fog(enabled, actor, rect)
 
 # ----------------------------------------------------------- battery_warning
 def battery_warning(text):
+    text = fresh(text)
     # Two subs that each avoid the whitespace-only lines between the blocks:
     # lift the menu test out, then put it back below the throttle.
     menu = """	if (not main_hud_shown()) or ActorMenu.get_pda_menu():IsShown() or actor_menu.inventory_opened() then --lets not beep at ppl in menus.
@@ -279,6 +289,7 @@ def battery_warning(text):
 
 # ------------------------------------------------------------ light_gem_mcm
 def light_gem_mcm(text):
+    text = fresh(text)
     text = sub(text, """local gem
 
 function light_gem()
