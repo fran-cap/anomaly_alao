@@ -66,22 +66,45 @@ casts five rays per jump/land — and this mod does not touch it.
 
 ## What the mod does
 
-At `actor_on_first_update` — frame 7 of the level load, with the loading screen
-still up (`on_loading_screen_key_prompt` is at frame ~62 in every capture, so
-there are ~55 frames of screen left):
+All of it at `actor_on_first_update` — frame 7 of the level load, with the
+loading screen still up (`on_loading_screen_key_prompt` is at frame ~62 in every
+capture, so there are ~55 frames of screen left), synchronously, in one go:
 
 1. `ui_inventory.GUI = ui_inventory.UIInventory()` if `GUI` is nil.
 2. `ui_pda_encyclopedia_tab.get_ui()`.
-3. Queue every sound path the three sound scripts can construct, and build them
-   a few per frame on `actor_on_update` with a 0.5 ms/frame construction budget,
-   unregistering when the queue drains.
+3. Construct every sound path the three sound scripts can ask for (~160).
 
-Steps 1 and 2 are single indivisible constructions (8-18 ms and 6-9 ms), so they
-are not sliced: behind the loading screen is the only place they are allowed to
-run. Step 3 is ~160 independent items, so it is sliced; on this install it
-drains long before the key prompt, but the budget means that if it did not, it
-still never costs a visible frame. Every construction is `pcall`ed, so a path
-that does not exist on someone's install costs one failed call and is counted.
+Every construction is `pcall`ed, so a path that does not exist on someone's
+install costs one failed call and is counted. There is a once-per-session latch
+on step 3 (sound resources are engine-global) and none on steps 1 and 2, because
+a level change nils `ui_inventory.GUI`. The mod registers **no** `actor_on_update`
+listener.
+
+### Why there is no time-slicing (measured, and it was wrong first)
+
+Version 1.0 sliced step 3 onto `actor_on_update` with a 0.5 ms/frame
+construction budget, on the theory that ~160 independent items should not land
+in one frame. The attended run `20260920-165259-I-063-953526` killed that:
+
+| capture 2 (cold OS file cache), `actor_on_update#zzz_alao_prewarm.script` | |
+|---|---|
+| calls over the 0.1 ms floor | 109 |
+| log2 histogram | `[0,0,39,2,37,27,3,1,…]` — 37 frames at 1.6-3.2 ms, 27 at 3.2-6.4, 3 at 6.4-12.8 |
+| worst | 17.7 ms |
+| spread | ~110 frames from frame 7, so roughly half after the key prompt |
+
+Blind to the arm order, the player called that capture the worst of the four.
+
+The reason is structural, not a tuning mistake: **one cold `sound_object(path)`
+costs 2-18 ms**. A time budget only decides whether to *start* another item; it
+cannot bound the one it starts. So a 0.5 ms budget does not cap a slice — it
+guarantees exactly one cold load per frame, for a hundred frames. A smaller
+budget gives the same hitches, just more frames of them.
+
+Synchronous costs ~250-300 ms cold and near zero warm, on an
+`actor_on_first_update` that already costs ~1.3 s behind a screen nobody is
+looking at. `SLICE_SOUNDS` in the script keeps the old path as an escape hatch;
+it defaults off and should stay off.
 
 The path set is read out of the **live** tables rather than hardcoded:
 `eft_jump_sounds.available_materials` (7 distinct materials x 5 jump + 3 landing
@@ -117,18 +140,39 @@ which are file-locals this mod cannot reach.
    `ui_inventory.GUI = nil` and the next level's `actor_on_first_update` rebuilds
    it. The sound queue is built once per session.
 
-## What could not be verified offline
+## Measured in game
+
+Attended run `20260920-165259-I-063-953526`: captures 1 and 3 baseline
+(`agent-I057-b`), 2 and 4 variant (`agent-I063-b`), the I-058 routine, hitch
+profiler in listener mode. Worst single call, milliseconds:
+
+| row | baseline (1 / 3) | variant (2 / 4) |
+|---|---:|---:|
+| `ActorMenu_on_before_init_mode#ui_inventory.script:93`, first open | 19.6 / 17.8 | **5.5 / 7.2** — now equal to a later open |
+| `actor_on_leave_dialog#ui_pda_encyclopedia_tab.script:407` | 8.8 / 7.7 | **1.9 / 1.9** |
+| `actor_on_jump` / `actor_on_land` | ~1.1 | ~0.6 |
+| `actor_on_footstep` | 0.9 (12-18 calls over the floor) | **no call reaches the 0.1 ms floor at all** |
+| `actor_on_first_update#zzz_alao_prewarm.script` | — | 44.7 / 43.9 at frame 7 |
+
+That settles the one assumption the design rested on: **holding a constructed
+`sound_object` does keep the engine resource, and every later
+`sound_object(path)` for that path is cheap.** The footstep row disappearing
+below the floor entirely is as clean a confirmation as this instrument gives.
+
+The same run found the slicer bug above; v1.1 is that fix. The numbers in the
+table were taken with the sliced build, so the three hitch rows are what v1.1
+inherits, while the `actor_on_update` row it complained about is gone by
+construction.
+
+## What could not be verified offline (and how it turned out)
 
 - **That the engine's sound cost is path-keyed and survives with the object
-  merely held.** Lua gives no way to ask the sound manager. The evidence is the
-  profile (fresh object every call, yet the cost decays with the path), and the
-  in-game A/B decides it. If it turns out the cost is per-`play` rather than
-  per-construction, step 3 does nothing and steps 1 and 2 are unaffected.
+  merely held** — the biggest assumption. **Confirmed in game**, see above.
 - **The size of each win.** These are engine-side costs and there is no honest
   microbenchmark for them; no lupa timing is quoted anywhere in this mod or its
-  tests. What is countable is what *moves*: one `UIInventory()`, one
+  tests. What the tests count is what *moves*: one `UIInventory()`, one
   `pda_encyclopedia_tab()` and ~160 `sound_object()` constructions, out of play
-  and into the loading screen.
+  and into the loading screen. The milliseconds come from the profiler.
 - Whether the loading screen is still being drawn at frame 7 on every install.
   It was in all four captures of `20260920-125528-I-058-f5edb8`, where
   `actor_on_first_update` itself costs 1272 ms at frame 7 and the key prompt is
@@ -143,7 +187,7 @@ construction (`actor_on_first_update`, `load_state`, `on_game_load`,
 
 | listener | maxes, ms | diagnosis | in this mod? |
 |---|---|---|---|
-| `actor_on_update#lam2.script:271` | 54.1 / 10.6 / 10.2 / 9.2 | FDDA Redone's action machine. `go_to_next_action` -> `set_current_action` -> `get_template_action_play_animation`'s `enter`, which does `game.get_motion_length(sec, anm, speed)`, `game.play_hud_motion(...)`, `level.add_cam_effector(ini_sys:r_string_ex(sec,"cam"), 2190, ...)` and `sound_object(ini_sys:r_string_ex(sec,"snd"))`. That is the engine loading a HUD model, a motion set, a camera `.anm` and a sound the first time you use a given item section. Registered on `actor_on_update` only while a sequence runs (6-8% of frames). | **no** - see below |
+| `actor_on_update#lam2.script:271` | 54.1 / 10.6 / 10.2 / 9.2 (and 25.6 / 9.2 / 9.0 / 9.8 in the I-063 run, unchanged by this mod as expected) | FDDA Redone's action machine. `go_to_next_action` -> `set_current_action` -> `get_template_action_play_animation`'s `enter`, which does `game.get_motion_length(sec, anm, speed)`, `game.play_hud_motion(...)`, `level.add_cam_effector(ini_sys:r_string_ex(sec,"cam"), 2190, ...)` and `sound_object(ini_sys:r_string_ex(sec,"snd"))`. That is the engine loading a HUD model, a motion set, a camera `.anm` and a sound the first time you use a given item section. Registered on `actor_on_update` only while a sequence runs (6-8% of frames). | **no** - see below |
 | `npc_on_update#aaaa_script_fixes_mp.script:741` | 6.3 / 5.1 / 6.1 / 5.2 | not cold: 23 calls above the floor out of 87k, in every capture. A periodic sweep, not a first-call. Needs its own idea. | no |
 | `actor_on_info_callback#info_portions.script:58` | 2.0 / 4.5 / 5.4 / 2.9 | `if (info == "ui_pda") then pda.calculate_rankings() end`, i.e. every PDA open recomputes the rankings. Genuinely recomputed, not lazy-built; caching it would make the rankings stale. Not a prewarm. | no |
 | `on_key_release#ui_hud_dotmarks.script:5924` | 0.2 / 0.2 / 7.3 / - | `do_use_release_action_manually` -> `use_obj_by_id` / `xr_effects.force_talk`, i.e. the first time a *different* UI singleton gets built by an interaction. Same family; whichever singleton it is, it is not one of the three here. | no |
@@ -182,8 +226,11 @@ so (a) needs an enumeration pass over the FDDA config first.
 
 ## Tests
 
-`lab/tests/test_i063_prewarm.py`, stub engine under `lupa.luajit20`
+`lab/tests/test_i063_prewarm.py` (18), stub engine under `lupa.luajit20`
 (`lab/tests/i063_prewarm_harness.py`): differential arms with and without the
 mod over the real `eft_jump_sounds.script` and `footstep_sounds.script`, the
-GUI-nil assumption, the time-slice budget, the pcall containment of a bad path,
-and the level-change rebuild.
+GUI-nil assumption, the twelve-listener non-identity pinned, "the whole queue is
+built inside first update", "no `actor_on_update` listener is ever registered",
+"every construction lands on frame 7", the pcall containment of a bad path, the
+level-change rebuild, and one test that the `SLICE_SOUNDS` escape hatch still
+works when it is asked for.

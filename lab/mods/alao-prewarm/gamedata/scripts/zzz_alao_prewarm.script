@@ -37,21 +37,38 @@
 --
 -- WHAT THIS MOD DOES
 --
--- At `actor_on_first_update` - frame 7 of the level load, with the loading
--- screen still up; the profiler puts `on_loading_screen_key_prompt` at frame
--- ~62, so there are ~55 frames of screen left - it:
+-- All of it at `actor_on_first_update` - frame 7 of the level load, with the
+-- loading screen still up; the profiler puts `on_loading_screen_key_prompt` at
+-- frame ~62, so there are ~55 frames of screen left:
 --
---   1. builds `ui_inventory.GUI` if it is nil,
---   2. calls `ui_pda_encyclopedia_tab.get_ui()`,
---   3. queues every sound path those three sound scripts can ever ask for and
---      constructs them a few per frame on `actor_on_update`, stopping at
---      BUDGET_MS of construction time per frame.
+--   1. build `ui_inventory.GUI` if it is nil,
+--   2. call `ui_pda_encyclopedia_tab.get_ui()`,
+--   3. construct every sound path those three sound scripts can ever ask for.
 --
--- Steps 1 and 2 are single indivisible constructions (8-18 ms and 6-9 ms), so
--- they are NOT sliced - they run in one go, behind the loading screen, which is
--- the only place that is allowed.  Step 3 is 160-odd independent items, so it
--- is sliced; on this install it drains long before the key prompt, but the
--- budget means that even if it does not, it never costs a visible frame.
+-- WHY THE SLICER IS OFF (measured, 20260920-165259-I-063-953526)
+--
+-- Version 1.0 time-sliced step 3 onto `actor_on_update` with a 0.5 ms/frame
+-- construction budget.  That was wrong, and the attended run said so: in the
+-- cold capture, `actor_on_update#zzz_alao_prewarm.script` had 109 slices over
+-- the 0.1 ms floor - 37 frames at 1.6-3.2 ms, 27 at 3.2-6.4, 3 at 6.4-12.8,
+-- worst 17.7 ms - spread over ~110 frames from frame 7, so about half of them
+-- landed AFTER the key prompt, in the player's face.  Blind to the arm order,
+-- the player called that capture the worst of the four.
+--
+-- The reason is simple and it kills the whole idea of a time budget here: ONE
+-- cold `sound_object(path)` costs 2-18 ms.  A budget can only decide whether to
+-- start another item, never how long the one it starts will take, so a 0.5 ms
+-- budget does not bound a slice - it just guarantees exactly one cold load per
+-- frame, for a hundred frames.  Smaller budget, same hitches, more of them.
+--
+-- So step 3 runs synchronously too.  It costs ~250-300 ms on a cold OS file
+-- cache and near zero once warm, on an `actor_on_first_update` that already
+-- costs ~1.3 s behind a loading screen nobody is looking at.  The measured
+-- first_update row went 43.9 -> 44.7 ms for the mod's own listener in the
+-- sliced build; folding the queue in moves the rest there too.
+--
+-- `SLICE_SOUNDS` keeps the old path as an escape hatch.  It defaults off and
+-- should stay off.
 --
 -- WHAT IT DOES NOT DO
 --
@@ -87,7 +104,7 @@
 --     `UIInventory()`, one `pda_encyclopedia_tab()` and N `sound_object()`
 --     constructions, out of play and into the loading screen.
 
-local VERSION = "1.0"
+local VERSION = "1.1"
 
 -- ---------------------------------------------------------------------------
 -- configuration
@@ -97,7 +114,13 @@ local PREWARM_INVENTORY    = true
 local PREWARM_ENCYCLOPEDIA = true
 local PREWARM_SOUNDS       = true
 
--- Per-frame construction budget for the sliced sound queue, milliseconds.
+-- Time-slice the sound queue onto actor_on_update instead of building it in
+-- one go at first update.  DEFAULT OFF, and it should stay off: see the
+-- "why the slicer is off" note above.  It is kept only as an escape hatch for
+-- an install where a ~300 ms first_update is somehow a problem.
+local SLICE_SOUNDS         = false
+
+-- Only used when SLICE_SOUNDS is on.
 local BUDGET_MS            = 0.5
 -- If the timer cannot be calibrated, fall back to this many items per frame.
 local FALLBACK_BATCH       = 6
@@ -285,8 +308,20 @@ local function prewarm_encyclopedia()
 end
 
 -- ---------------------------------------------------------------------------
--- the sliced prewarm
+-- the sound prewarm
 -- ---------------------------------------------------------------------------
+
+-- Build the whole queue now.  `pcall` per path so one missing sound costs one
+-- failed call, and nothing else.
+local function build_sounds_now()
+	while qi <= #queue do
+		local ok, snd = pcall(sound_object, queue[qi])
+		if ok and snd then warm[#warm + 1] = snd else failed = failed + 1 end
+		qi = qi + 1
+	end
+	sounds_done = true
+	note("sounds: %s built, %s failed, synchronous at first update", #warm, failed)
+end
 
 local function finish_slicing()
 	if not slicing then return end
@@ -343,34 +378,35 @@ function actor_on_first_update()
 	if PREWARM_INVENTORY then prewarm_inventory() end
 	if PREWARM_ENCYCLOPEDIA then prewarm_encyclopedia() end
 
+	local queued = 0
 	if PREWARM_SOUNDS and not sounds_done then
 		queue, qi, failed, slice_frames = {}, 1, 0, 0
 		build_sound_queue()
-		if #queue > 0 then
+		queued = #queue
+		if queued == 0 then
+			note("sounds: nothing to queue")
+			sounds_done = true
+		elseif SLICE_SOUNDS then
 			if not timer then
 				units_per_ms = calibrate()
 				timer = profile_timer and profile_timer() or nil
-				if timer and units_per_ms then
-					budget_units = BUDGET_MS * units_per_ms
-				else
-					budget_units = nil
-				end
+				budget_units = (timer and units_per_ms) and (BUDGET_MS * units_per_ms) or nil
 			end
 			slicing = true
 			RegisterScriptCallback("actor_on_update", actor_on_update)
-			note("sounds: %s paths queued, timer %s",
-			     #queue, budget_units and "calibrated" or "uncalibrated (fixed batch)")
+			note("sounds: %s paths queued for slicing, timer %s",
+			     queued, budget_units and "calibrated" or "uncalibrated (fixed batch)")
+			return               -- the report is printed when the queue drains
 		else
-			note("sounds: nothing to queue")
-			if VERBOSE then
-				for i = 1, #report do printf("[alao_prewarm]   %s", report[i]) end
-			end
+			build_sounds_now()
 		end
-	elseif VERBOSE then
-		printf("[alao_prewarm %s] done (sounds already warm)", VERSION)
-		for i = 1, #report do printf("[alao_prewarm]   %s", report[i]) end
-		report = {}
 	end
+
+	if VERBOSE then
+		printf("[alao_prewarm %s] done", VERSION)
+		for i = 1, #report do printf("[alao_prewarm]   %s", report[i]) end
+	end
+	report = {}
 end
 
 function on_game_start()
@@ -381,11 +417,17 @@ end
 function _alao_state()
 	return {queue = queue, qi = qi, warm = warm, failed = failed,
 	        slicing = slicing, frames = slice_frames, report = report,
-	        budget_units = budget_units}
+	        budget_units = budget_units, sounds_done = sounds_done,
+	        slice_sounds = SLICE_SOUNDS}
 end
 
+-- Non-destructive: the real queue and cursor are put back afterwards, so a test
+-- can ask "what would the queue be" without disturbing a run in progress.
 function _alao_build_queue()
-	queue, qi = {}, 1
+	local sq, si, sr = queue, qi, report
+	queue, report = {}, {}
 	build_sound_queue()
-	return queue
+	local out = queue
+	queue, qi, report = sq, si, sr
+	return out
 end

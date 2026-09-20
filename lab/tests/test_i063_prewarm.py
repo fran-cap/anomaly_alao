@@ -187,57 +187,71 @@ def test_the_twelve_inventory_listeners_are_the_named_non_identity():
 # the slice budget
 # ---------------------------------------------------------------------------
 
-def test_the_slicer_respects_the_per_frame_budget():
-    """0.5 ms of construction per frame, with a simulated 120 us per sound."""
+def test_the_whole_queue_is_built_inside_first_update():
+    """The v1.1 change: no slicing, nothing left for the player's frames.
+
+    v1.0 sliced onto actor_on_update with a 0.5 ms budget, and the attended run
+    20260920-165259-I-063-953526 showed why that cannot work: one cold
+    sound_object costs 2-18 ms, so a budget only decides whether to START
+    another item, never how long it runs.  109 slices over 0.1 ms, 3 of them
+    over 6.4 ms, worst 17.7 ms, half of them after the loading screen dropped.
+    """
     a = Arm(True)
+    assert a.mod._alao_state()["slice_sounds"] is False, "the slicer must default off"
+    assert len(a.constructions()) == 0
     a.first_update()
     st = a.mod._alao_state()
-    assert st["budget_units"] is not None, "timer should have calibrated"
-    # The harness timer counts microseconds, so 0.5 ms is ~500 units and a
-    # 120 us sound means at most 5 constructions may land in one frame.
-    assert 800 < float(st["budget_units"]) / 1.0 or True  # scale is documented below
-    budget_us = float(st["budget_units"])
-    per_frame = {}
-    for _ in range(600):
-        before = len(a.constructions())
-        a.frame(1)
-        after = len(a.constructions())
-        if after > before:
-            per_frame[int(a.g.FRAME)] = after - before
-        if not a.mod._alao_state()["slicing"]:
-            break
-    assert per_frame, "the slicer must have built something"
-    assert len(per_frame) > 3, "the queue must be spread over several frames"
-    worst = max(per_frame.values())
-    allowed = int(budget_us // 120) + 1
-    assert worst <= allowed, (
-        f"the slicer built {worst} items in one frame, budget allows {allowed}")
-    assert worst < len(a.mod._alao_build_queue()), "it must never drain in one frame"
-
-
-def test_the_slicer_unregisters_itself_when_the_queue_drains():
-    a = Arm(True)
-    a.first_update()
-    assert int(a.g.listener_count("actor_on_update")) >= 1
-    a.frame(500)
-    st = a.mod._alao_state()
+    expected = len(a.mod._alao_build_queue())
+    assert expected > 100, "the queue should be the whole sound set"
+    assert len(a.constructions()) == expected
+    assert st["sounds_done"] is True
     assert st["slicing"] is False
-    assert int(st["qi"]) > len(a.mod._alao_build_queue())
+
+
+def test_no_actor_on_update_listener_is_ever_registered():
+    a = Arm(True)
+    a.first_update()
+    assert int(a.g.listener_count("actor_on_update")) == 0, (
+        "the prewarm must not sit on the per-frame callback at all")
+    a.frame(200)
     assert int(a.g.listener_count("actor_on_update")) == 0
-    # and it stays gone
-    a.frame(50)
-    assert int(a.g.listener_count("actor_on_update")) == 0
+    # and no construction happens on any frame after first update
+    n = len(a.constructions())
+    a.frame(200)
+    assert len(a.constructions()) == n
+
+
+def test_all_the_prewarm_cost_lands_on_the_first_update_frame():
+    a = Arm(True)
+    a.g.FRAME = 7
+    a.first_update()
+    frames = {c["frame"] for c in a.constructions()}
+    assert frames == {7}, f"constructions leaked onto frames {sorted(frames)}"
 
 
 def test_a_missing_sound_path_is_contained():
     a = Arm(True)
     a.lua.execute(r"""BAD_PATHS["jump\\jump_water_1"] = true""")
     a.first_update()
-    a.frame(500)
     st = a.mod._alao_state()
-    assert st["slicing"] is False
+    assert st["sounds_done"] is True
     assert int(st["failed"]) >= 1
     assert int(st["qi"]) > len(a.mod._alao_build_queue()), "one bad path must not stop the queue"
+    assert int(a.g.listener_count("actor_on_update")) == 0
+
+
+def test_the_slicer_still_works_when_it_is_asked_for():
+    """The escape hatch is off by default but must not have rotted."""
+    a = Arm(True, slice_sounds=True)
+    a.first_update()
+    st = a.mod._alao_state()
+    assert st["slicing"] is True
+    assert int(a.g.listener_count("actor_on_update")) == 1
+    a.frame(600)
+    st = a.mod._alao_state()
+    assert st["slicing"] is False
+    assert int(st["qi"]) > len(a.mod._alao_build_queue())
+    assert int(a.g.listener_count("actor_on_update")) == 0
 
 
 # ---------------------------------------------------------------------------

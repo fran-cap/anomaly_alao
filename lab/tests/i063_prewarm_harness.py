@@ -198,7 +198,7 @@ end
 class Arm:
     """One stub engine, optionally with the prewarm mod installed."""
 
-    def __init__(self, with_mod: bool):
+    def __init__(self, with_mod: bool, slice_sounds: bool = False):
         self.lua = lupa.LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute(PRELUDE)
         self.load = self.lua.eval(LOADER)
@@ -209,7 +209,14 @@ class Arm:
         self.step.on_game_start()
         self.mod = None
         if with_mod:
-            self.mod = self.load(MOD.read_bytes().decode("utf-8"), "zzz_alao_prewarm")
+            src = MOD.read_bytes().decode("utf-8")
+            if slice_sounds:
+                # The escape hatch is a file-local constant, so flip it in the
+                # source rather than pretending the mod has a setter.
+                old = "local SLICE_SOUNDS         = false"
+                assert src.count(old) == 1, "SLICE_SOUNDS declaration moved"
+                src = src.replace(old, "local SLICE_SOUNDS         = true")
+            self.mod = self.load(src, "zzz_alao_prewarm")
             self.mod.on_game_start()
 
     # -- driving ----------------------------------------------------------
