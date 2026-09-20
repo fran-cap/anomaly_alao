@@ -305,9 +305,9 @@ def make_runtime(script_path: Path, mcm: dict | None = None, jit_off: bool = Fal
 
     lua = lupa.LuaRuntime(unpack_returned_tuples=True)
     if jit_off:
-        # must happen BEFORE the chunks are loaded: jit.off(true,true) does not
-        # touch already-loaded ones.
-        lua.execute("if jit then jit.off(true, true) end")
+        # jit.off() is the global switch; jit.off(true,true) only covers the
+        # calling one-liner and leaves everything loaded afterwards compiled.
+        lua.execute("if jit then jit.off() end")
     lua.execute(PRELUDE)
     set_mcm = lua.globals()["__set_mcm"]
     for k, v in (mcm or MCM).items():

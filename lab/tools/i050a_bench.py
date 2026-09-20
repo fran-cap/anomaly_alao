@@ -14,10 +14,10 @@ almost certainly the biggest single item in the real 142 us. So the numbers
 below are a LOWER bound on what the patch saves, and the honest figure for the
 headline is the profiler's own 142 us/frame, not this.
 
-NOT RUN CLEANLY YET. The one run taken during the I-050a session is void: its
-self-check failed (jit.off() instead of jit.off(true,true)) and agent-I052 held
-the corpus lock at the end of it. The bug is fixed below; the run is not
-repeated because the lock was still held. Check `coord.py board` before AND
+NOT RUN CLEANLY YET. The one run taken during the I-050a session is void because
+agent-I052 held the corpus lock at the end of it. (Its 5.6x self-check was
+actually fine: jit.off() is the global form, see Bench.__init__. The organizer
+put that back at integration.) Check `coord.py board` before AND
 after, and refuse the numbers if either check shows a game or corpus lock.
 
     py -3.12 lab/tools/i050a_bench.py [--frames 200] [--best-of 9] [--json out]
@@ -84,12 +84,13 @@ class Bench:
     def __init__(self, script: Path, jit_on: bool):
         self.lua = lupa.LuaRuntime(unpack_returned_tuples=True)
         if not jit_on:
-            # jit.off() with no arguments turns the JIT off for the CALLING
-            # function only - the first run of this bench used it and the
-            # self-check duly reported 5.6x instead of ~20x. jit.off(true,true)
-            # is the global form, and it has to come before anything is loaded
-            # because it does not reach chunks that already exist.
-            self.lua.execute("jit.off(true, true)")
+            # jit.off() with no arguments IS the global switch. jit.off(true,true)
+            # only covers the calling chunk (the one-liner itself), so it does
+            # nothing here - measured under lupa on the scalar self-check loop:
+            # on 1.50 ms, jit.off() 6.75 ms, jit.off(true,true) 1.52 ms. The
+            # honest interpreted ratio for that loop is ~4.5-5.6x, not ~20x
+            # (that figure belongs to microbench.py's heavier self-check).
+            self.lua.execute("jit.off()")
         self.lua.execute(H.PRELUDE)
         load = self.lua.eval(H.LOADER)
         load(H.MCM.read_text(encoding="utf-8"), "demonized_ledge_grabbing_mcm")
@@ -144,7 +145,7 @@ def main(argv=None):
     off = Bench(ALAO, False).check()
     ratio = off / on if on else 0.0
     print(f"self-check: JIT-off / JIT-on on a scalar loop = {ratio:.1f}x "
-          f"({'OK' if ratio > 8 else 'SUSPECT - jit.off may not have taken'})")
+          f"({'OK' if ratio > 3 else 'SUSPECT - jit.off may not have taken'})")
 
     rows = []
     for mode in ("frozen", "moving"):
