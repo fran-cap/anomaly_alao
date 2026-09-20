@@ -1,0 +1,14 @@
+{
+  "_comment": "NOT SUBMITTED. This is the run that actually decides I-057 track A, and it needs a moving scene. Replace \"save\" with the locked moving save from I-053 when it exists (and only then); with gammabaseline this run measures nothing of track A, because the I-050a cold-camera guard already collects the standing-still saving. Submit with: coord queue submit --idea I-057 --file lab/coord/i057-moving-request.json",
+  "label": "I-057-ledge-ondemand-MOVING",
+  "variant_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I057-b",
+  "baseline_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/gen4-all-b",
+  "variant_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "baseline_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler-listeners-inv",
+  "repeats": 4,
+  "duration_s": 120,
+  "warmup_s": 30,
+  "save": "REPLACE-WITH-THE-I-053-MOVING-SAVE",
+  "notes": "Decides I-057 track A. demonized_ledge_grabbing was 68.2 us/frame in the gen4-all arm of the exploratory moving run (20260920-110221-I-053-5895a5); this variant gates that listener so the 15-ray scan runs only when the climb keybind actually reads its result. Listener-mode profiler so the ledge row can be read directly: expect demonized_ledge_grabbing to go from ~68 to under 1 us/frame and nothing else to move except the track-B riders (fluid_aim, actor_effects, battery_warning, light_gem_mcm, together ~3-11 us). If the ledge row does not collapse, the gate is not firing and the patch is wrong."
+}
