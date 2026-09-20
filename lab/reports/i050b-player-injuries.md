@@ -74,7 +74,7 @@ every anchor asserted to hit exactly once. **104 -> 45 crossings/frame.**
 |---|---:|
 | one `get_hud()` per HUD pass instead of 16 | -15 |
 | one `time_global()` threaded from `actor_on_update` instead of 16 | -15 |
-| `bhs_garbage` lookup: provably dead branch (nothing in the corpus adds that name) | -6 |
+| `bhs_garbage` lookup: provably dead branch (nothing anywhere adds that name) | -6 |
 | `<bar>_bg` removal decided from a Lua-side set; the *add* path still asks the engine | -8 |
 | `TEXT_BASED_PATCH` read once at load, as `hide_default_hud`/`showtexthud` already do | -6 |
 | dead `actor:get_movement_speed()` + its 6 component reads | -7 |
@@ -82,6 +82,14 @@ every anchor asserted to hit exactly once. **104 -> 45 crossings/frame.**
 
 `bar:SetProgressPos` - the only call in the frame that does real UI work - is untouched,
 deliberately.
+
+The `bhs_garbage` claim was checked twice: over `extracted/gamma` (1503 mod scripts) and
+then over the whole live `GAMMA/mods` tree. The only `.script` files that mention the
+name are the three copies of this file, all in this same dead branch. It also appears in
+three `configs/ui/ui_custom_msgs.xml` - that is where custom statics are *declared* for
+`AddCustomStatic` to find, not code that adds one - and no script ever adds it, so
+`GetCustomStatic("bhs_garbage")` is always nil. Same check for the `<bar>_bg` names: only
+`ui_custom_msgs.xml` declarations, no other writer.
 
 ### Not in the patch: the optional variants
 
