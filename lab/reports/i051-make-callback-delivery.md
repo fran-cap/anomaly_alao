@@ -217,26 +217,33 @@ table. **Anyone pairing this mod with `alao-profiler-listeners` must call it.**
 
 ## 3. Bench
 
-**One run exists and it is not quotable.** It started in a clean window (game free, corpus
-free) and finished with the `corpus` lock held by agent-I052, so it fails the lab's own
-rule and I am recording it as evidence of nothing:
+**Result: the monkey patch is free.** `tools/microbench.py`, section-2 protocol (fresh
+`LuaRuntime` per arm and mode, `jit.off(chunk, true)` for the interpreted arm with the
+harness self-check reading 24.4x, `collectgarbage('collect')` before every timed run, best
+of 9), LuaJIT 2.0.1774896119 x64, opt flags `fold cse dce fwd dse narrow loop abc sink
+fuse`. **Locks checked immediately before and after: `game` free and `corpus` free both
+times.** `speedup = t(form A) / t(form B)`, so below 1.00 means the monkey patch measured
+slower.
 
 | K | JIT on | JIT off |
 |---|---|---|
-| 4 | 0.89x | 0.94x |
-| 12 | 0.91x | 0.88x |
-| 73 | 1.00x | 0.97x |
-| 125 | 0.97x | 0.97x |
+| 4 | 1.00x | 1.00x |
+| 12 | 0.98x | 1.03x |
+| 73 | 1.03x | 1.00x |
+| 125 | 1.03x | 0.98x |
 
-(`speedup = t(form A) / t(form B)`, so below 1.00 means the monkey patch measured
-*slower*.) The same run's `make_callback_dispatch` rows came in at 26.11x interpreted at
-K=73 against I-043's clean 20.6x — the contamination is visible in the pair whose clean
-value we know, which is exactly why this one does not count. A `--quick` smoke test taken
-earlier with both locks free read 0.93-1.02x. **A clean re-run of the delivery pair is
-queued behind the corpus lock; until it lands, treat A vs B as unmeasured.**
+Indistinguishable at every listener count, in both modes, which is the wanted answer and
+the reason this pair's pass condition is 1.00x rather than G2's 1.15x. **The conflict-free
+delivery form costs nothing per dispatch.**
 
-The structural argument, which both readings are consistent with, is that forms A and B
-are the same code: both are reached as
+An earlier full run is kept here as a worked example of the lab's lock rule rather than as
+a measurement: it *started* with both locks free and *finished* with agent-I052 holding
+`corpus`, and it read 0.89 / 0.91 / 1.00 / 0.97x (jit on) — i.e. it would have suggested a
+real 10% penalty that does not exist. The tell was in the same run's
+`make_callback_dispatch` rows: 26.11x interpreted at K=73 against I-043's clean 20.6x.
+Checking the lock *after* as well as before is what caught it.
+
+The structural argument the clean numbers confirm is that forms A and B are the same code: both are reached as
 `axr_main.make_callback(...)` (same module-table index), in both the dispatcher's
 `intercepts` and `order_list` are upvalues, and `debug.getupvalue` runs once at install,
 not per dispatch. Form B's only extra work is a wrapper on `callback_set`/`callback_unset`
@@ -282,9 +289,9 @@ player sees the same thing. It should — nothing ALAO rewrites is in the dispat
 
 ## 6. What I did not do
 
-* **No quotable bench** (§3). The one full run began clean and ended with agent-I052's
-  `corpus` lock held; its `make_callback_dispatch` rows read 27% above I-043's clean value
-  at K=73, so the contamination is not hypothetical. Re-run queued.
+* **Only the delivery pair was re-benched cleanly** (§3). The dispatch pair's own numbers
+  are still I-043's clean run C; my one run of it was taken in a window that went dirty
+  and I did not re-take it.
 * **No corpus run / G4-G9.** This branch touches no analyzer, transformer or reporter
   code, so ALAO's output is byte-identical and those gates have nothing to compare.
 * **The divergence is characterised, not eliminated**, and the 600-scenario rates are from

@@ -277,6 +277,10 @@ Tests and the patch generator: <link to the ALAO repo, if the user wants it link
   does the same thing as a monkey patch at `on_game_start` so it redistributes no game
   file and cannot conflict with anything on MO2 priority. The file edit above is only for
   upstream, which owns the file.
+* **The two forms cost the same.** Benchmarked head to head under the lab protocol in a
+  window with no locks held before or after: 1.00 / 0.98 / 1.03 / 1.03x compiled and
+  1.00 / 1.03 / 1.00 / 0.98x interpreted at K = 4 / 12 / 73 / 125. So the choice between
+  them is about conflicts and redistribution, not speed.
 * **The mod is lazy, the PR is eager.** The mod sets `order_list[name] = nil` and rebuilds
   on the next dispatch; the PR rebuilds inside `callback_set`. Same dispatch cost, same
   observable behaviour; lazy is cheaper across the ~1800 registrations at load (one sort
