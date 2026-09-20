@@ -131,7 +131,7 @@ Use `py -3.12` on this machine (it has `luaparser` 4.2.0, `jinja2`, `pytest`, `l
 LuaJIT 2.0 and is the compile-checker / executor for rewritten Lua; import it as `lupa.luajit20`.
 
 ```bash
-py -3.12 -m pytest -q                 # unit + CLI tests: 530 passed, 7 skipped, 6 xfailed (2026-09-19, gen-3 merge)
+py -3.12 -m pytest -q                 # unit + CLI tests: 612 passed, 7 skipped, 4 xfailed (2026-09-19, I-052)
 py -3.12 -m pytest -q --corpus        # also analyzes the 66 vanilla scripts in the game install, read-only
 py -3.12 -m pytest -q -rx             # print the xfail reasons: each one names a real, unfixed ALAO bug
 py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
@@ -152,6 +152,17 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   - `ast_analyzer.py:2514` `_walk_for_dead_after_terminator` never descends into `do` blocks, so
     `dead_code_after_return` / `dead_code_after_break` cannot fire on parseable Lua 5.1.
   - Nil-guard detection is line-based: a one-line `if o then ... end` is not seen as a guard.
+  - ~~`--fix --fix-debug` and `--fix --fix-nil` are not fixpoints (1 vanilla / 24 GAMMA files).~~
+    Fixed 2026-09-19 (I-052), two strict xfails dropped. `_edit_repeated_calls` used to chop
+    each scanned line at the first `--` before looking at strings, so a `---` inside a string
+    literal faked an unbalanced `(` and killed the hoist; `mask_lua_code()` (new `keep_strings`
+    flag) now masks comments and strings in one offset-preserving pass. And `--fix-nil` only
+    offers its one-line `if var then ... end` when no other unguarded access of the same nil
+    source exists - it used to guard use #1 of an inserted cache and leave #2..#4 to crash -
+    and it treats `item and <expr using item>` as the guard Lua's short-circuit makes it
+    (-475 GAMMA / -223 vanilla-db false-positive `potential_nil_access`, the only G7 movement).
+    `tools/corpus_matrix.py` runs the corpus gate once per flag combination, which is the only
+    way that class of bug is visible (every gate before gen-4 ran plain `--fix`).
   - ~~`stalker_lua_lint.py:738` reports timeouts as parse errors; `transform_file_worker`
     applies no timeout; the JSON report has no failure data.~~ Fixed 2026-09-11 (I-035 / I-037 /
     I-029), three strict xfails dropped. Timeouts have their own counter, failure lines print
@@ -172,7 +183,11 @@ py -3.12 -m pytest lab/tests -q       # lab-only tests (dashboard + FPS harness)
   (`D:\GOG_Games\Gamma\S.T.A.L.K.E.R. GAMMA`, READ-ONLY, never run `--fix` there) into `extracted/`
   (gitignored). `tools/corpus_run.py` runs analyze + fix on a fresh copy, LuaJIT-compiles every
   rewritten file, does a second fix pass to catch idempotence violations, and writes
-  `lab/data/corpus/<run_id>/{manifest,results}.json`. `tools/corpus_compare.py --latest` diffs two
+  `lab/data/corpus/<run_id>/{manifest,results}.json`. `tools/corpus_matrix.py` runs that once per
+  fix-flag combination (`--fix`, `--fix --fix-debug`, `--fix --fix-nil`, `--fix --fix-debug
+  --fix-nil` by default, `--combos all` for the yellow/experimental/dead-code sweep) and prints
+  one G4/G5/G9 table; idempotence is a property of a flag *combination*, which is how I-052's two
+  defects hid from every gen-3 gate. `tools/corpus_compare.py --latest` diffs two
   runs. Baseline on GAMMA (1503 enabled scripts, 577 mods): 0 parse failures, 0 compile failures,
   analyze ~13 s, fix ~24 s, 513 files rewritten, 0 idempotence violations (was 8 before
   `_apply_edits` learned to fold contained edits into their container, 2026-09-10).

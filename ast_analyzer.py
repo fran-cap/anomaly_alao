@@ -1842,6 +1842,16 @@ class ASTAnalyzer:
         if self._has_nil_guard(var_name, nil_source.assign_line, line):
             nil_source.is_guarded = True
             return
+
+        # I-052: `return item and string.find(item:section(), ...)` IS guarded -
+        # Lua short-circuits, so the right-hand side never runs on a nil item.
+        # The old check only knew the `item and item:` shape, so nta_utils.script
+        # got a pointless `if item then` wrapper around an expression that was
+        # already safe (and the wrapper only appeared on the SECOND pass, because
+        # on the first one the string_find_plain edit took the same span).
+        if self._has_short_circuit_guard(var_name, line):
+            nil_source.is_guarded = True
+            return
         
         # determine if this is safe to auto-fix
         # Safe if: assignment is on previous line, this is the only usage before any branch
@@ -1950,6 +1960,45 @@ class ASTAnalyzer:
                 return True
         
         return False
+
+    def _has_short_circuit_guard(self, var_name: str, access_line: int) -> bool:
+        """True if the access line itself guards the variable with `var and ...`.
+
+        `item and string.find(item:section(), "axe")` never touches item:section()
+        when item is nil, so there is nothing to warn about. Only counts when the
+        `and` comes BEFORE a later use of the same name on that line and is not
+        `not var and ...`, which guards the opposite way.
+        """
+        if access_line <= 0 or access_line > len(self.source_lines):
+            return False
+        cleaned = self._strip_line_comments_and_strings(self.source_lines[access_line - 1])
+        v = re.escape(var_name)
+        # `var and` (not `not var and`) followed by another use of var on the line
+        pattern = re.compile(r'(?<!not )\b' + v + r'\s+and\b.*\b' + v + r'\s*[:.\[]')
+        return bool(pattern.search(cleaned))
+
+    def _other_uses_after(self, var_name: str, scope: 'Scope', access_line: int) -> List[int]:
+        """Lines in `scope`, after access_line, that mention var_name again.
+
+        I-052: --fix-nil only ever wraps ONE line. If the variable is read again
+        further down the same function, that wrapper protects nothing - the next
+        line crashes on the same nil - so the fix must not be offered. The nil
+        *finding* stays; only `is_safe_to_fix` goes away. Catches what the
+        access list alone misses: plain field reads and writes like
+        `actor.power = 1`, which never become nil_accesses of their own
+        (soulslike_scenarios.script).
+        """
+        if scope is None:
+            return []
+        end = scope.end_line if scope.end_line and scope.end_line > 0 else len(self.source_lines)
+        end = min(end, len(self.source_lines))
+        pattern = re.compile(r'\b' + re.escape(var_name) + r'\b')
+        hits = []
+        for ln in range(access_line + 1, end + 1):
+            cleaned = self._strip_line_comments_and_strings(self.source_lines[ln - 1])
+            if pattern.search(cleaned):
+                hits.append(ln)
+        return hits
 
     def _is_safe_nil_fix(self, nil_source: NilSourceInfo, access_line: int) -> bool:
         """
@@ -3862,20 +3911,52 @@ class ASTAnalyzer:
 
     def _analyze_nil_access(self):
         """Generate findings for potential nil access patterns."""
+        # I-052: --fix-nil wraps ONE line in `if var then ... end`. If the same
+        # nil source is used again on another line, that guard buys nothing -
+        # the next line crashes on the same nil - and it also made --fix-nil a
+        # non-fixpoint: `--fix` hoists `local actor = db.actor` with four uses
+        # under it, and the next --fix-nil pass guarded use #1 and left #2..#4
+        # (24 GAMMA files, run 20260919-192746-gamma-i046). So only call an
+        # access auto-fixable when guarding its line actually makes the source
+        # safe, i.e. no other unguarded access of the same source elsewhere.
+        # The finding itself stays - the hazard is real, it just needs a human.
+        lines_per_source: Dict[int, Set[int]] = {}
+        for access in self.nil_accesses:
+            lines_per_source.setdefault(id(access.nil_source), set()).add(
+                access.access_line)
+
         for access in self.nil_accesses:
             nil_source = access.nil_source
             reason = NIL_RETURNING_FUNCTIONS.get(nil_source.source_func, 'may return nil')
-            
+
+            is_safe_to_fix = access.is_safe_to_fix
+            other_lines = sorted(
+                lines_per_source.get(id(nil_source), set()) - {access.access_line})
+            if is_safe_to_fix:
+                # plus every plain mention further down the same function - a
+                # field write like `actor.power = 1` is just as nil-fatal as a
+                # method call and never shows up as a nil_access of its own
+                other_lines = sorted(set(other_lines) | set(self._other_uses_after(
+                    access.var_name, nil_source.scope, access.access_line)))
+            if other_lines:
+                is_safe_to_fix = False
+
             # determine severity based on whether it's safe to fix
-            if access.is_safe_to_fix:
+            if is_safe_to_fix:
                 severity = 'YELLOW'  # can be auto-fixed with --fix-nil
                 message = (f"Potential nil access: '{access.var_name}' from {nil_source.source_func}() "
                           f"used without nil check (auto-fixable)")
+            elif other_lines and access.is_safe_to_fix:
+                severity = 'YELLOW'
+                shown = ', '.join(str(l) for l in other_lines[:5])
+                message = (f"Potential nil access: '{access.var_name}' from {nil_source.source_func}() "
+                          f"used without nil check (also used on line(s) {shown}, "
+                          f"so a one-line guard would not help)")
             else:
                 severity = 'YELLOW'  # warning only, needs manual review
                 message = (f"Potential nil access: '{access.var_name}' from {nil_source.source_func}() "
                           f"used without nil check")
-            
+
             self.findings.append(Finding(
                 pattern_name='potential_nil_access',
                 severity=severity,
@@ -3888,7 +3969,8 @@ class ASTAnalyzer:
                     'assign_line': nil_source.assign_line,
                     'access_call': access.access_call,
                     'access_type': access.access_type,
-                    'is_safe_to_fix': access.is_safe_to_fix,
+                    'is_safe_to_fix': is_safe_to_fix,
+                    'other_access_lines': other_lines,
                     'is_local': nil_source.is_local,
                     'reason': reason,
                 },
