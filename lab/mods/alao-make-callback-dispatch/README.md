@@ -70,9 +70,15 @@ possible — an upper bound on pathology, not a frequency in a real frame:
 | register during the pass | 140 | 460 | 0 |
 | both | 251 | 294 | 55 |
 
-Matching the shipped order bit for bit would mean reimplementing the heap, i.e. keeping
-the work this mod exists to remove. If you are on a setup where a listener's relative
-position inside a single frame is load-bearing, do not use this.
+**And the order this differs from is not a fixed one.** `hspairs` seeds its heap from
+`pairs()` over a table keyed by the listener *function*, so the initial layout is pointer
+order. That is invisible while nothing mutates — the heap sorts it out — but once the
+invariant breaks, the order of the rest of the pass follows that layout. Replaying one
+scenario thirty times in one runtime gives the stock dispatcher **14 different orders** and
+this mod **1**. So the mod is not replacing defined behaviour with different behaviour; it
+is replacing an allocation-dependent order with the declared priority order. Matching the
+stock order bit for bit is not even well posed, and would mean reimplementing the heap —
+the work this mod exists to remove.
 
 **How often does this come up?** A scan of the 1350 scripts a live GAMMA profile loads,
 resolving each `RegisterScriptCallback("X", <name>)` to a top-level `function <name>` in

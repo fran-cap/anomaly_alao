@@ -14,7 +14,11 @@ Three results, in order of how much they change what I-043 said:
    moves *when* each listener is visited, which listeners run in that pass can change too.
    I-043 tested four specific churn cases, they all happened to agree, and it concluded
    the two were equivalent. They are not. The guarantee that does hold: **no mutation
-   during a pass ⇒ bit-identical, 600/600.**
+   during a pass ⇒ bit-identical, 600/600.** And in the window where they differ, **the
+   shipped order is not deterministic either** — 14 distinct orders over 30 replays of one
+   scenario, because `hspairs` seeds its heap from the hash order of a table keyed by
+   function pointers. The change replaces an allocation-dependent order with the declared
+   priority order.
 2. **Delivery is a monkey patch, not a replacement file**, and the census says that is
    free: the 1350 scripts a live GAMMA profile loads contain exactly 5 references to the
    four functions being swapped, **all 5 through the module table at call time, 0 bound to
@@ -78,11 +82,41 @@ an upper bound on pathology, not a rate in a real frame:
 | churn during the pass | identical | reordered | different set |
 |---|---|---|---|
 | **none** (mutation only between passes) | **600** | 0 | 0 |
-| unregister | 480 | 96 | 24 |
+| unregister | 480 / 467 | 96 / 94 | 24 / 39 |
 | register | 140 | 460 | 0 |
 | both | 251 | 294 | 55 |
 
 The printed error lines are identical in **every** scenario of all four modes.
+
+### And the shipped order in that window is not deterministic
+
+Two numbers in the unregister row above because **two runs of the same census disagree**,
+and chasing that down is the result that decides how seriously to take any of this.
+
+`hspairs` seeds its heap from `pairs(t)` over a table keyed **by the listener function**,
+so the initial array order is hash order — pointer order. While nothing mutates during the
+pass that is invisible: the heap sorts it out and the output is the priority order
+whatever the layout was. Once a listener churns mid-pass, the invariant breaks and the pop
+order of everything left depends on that initial layout, i.e. on where the closures happen
+to have been allocated.
+
+Replaying **one** scenario thirty times in one runtime:
+
+```
+SHIPPED : 14 distinct orders over 30 replays
+PATCHED :  1
+```
+
+and in every one of those 14, the passes *after* the churning one are identical — the
+divergence never outlives the pass it happened in. The patch's order is one of the
+fourteen.
+
+So the change does not replace a defined behaviour with a different one. It replaces an
+**unspecified, allocation-dependent** order with the priority order the Kutez system
+declares. A mod that depended on the shipped order in that window would already be
+depending on where LuaJIT put its closures. Pinned as
+`test_the_shipped_order_is_nondeterministic_once_a_listener_churns`; if it ever stops
+holding, this whole section needs revisiting.
 
 ### Does any real script do this? Yes — one, and it is bounded
 
@@ -121,10 +155,8 @@ exists to remove. I reverted it and documented the difference in the script head
 mod README, the PR draft, and a pinned test (`test_the_documented_divergence`) so it
 cannot drift silently.
 
-My own view, stated as a view: the cached array's behaviour is the more defensible of the
-two — it is the priority order the Kutez system declares, and the shipped behaviour in
-that window is not a designed order at all. That is an argument for the change, not a
-reason to hide it.
+And once the nondeterminism above was measured, "fixing" it stopped being the right goal:
+there is no single shipped order to match.
 
 ### A smaller thing, corrected
 

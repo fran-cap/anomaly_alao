@@ -62,6 +62,14 @@
 -- register mid-pass 140 / 460 / 0.  With no mutation during the pass -- which
 -- is every listener in the game, almost every frame -- 600/600 identical.
 --
+-- And the order this differs FROM is not a fixed one: hspairs seeds its heap
+-- from pairs() over a table keyed by the listener function, so the initial
+-- layout is pointer order.  Invisible while nothing mutates; decisive once the
+-- invariant breaks.  One scenario replayed thirty times gives the shipped
+-- dispatcher 14 distinct orders and this one 1.  So this replaces an
+-- allocation-dependent order with the declared priority order, not one defined
+-- behaviour with another.
+--
 -- See the mod README and tests/test_i051_dispatch_delivery.py in the ALAO repo.
 --
 -- MEASURED: 712.3 -> 607.3 us of script time per frame (-105 us, -14.8%), 4x120 s

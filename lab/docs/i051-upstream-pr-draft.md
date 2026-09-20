@@ -229,6 +229,16 @@ possible (an upper bound on pathology, not a frequency in a real frame):
 | register during the pass | 140 | 460 | 0 |
 | both | 251 | 294 | 55 |
 
+One more thing about that window, which I think settles how much it matters: **the current
+order in it is not deterministic.** `hspairs` seeds its heap from `pairs(t)` over a table
+keyed by the listener function, so the initial array is in hash (pointer) order. That is
+invisible while nothing mutates, because the heap sorts it out regardless. Once the
+invariant is broken the pop order of the rest follows that initial layout. Replaying one
+scenario thirty times in a single Lua state gives the current dispatcher **14 distinct
+orders**, and the cached array **1** — and in all fourteen, the passes after the churning
+one are identical. So this is not a defined behaviour being changed; it is an
+allocation-dependent order being replaced by the priority order the system declares.
+
 For what it is worth in practice: resolving every `RegisterScriptCallback("X", <name>)` in
 the 1350 script files a live GAMMA profile loads to a top-level `function <name>` in the
 same file, and searching that body for a register or unregister of `"X"`, finds **two

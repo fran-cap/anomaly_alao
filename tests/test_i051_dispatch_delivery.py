@@ -564,6 +564,36 @@ def _divergence_census(lua, ops, n=600):
     return c
 
 
+def test_the_shipped_order_is_nondeterministic_once_a_listener_churns(rt):
+    """The result that decides how seriously to take the divergence.
+
+    `hspairs` seeds its heap from `pairs(t)` over a table keyed BY THE LISTENER
+    FUNCTION, so the initial array order is hash order, i.e. pointer order.
+    While nothing mutates during the pass that does not matter -- the heap sorts
+    it all out and the output is the priority order regardless.  The moment a
+    listener unregisters something mid-pass, the invariant breaks and the pop
+    order of the rest depends on that initial layout, which depends on where the
+    closures happen to have been allocated.
+
+    So: replay ONE scenario thirty times in one runtime.  The shipped dispatcher
+    produces many different orders.  The patch produces one.  We are not
+    diverging from a defined behaviour here; we are replacing an unspecified
+    order with the declared priority order.  (And the passes after the churn are
+    identical in every replay, in both.)"""
+    lua = rt[0]
+    sc = _fuzz_scenario(0, n_listeners=12, n_steps=3, ops=("unset",))
+    stock = {_play(lua, "stock", sc)[0] for _ in range(30)}
+    patched = {_play(lua, "patched", sc)[0] for _ in range(30)}
+    assert len(patched) == 1, f"the patch should be deterministic, got {len(patched)}"
+    assert len(stock) > 1, (
+        "expected the shipped dispatcher to vary between replays of the same "
+        "scenario; if this ever stops being true the divergence write-up needs "
+        "revisiting")
+    # whatever the shipped order did, everything after the churning pass agrees
+    tails = {t.split("--", 1)[1] for t in stock} | {t.split("--", 1)[1] for t in patched}
+    assert len(tails) == 1, "the divergence outlived the pass it happened in"
+
+
 def test_fuzz_bounds_the_divergence_when_listeners_churn_mid_pass(rt):
     """The honest measurement of what the change costs, and a regression
     detector for it.
@@ -581,18 +611,23 @@ def test_fuzz_bounds_the_divergence_when_listeners_churn_mid_pass(rt):
         visit -- so which listeners ran in that one pass can differ too.  The
         counts below are from a corpus built to churn mid-pass as hard as
         possible; they are an upper bound on pathology, not a frequency in a
-        real frame, where a listener touching its own callback's registration is
-        rare and re-registering an already-registered peer rarer still.
+        real frame.
 
-    Measured 2026-09-20 on GAMMA 0.9.4's axr_main.script, 600 scenarios each:
+    The rates are NOT stable, and that is the point of the test above: the
+    shipped side of the comparison is nondeterministic, so two runs of this
+    census disagree by tens of scenarios.  The bounds here are loose on purpose
+    - they catch "something got much worse", not a drift of 10.
 
-        unregister mid-pass : 480 same /  96 order / 24 different-set
-        register   mid-pass : 140 same / 460 order /  0 different-set
-        both                : 251 same / 294 order / 55 different-set
+    Observed 2026-09-20 on GAMMA 0.9.4's axr_main.script, 600 scenarios each,
+    two runs:
+
+        unregister mid-pass : 480/96/24  and 467/94/39   (same / order / set)
+        register   mid-pass : 140/460/0
+        both                : 251/294/55
     """
     lua = rt[0]
-    for ops, worst in ((("unset",), 130), (("set",), 480),
-                       (("unset", "set", "unset_set", "set_unset"), 400)):
+    for ops, worst in ((("unset",), 250), (("set",), 520),
+                       (("unset", "set", "unset_set", "set_unset"), 480)):
         c = _divergence_census(lua, ops)
         print(f"\n{ops}: {dict(c)}")
         assert c["errors"] == 0, f"{ops}: the printed errors diverged"
