@@ -32,6 +32,27 @@ calls below the floor are not counted there at all and are recovered as
 calibrates them against ``os.clock`` at startup and reports the ratio as
 ``units_per_ms``.  Everything here converts through that ratio and refuses to
 report milliseconds when it is missing.
+
+Three more line kinds come from the I-062 *walkout* build
+(``lab/profiler-walkout``), which opens the doors into Lua that
+``make_callback`` is not - object binders, engine-called globals, time-event
+bodies - and adds a per-FRAME line::
+
+    ALAOPROF|1|wdr|ts=..|walkout=bnd=140+update,eng=5,evt=3|binder_update=true|frames=on|frame_floor_ms=12|..
+    ALAOPROF|1|axs|seq=1|axis=bnd|name=xr_motivator.motivator_binder.update|calls=..|units=..|nested=..
+    ALAOPROF|1|frm|n=1|frame=8123|t=..|ms=43|dt_dev=..|u_top=..|n_top=..|u_cb=..|u_bnd=..|u_eng=..|u_evt=..|spawn=..|destroy=..|gc0=..|gc1=..|after_log=0|top=a~u,b~u,c~u
+    ALAOPROF|1|frs|seq=1|lines=..|suppressed=..|floor_ms=12|wrapped_bnd=..|..
+    ALAOPROF|1|trace|n=1|name=..|units=..|frame=..|t=..|pre=..|post=..
+
+``wdr`` is a SECOND header line rather than more fields on ``hdr``, so every
+parser written against ``hdr`` keeps working.  ``axs`` is a ``cb`` line with an
+axis tag: binder time is deliberately not mixed into the callback ranking,
+because a binder ``:update`` contains the callbacks it fires.  ``frm`` is the
+line that answers "script or engine" for one slow frame: ``u_top`` is the union
+of the script regions that were top level in it (nothing double counted across
+axes), so ``ms`` minus ``u_top`` in milliseconds is engine plus whatever Lua the
+wrap lists do not reach.  ``trace`` (I-063) is one line per call of a named
+listener with opaque before/after covariates.
 """
 
 from __future__ import annotations
@@ -43,6 +64,7 @@ from pathlib import Path
 
 __all__ = [
     "Header", "CallbackWindow", "Window", "HitchStat", "ProfileLog",
+    "WalkoutHeader", "SlowFrame", "TraceCall",
     "parse", "load", "load_run", "spread", "compare_runs",
 ]
 
@@ -141,6 +163,108 @@ class HitchStat:
 
 
 @dataclass
+class WalkoutHeader:
+    """The I-062 ``wdr`` line: which extra doors this build actually opened."""
+    walkout: str = "off"
+    binder_update: bool = False
+    frames: str = "off"
+    frame_floor_ms: float | None = None
+    frame_max: int | None = None
+    rescan_every: int | None = None
+    pending: int = 0
+    misses: str = ""
+    ts: float | None = None
+    raw: str = ""
+
+    @property
+    def wrapped(self) -> dict:
+        """``{"bnd": 140, "eng": 5, "evt": 3}`` out of the ``walkout=`` field."""
+        out = {}
+        for part in (self.walkout or "").split(","):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            v = v.split("+")[0]
+            try:
+                out[k.strip()] = int(v)
+            except ValueError:
+                out[k.strip()] = v
+        return out
+
+
+@dataclass
+class SlowFrame:
+    """One ``frm`` line: a frame that crossed the floor, and what was in it.
+
+    ``ms`` is the ``time_global()`` delta and ``dt_dev`` is
+    ``device().time_delta`` exactly as the engine handed it over - the overlay
+    prints both because which of them is truthful at frame granularity is a
+    question the first run answers, not one to assume.
+    """
+    n: int = 0
+    frame: int = 0
+    t: float = 0.0
+    ms: float = 0.0
+    dt_dev: float | None = None
+    u_top: float = 0.0          # union of top-level script regions, timer units
+    n_top: int = 0
+    u_cb: float = 0.0
+    u_bnd: float = 0.0
+    u_eng: float = 0.0
+    u_evt: float = 0.0
+    spawn: int = 0
+    destroy: int = 0
+    gc0: float = 0.0            # collectgarbage("count") KB at the frame's start
+    gc1: float = 0.0            # ... and at its end
+    after_log: int = 0          # this frame paid for the previous frm printf
+    top: list = field(default_factory=list)   # [(label, units), ...] worst first
+
+    @property
+    def gc_delta_kb(self) -> float:
+        """Negative means the collector freed memory inside this frame."""
+        return self.gc1 - self.gc0
+
+
+@dataclass
+class TraceCall:
+    """One I-063 ``trace`` line: a single call of a named listener."""
+    n: int = 0
+    name: str = ""
+    units: float = 0.0
+    frame: int = 0
+    t: float = 0.0
+    pre: str = ""
+    post: str = ""
+
+    @staticmethod
+    def _probe(s: str) -> dict:
+        out = {}
+        for part in (s or "").split(","):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                try:
+                    out[k] = int(v)
+                except ValueError:
+                    out[k] = v
+        return out
+
+    @property
+    def pre_kv(self) -> dict:
+        return self._probe(self.pre)
+
+    @property
+    def post_kv(self) -> dict:
+        return self._probe(self.post)
+
+    def grew(self, key: str) -> int | None:
+        """How much *key* grew across the call, or None if it is not numeric."""
+        a, b = self.pre_kv.get(key), self.post_kv.get(key)
+        if isinstance(a, int) and isinstance(b, int):
+            return b - a
+        return None
+
+
+@dataclass
 class Window:
     seq: int
     t0: float | None = None
@@ -154,6 +278,8 @@ class Window:
     entries: dict = field(default_factory=dict)
     # per-listener rows, only present when the overlay ran with WRAP_LISTENERS
     listeners: dict = field(default_factory=dict)
+    # I-062: {axis tag: {name: CallbackWindow}} for the bnd / eng / evt axes
+    axes: dict = field(default_factory=dict)
     complete: bool = False
 
     @property
@@ -170,6 +296,10 @@ class ProfileLog:
     errors: list = field(default_factory=list)
     # (scope, name) -> the LAST hit line seen, i.e. the whole-run totals
     hitches: dict = field(default_factory=dict)
+    # I-062 / I-063, run scoped and in log order
+    walkout: WalkoutHeader | None = None
+    frames: list = field(default_factory=list)
+    traces: list = field(default_factory=list)
 
     # -- conversions -------------------------------------------------------
     @property
@@ -279,6 +409,126 @@ class ProfileLog:
         rows.sort(key=lambda r: (r["max_ms"] or 0.0), reverse=True)
         return rows[:top] if top else rows
 
+    # -- I-062 walkout ------------------------------------------------------
+    def axis_ranking(self, axis: str, top: int | None = 20, drop_first: int = 1) -> list:
+        """Per-name ms/frame on one of the extra axes (``bnd`` / ``eng`` / ``evt``).
+
+        Deliberately a separate call from :meth:`ranking`: the axes overlap by
+        construction (a binder ``:update`` contains the callbacks it fires), so
+        adding them would double count.  ``frm`` lines are where the
+        non-overlapping total lives.
+        """
+        ws = self.good_windows(drop_first)
+        frames = sum(w.frames for w in ws)
+        if not frames:
+            return []
+        agg: dict = {}
+        for w in ws:
+            for name, e in (w.axes.get(axis) or {}).items():
+                a = agg.setdefault(name, {"units": 0.0, "calls": 0, "nested": 0})
+                a["units"] += e.units
+                a["calls"] += e.calls
+                a["nested"] += e.nested
+        rows = []
+        for name, a in agg.items():
+            rows.append({
+                "axis": axis,
+                "name": name,
+                "ms_per_frame": (self.to_ms(a["units"]) or 0.0) / frames,
+                "calls_per_frame": a["calls"] / frames,
+                "nested_per_frame": a["nested"] / frames,
+                "us_per_call": ((self.to_ms(a["units"]) or 0.0) * 1000.0 / a["calls"]) if a["calls"] else None,
+            })
+        rows.sort(key=lambda r: r["ms_per_frame"], reverse=True)
+        return rows[:top] if top else rows
+
+    def slow_frames(self, min_ms: float = 0.0, exclude_after_log: bool = True) -> list:
+        """The ``frm`` rows worth reading.
+
+        Frames flagged ``after_log`` paid for the previous frame's log write, so
+        they are excluded by default - they are an artefact of the instrument
+        and counting them would be the instrument measuring itself.
+        """
+        out = [f for f in self.frames if f.ms >= min_ms]
+        if exclude_after_log:
+            out = [f for f in out if not f.after_log]
+        return out
+
+    def frame_rows(self, min_ms: float = 0.0, exclude_after_log: bool = True) -> list:
+        """Slow frames with the script share worked out, worst frame first."""
+        rows = []
+        for f in self.slow_frames(min_ms, exclude_after_log):
+            script_ms = self.to_ms(f.u_top)
+            rows.append({
+                "n": f.n,
+                "frame": f.frame,
+                "t": f.t,
+                "ms": f.ms,
+                "dt_dev": f.dt_dev,
+                "script_ms": script_ms,
+                "script_pct": (100.0 * script_ms / f.ms) if (script_ms is not None and f.ms) else None,
+                "invisible_ms": (f.ms - script_ms) if script_ms is not None else None,
+                "cb_ms": self.to_ms(f.u_cb),
+                "bnd_ms": self.to_ms(f.u_bnd),
+                "eng_ms": self.to_ms(f.u_eng),
+                "evt_ms": self.to_ms(f.u_evt),
+                "spawn": f.spawn,
+                "destroy": f.destroy,
+                "gc_delta_kb": f.gc_delta_kb,
+                "top": [(n, self.to_ms(u)) for n, u in f.top],
+            })
+        rows.sort(key=lambda r: r["ms"], reverse=True)
+        return rows
+
+    def frame_summary(self, min_ms: float = 0.0) -> dict:
+        """n slow frames, median script share, and the scopes on top of them."""
+        rows = self.frame_rows(min_ms)
+        if not rows:
+            return {"n": 0, "median_script_pct": None, "top_scopes": [],
+                    "suppressed": None}
+        shares = sorted(r["script_pct"] for r in rows if r["script_pct"] is not None)
+        agg: dict = {}
+        for r in rows:
+            for name, ms in r["top"]:
+                if name in ("-", "") or ms is None:
+                    continue
+                a = agg.setdefault(name, {"name": name, "n": 0, "ms": 0.0, "max_ms": 0.0})
+                a["n"] += 1
+                a["ms"] += ms
+                a["max_ms"] = max(a["max_ms"], ms)
+        top = sorted(agg.values(), key=lambda a: a["ms"], reverse=True)
+        return {
+            "n": len(rows),
+            "worst_ms": rows[0]["ms"],
+            "median_ms": statistics.median([r["ms"] for r in rows]),
+            "median_script_pct": statistics.median(shares) if shares else None,
+            "median_invisible_ms": statistics.median(
+                [r["invisible_ms"] for r in rows if r["invisible_ms"] is not None]) or None,
+            "spawns": sum(r["spawn"] for r in rows),
+            "destroys": sum(r["destroy"] for r in rows),
+            "gc_frames": sum(1 for r in rows if r["gc_delta_kb"] < -64),
+            "top_scopes": top[:10],
+        }
+
+    def trace_rows(self, name_prefix: str | None = None) -> list:
+        """I-063 ``trace`` lines as a table, in call order."""
+        rows = []
+        for tr in self.traces:
+            if name_prefix and not tr.name.startswith(name_prefix):
+                continue
+            rows.append({
+                "n": tr.n,
+                "name": tr.name,
+                "ms": self.to_ms(tr.units),
+                "frame": tr.frame,
+                "t": tr.t,
+                "pre": tr.pre_kv,
+                "post": tr.post_kv,
+                "grew": {k: tr.grew(k) for k in ("cells", "grid")
+                         if tr.grew(k) is not None},
+            })
+        return rows
+
     def overhead_ms_per_frame(self, drop_first: int = 1) -> float | None:
         """What the instrument itself costs per frame, from its own price tag."""
         if not self.header or self.header.overhead_ns is None:
@@ -303,6 +553,9 @@ class ProfileLog:
             "script_ms_per_frame": spread(per_frame),
             "fps_from_windows": spread(self.fps_from_windows(drop_first)),
             "overhead_ms_per_frame": self.overhead_ms_per_frame(drop_first),
+            "walkout": self.walkout.walkout if self.walkout else None,
+            "slow_frames": len(self.frames),
+            "trace_calls": len(self.traces),
             "errors": self.errors[:10],
         }
 
@@ -338,6 +591,60 @@ def parse(text: str, path=None) -> ProfileLog:
                 raw=raw.strip(),
             )
             continue
+        if kind == "wdr":               # I-062, the second header line
+            log.walkout = WalkoutHeader(
+                walkout=d.get("walkout", "off"),
+                binder_update=d.get("binder_update") == "true",
+                frames=d.get("frames", "off"),
+                frame_floor_ms=_num(d, "frame_floor_ms"),
+                frame_max=_num(d, "frame_max"),
+                rescan_every=_num(d, "rescan_every"),
+                pending=int(_num(d, "pending", 0) or 0),
+                misses=d.get("misses", ""),
+                ts=_num(d, "ts"),
+                raw=raw.strip(),
+            )
+            continue
+        if kind == "frm":               # I-062, one slow frame
+            top = []
+            for part in (d.get("top") or "").split(","):
+                if "~" in part:
+                    label, u = part.rsplit("~", 1)
+                    try:
+                        top.append((label, float(u)))
+                    except ValueError:
+                        continue
+            log.frames.append(SlowFrame(
+                n=int(_num(d, "n", 0) or 0),
+                frame=int(_num(d, "frame", 0) or 0),
+                t=float(_num(d, "t", 0.0) or 0.0),
+                ms=float(_num(d, "ms", 0.0) or 0.0),
+                dt_dev=_num(d, "dt_dev"),
+                u_top=float(_num(d, "u_top", 0.0) or 0.0),
+                n_top=int(_num(d, "n_top", 0) or 0),
+                u_cb=float(_num(d, "u_cb", 0.0) or 0.0),
+                u_bnd=float(_num(d, "u_bnd", 0.0) or 0.0),
+                u_eng=float(_num(d, "u_eng", 0.0) or 0.0),
+                u_evt=float(_num(d, "u_evt", 0.0) or 0.0),
+                spawn=int(_num(d, "spawn", 0) or 0),
+                destroy=int(_num(d, "destroy", 0) or 0),
+                gc0=float(_num(d, "gc0", 0.0) or 0.0),
+                gc1=float(_num(d, "gc1", 0.0) or 0.0),
+                after_log=int(_num(d, "after_log", 0) or 0),
+                top=top,
+            ))
+            continue
+        if kind == "trace":             # I-063, one call of a named listener
+            log.traces.append(TraceCall(
+                n=int(_num(d, "n", 0) or 0),
+                name=d.get("name", "?"),
+                units=float(_num(d, "units", 0.0) or 0.0),
+                frame=int(_num(d, "frame", 0) or 0),
+                t=float(_num(d, "t", 0.0) or 0.0),
+                pre=d.get("pre", ""),
+                post=d.get("post", ""),
+            ))
+            continue
         seq = _num(d, "seq")
         if seq is None:
             continue
@@ -368,6 +675,14 @@ def parse(text: str, path=None) -> ProfileLog:
                 name=name,
                 calls=int(_num(d, "calls", 0) or 0),
                 units=float(_num(d, "units", 0.0) or 0.0),
+            )
+        elif kind == "axs":             # I-062, one extra-axis row
+            name = d.get("name", "?")
+            w.axes.setdefault(d.get("axis", "?"), {})[name] = CallbackWindow(
+                name=name,
+                calls=int(_num(d, "calls", 0) or 0),
+                units=float(_num(d, "units", 0.0) or 0.0),
+                nested=int(_num(d, "nested", 0) or 0),
             )
         elif kind == "hit":
             name = d.get("name", "?")

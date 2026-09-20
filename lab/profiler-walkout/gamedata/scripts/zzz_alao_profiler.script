@@ -63,6 +63,27 @@ local HITCH             = true
 local HITCH_FLOOR_MS    = 0.1   -- bucket 1 is [floor, 2*floor)
 local HITCH_BUCKETS     = 14    -- 0.1 ms .. 819 ms, last bucket is open-ended
 
+-- --- per-call trace for a named listener (I-063) -----------------------------
+-- max / first / histogram is the right summary for "is this listener a hitch",
+-- and the wrong one for "WHY is this one call 19 ms and that one 4". For
+-- ui_inventory's open the answer is suspected to be state that grows between
+-- opens (the cell pool, the grid), and a summary cannot show a correlation.
+--
+-- So: name a listener (or a prefix of its label) here and every one of its
+-- calls gets one `ALAOPROF|1|trace|` line with its duration, the frame, and a
+-- pair of cheap covariates sampled immediately BEFORE and AFTER the call - both
+-- outside the timer, so the trace never inflates the number it is reporting.
+--
+-- This is deliberately NOT general. It is for listeners that fire a handful of
+-- times a session. Point it at actor_on_update and it will write a line per
+-- frame until it hits TRACE_MAX_LINES and stops.
+--
+-- nil (the default) means the whole thing costs one upvalue read and one `if`
+-- per wrapped call - the same class of cost as the hitch floor compare, and the
+-- default overlays keep that cost whether or not they use the feature.
+local TRACE_LISTENERS   = nil   -- e.g. {"ActorMenu_on_before_init_mode#ui_inventory.script"}
+local TRACE_MAX_LINES   = 400   -- hard cap, so a bad pattern cannot flood the log
+
 -- =========================================================================
 -- I-062 WALKOUT ADDITIONS start here. Everything below this banner is new;
 -- everything above it is the I-048 + I-058 build, byte for byte, so a merge
@@ -283,6 +304,11 @@ local fr_after_log   = 0        -- the previous boundary wrote a line, so this
 local fr_t1n, fr_t1u = "-", 0   -- the three most expensive single regions of
 local fr_t2n, fr_t2u = "-", 0   -- the frame, whatever axis they are on
 local fr_t3n, fr_t3u = "-", 0
+-- ... but only regions worth naming. The slots are reset to this floor rather
+-- than to zero, so a cheap call pays ONE compare against a number instead of a
+-- three-way insert. Nothing under 10 us can be the biggest call of a 25 ms
+-- frame, which is the only question the top-3 exists to answer.
+local ftop_floor     = 0
 local frm_lines      = 0
 local frames_seen_at_floor = 0  -- slow frames the cap suppressed
 
@@ -462,9 +488,9 @@ local function frame_boundary(now)
 	fr_top, fr_ntop = 0, 0
 	fr_cb = 0
 	fr_spawn, fr_destroy = 0, 0
-	fr_t1n, fr_t1u = "-", 0
-	fr_t2n, fr_t2u = "-", 0
-	fr_t3n, fr_t3u = "-", 0
+	fr_t1n, fr_t1u = "-", ftop_floor
+	fr_t2n, fr_t2u = "-", ftop_floor
+	fr_t3n, fr_t3u = "-", ftop_floor
 	for i = 1, #axis_order do axes[axis_order[i]].fr = 0 end
 end
 
@@ -695,15 +721,57 @@ local function listener_label(name, f)
 	return name .. "#" .. src .. ":" .. line
 end
 
+-- Does this label want a per-call trace line? Decided ONCE, at wrap time.
+local function trace_wanted(label)
+	if not TRACE_LISTENERS then return false end
+	for i = 1, #TRACE_LISTENERS do
+		if string.sub(label, 1, #TRACE_LISTENERS[i]) == TRACE_LISTENERS[i] then
+			return true
+		end
+	end
+	return false
+end
+
+-- Cheap covariates, sampled outside the timer. Whatever it returns is opaque to
+-- the parser: the trace line is read by grepping the engine log, not by
+-- aalo/profiler.py, which ignores `kind` values it does not know.
+--
+-- This one is aimed at the ui_inventory open: the hypothesis is that the cost
+-- tracks the size of the UICellContainer cell pool and its grid, both of which
+-- are high-water marks that only grow within a session (UICellContainer:Reset
+-- calls ci:Reset() on every cell but never removes one, and AddItemInCell only
+-- constructs a UICellItem when self.cell[indx] is nil).
+local function trace_probe()
+	local gui = ui_inventory and ui_inventory.GUI
+	local cc = gui and gui.CC and gui.CC["actor_bag"]
+	if not cc then return "na" end
+	local cells, grid = 0, 0
+	for _ in pairs(cc.cell or {}) do cells = cells + 1 end
+	for _ in pairs(cc.grid or {}) do grid = grid + 1 end
+	return "cells=" .. cells .. ",grid=" .. grid .. ",idxer=" .. tostring(cc.idxer)
+end
+
+local trace_lines = 0
+
+local function trace_emit(label, d, pre, post)
+	if trace_lines >= TRACE_MAX_LINES then return end
+	trace_lines = trace_lines + 1
+	printf("ALAOPROF|1|trace|n=%s|name=%s|units=%s|frame=%s|t=%s|pre=%s|post=%s",
+	       trace_lines, label, d, dev.frame, time_global(), pre, post)
+end
+
 local function wrap_listener(name, f)
 	if wrapped_by[f] then return wrapped_by[f] end
 	local label = listener_label(name, f)
 	local is_fn = (type(f) == "function")
+	local traced = trace_wanted(label)
 	local wrapper = function(...)
 		if ldepth > 0 then
 			if is_fn then return f(...) end
 			return f[name](f, ...)
 		end
+		-- sampled before the timer starts, so it cannot inflate `d`
+		local pre = traced and trace_probe() or nil
 		ldepth = 1
 		ltimer:start()
 		if is_fn then f(...) else f[name](f, ...) end
@@ -721,6 +789,7 @@ local function wrap_listener(name, f)
 		if d >= hfloor then
 			hitch_hit(lhmax, lhfirst_t, lhfirst_f, lhfirst_u, lhbuckets, label, d)
 		end
+		if traced then trace_emit(label, d, pre, trace_probe()) end
 	end
 	wrapped_by[f] = wrapper
 	orig_by[wrapper] = f
@@ -829,6 +898,9 @@ local function axis_wrapper(A, label, orig, kind, is_method)
 		elseif kind == 2 then
 			fr_destroy = fr_destroy + 1
 		end
+		-- keep the arity at 1 in the overwhelmingly common case, so a caller
+		-- that counts its results with select('#') sees what it used to
+		if r2 == nil and r3 == nil then return r1 end
 		return r1, r2, r3
 	end
 end
@@ -850,30 +922,35 @@ end
 -- One pass over a target list. Anything it cannot reach goes on `pending` and
 -- is re-tried every RESCAN_EVERY frames: a module can be pulled in lazily by
 -- the first reference to it, so "absent at on_game_start" is not "absent".
+local function wrap_binder_one(A, modname, clsname)
+	local key = modname .. "." .. clsname
+	local ok, done = pcall(function()
+		local mod = _G[modname]
+		local cls = mod and mod[clsname]
+		if type(cls) ~= "table" then return 0 end
+		local n = 0
+		for j = 1, #BINDER_METHODS do
+			local m = BINDER_METHODS[j]
+			local kind = (m == "net_spawn") and 1 or (m == "net_destroy") and 2 or 0
+			if wrap_axis_method(A, cls, m, key .. "." .. m, kind) then n = n + 1 end
+		end
+		if WRAP_BINDER_UPDATE then
+			for j = 1, #BINDER_UPDATE_METHODS do
+				local m = BINDER_UPDATE_METHODS[j]
+				if wrap_axis_method(A, cls, m, key .. "." .. m, 0) then n = n + 1 end
+			end
+		end
+		return n
+	end)
+	return (ok and done) or 0, key
+end
+
 local function wrap_binder_targets(A, targets)
 	for i = 1, #targets do
 		local modname, clsname = targets[i][1], targets[i][2]
-		local key = modname .. "." .. clsname
-		local ok, done = pcall(function()
-			local mod = _G[modname]
-			local cls = mod and mod[clsname]
-			if type(cls) ~= "table" then return 0 end
-			local n = 0
-			for j = 1, #BINDER_METHODS do
-				local m = BINDER_METHODS[j]
-				local kind = (m == "net_spawn") and 1 or (m == "net_destroy") and 2 or 0
-				if wrap_axis_method(A, cls, m, key .. "." .. m, kind) then n = n + 1 end
-			end
-			if WRAP_BINDER_UPDATE then
-				for j = 1, #BINDER_UPDATE_METHODS do
-					local m = BINDER_UPDATE_METHODS[j]
-					if wrap_axis_method(A, cls, m, key .. "." .. m, 0) then n = n + 1 end
-				end
-			end
-			return n
-		end)
-		if ok and done and done > 0 then
-			wrap_counts.bnd = wrap_counts.bnd + done
+		local n, key = wrap_binder_one(A, modname, clsname)
+		if n > 0 then
+			wrap_counts.bnd = wrap_counts.bnd + n
 		else
 			pending[#pending + 1] = { "bnd", modname, clsname }
 			wrap_misses[#wrap_misses + 1] = key
@@ -994,14 +1071,10 @@ retry_pending = function()
 		local axis, a, b = pending[i][1], pending[i][2], pending[i][3]
 		local got = false
 		if axis == "bnd" then
-			local before = wrap_counts.bnd
-			wrap_binder_targets(axes.bnd, { { a, b } })
-			-- wrap_binder_targets re-queues a miss itself, so drop our copy
-			got = wrap_counts.bnd > before
-			if not got then
-				-- it pushed a fresh pending entry; pop it, we keep our own list
-				pending[#pending] = nil
-				wrap_misses[#wrap_misses] = nil
+			local n = wrap_binder_one(axes.bnd, a, b)
+			if n > 0 then
+				wrap_counts.bnd = wrap_counts.bnd + n
+				got = true
 			end
 		else
 			got = wrap_one_global(axes.eng, a, b)
@@ -1033,6 +1106,10 @@ local function install()
 	-- hiccups as a `probe` hitch row.
 	if HITCH and upm and upm > 0 then
 		hfloor = HITCH_FLOOR_MS * upm
+	end
+	if upm and upm > 0 then                         -- I-062
+		ftop_floor = 0.01 * upm                     -- 10 us
+		fr_t1u, fr_t2u, fr_t3u = ftop_floor, ftop_floor, ftop_floor
 	end
 
 	orig_make_callback = axr_main.make_callback

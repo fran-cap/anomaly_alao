@@ -290,6 +290,69 @@ number was taken with those.
 Hitches need someone to press the key: an unattended `gammabaseline` run never
 opens an inventory, so a hitch capture is an **attended** run.
 
+### The other doors into Lua (`lab/profiler-walkout`, idea I-062)
+
+`make_callback` is one door and the engine has several. Walking out of the
+`gammabaseline` start area produces 1-4 frames of 25-44 ms, CPU bound
+(`MsGPUBusy` ~5), and the hitch profiler shows **no listener above ~12 ms in
+them** - so the cost is either engine-side or Lua the instrument cannot see. A
+~31 ms frame also appears 8-9 s into every capture, standing still, with no
+callback to explain it.
+
+`lab/tools/i062_engine_entry_census.py` enumerates the doors over the live
+winner tree (1350 scripts): 38 `object_binder` classes, 36 `cse_`/`se_` server
+classes, 169 scheme action classes, 508 `CreateTimeEvent` sites, 17
+`AddUniqueCall`, 9 `level.add_call`, and the `.ltx` `functor` bindings.
+
+`lab/profiler-walkout` is the hitch build plus three extra timing axes and a
+frame recorder:
+
+| axis | what it wraps |
+|---|---|
+| `bnd` | object binders and `se_*` server objects, per class **and** method (`xr_motivator.motivator_binder.net_spawn`), lifecycle methods always, `:update` too |
+| `eng` | functions the engine calls by name: `visual_memory_manager.get_visible_value`, `ProcessEventQueue`, `xr_logic.issue_event`, ... |
+| `evt` | `CreateTimeEvent` / `AddUniqueCall` / `level.add_call` bodies, wrapped at registration so each is labelled with its own `file:line` |
+
+Each axis has **its own timer and its own depth guard**. That is the fix for
+the old `WRAP_BINDERS` mode, which shared `depth` and the main timer with
+`make_callback` and therefore turned every callback fired inside a binder body
+into an untimed `nested` - which is why it was never usable, not a matter of
+cost. A single shared `active` counter stops the axes from double counting:
+only a region entered with nothing else running enters the per-frame union.
+
+The line the build exists for is `frm`, one per frame over 12 ms (capped at 400
+a run):
+
+```
+ALAOPROF|1|frm|n=1|frame=8123|t=..|ms=43|dt_dev=..|u_top=..|n_top=..|u_cb=..|u_bnd=..|u_eng=..|u_evt=..|spawn=4|destroy=1|gc0=..|gc1=..|after_log=0|top=a~u,b~u,c~u
+```
+
+`ms` minus `u_top` converted to milliseconds is **engine plus everything the
+wrap lists do not reach** - the number that decides "script or engine" directly.
+Both clocks are printed (`ms` is the `time_global()` delta, `dt_dev` is
+`device().time_delta` raw) because which is truthful at frame granularity is a
+question the first run answers rather than one to assume.
+`collectgarbage("count")` is sampled at both boundaries, so a frame the
+collector ran in is identifiable rather than merely suspicious. The frame
+*after* a `frm` line paid for the log write and carries `after_log=1`; the
+report drops those.
+
+What it still cannot see: anything registered before `on_game_start` (hence
+`ProcessEventQueue` on the globals list), a wrapped function someone already
+cached into a local, `update()` on classes outside the target list, and every
+engine-side cost by construction. A wrapper propagates at most three return
+values and does not `pcall`.
+
+```
+py -3.12 lab/tools/i062_engine_entry_census.py --top 30
+py -3.12 lab/tools/i062_build_overlays.py      # alao-profiler-walkout[-listeners-inv]
+py -3.12 lab/tools/profile_report.py --queue <id> --frames --axes --hitch --listeners --trace
+```
+
+`alao-profiler-walkout-listeners-inv` also carries I-063's per-call inventory
+trace, because the user gets one attended session and both questions have to fit
+in it.
+
 ### Running an arm with it
 
 Add one key to the queue request. The profiler is the **instrument, not the
