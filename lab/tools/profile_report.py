@@ -56,7 +56,58 @@ def _resolve(paths):
     return out
 
 
-def _report_arm(name, dirs, top, drop_first, listeners=False, drop_rounds=0):
+def _report_hitch(name, dirs, top, pct, scope=None):
+    """I-058: the tail, not the mean - worst single call, p99, first slow call.
+
+    Aggregated across the runs of an arm by taking the worst max and the
+    earliest first-call, because a hitch is a per-event property and the runs
+    are repeats of the same event, not samples of one distribution.
+    """
+    rows: dict = {}
+    seen = 0
+    for d in dirs:
+        log = _profiler.load_run(d) if Path(d).is_dir() else _profiler.load(d)
+        if not log or not log.hitches:
+            continue
+        seen += 1
+        for r in log.hitch_ranking(scope=scope, pct=pct):
+            key = (r["scope"], r["name"])
+            cur = rows.get(key)
+            if cur is None:
+                cur = dict(r)
+                cur["first"] = (r["first_ms"], r["first_frame"], r["first_t"])
+                rows[key] = cur
+                continue
+            cur["calls"] += r["calls"]
+            cur["above_floor"] += r["above_floor"]
+            if (r["max_ms"] or 0) > (cur["max_ms"] or 0):
+                cur["max_ms"] = r["max_ms"]
+            # the earliest first slow call across the repeats of the arm
+            if r["first_frame"] < cur["first"][1]:
+                cur["first"] = (r["first_ms"], r["first_frame"], r["first_t"])
+            # widest (most pessimistic) percentile bracket of the repeats
+            if (r["p_lo_ms"] or 0) > (cur["p_lo_ms"] or 0):
+                cur["p_lo_ms"], cur["p_hi_ms"] = r["p_lo_ms"], r["p_hi_ms"]
+    if not seen:
+        print(f"#### {name}: no hitch (`hit`) lines - the overlay was not the hitch build\n")
+        return []
+    ranked = sorted(rows.values(), key=lambda r: (r["max_ms"] or 0.0), reverse=True)[:top]
+    print(f"#### {name}: hitch tail ({seen} run(s), floor "
+          f"{_fmt(ranked[0]['floor_ms'], 3) if ranked else '?'} ms)")
+    print(f"| # | scope | name | calls | >=floor | max ms | p{pct:g} ms | first ms | first frame |")
+    print("|---|---|---|---:|---:|---:|---:|---:|---:|")
+    for i, r in enumerate(ranked, 1):
+        lo, hi = r["p_lo_ms"], r["p_hi_ms"]
+        p = f"{_fmt(lo, 2)}+" if hi is None else f"{_fmt(lo, 2)}-{_fmt(hi, 2)}"
+        first = r.get("first") or (r["first_ms"], r["first_frame"], r["first_t"])
+        print(f"| {i} | {r['scope']} | `{r['name']}` | {r['calls']} | {r['above_floor']} | "
+              f"{_fmt(r['max_ms'], 2)} | {p} | {_fmt(first[0], 2)} | {first[1]} |")
+    print()
+    return ranked
+
+
+def _report_arm(name, dirs, top, drop_first, listeners=False, drop_rounds=0,
+                hitch=False, hitch_pct=99.0):
     logs = []
     for d in dirs:
         log = _profiler.load_run(d) if d.is_dir() else _profiler.load(d)
@@ -105,6 +156,8 @@ def _report_arm(name, dirs, top, drop_first, listeners=False, drop_rounds=0):
                 print(f"| {i} | `{r['name']}` | {_fmt(r['ms_per_frame'], 4)} | "
                       f"{_fmt(r['calls_per_frame'], 2)} | {_fmt(r['us_per_call'], 1)} |")
             print()
+    if hitch:
+        rep["hitch"] = _report_hitch(name, [d for d, _ in logs], top, hitch_pct)
     return rep
 
 
@@ -122,6 +175,11 @@ def main(argv=None) -> int:
                          "warm-up round, which runs about 10%% high in script-ms")
     ap.add_argument("--drop-first", type=int, default=1,
                     help="windows to drop from the start of each run (default 1: it straddles the load)")
+    ap.add_argument("--hitch", action="store_true",
+                    help="I-058: also report the tail (worst call, p99, first slow call). "
+                         "Needs the hitch build of the overlay (alao-profiler-hitch*)")
+    ap.add_argument("--hitch-pct", type=float, default=99.0,
+                    help="percentile for --hitch (default 99)")
     ap.add_argument("--json", type=Path, help="also write the aggregate here")
     a = ap.parse_args(argv)
 
@@ -151,7 +209,8 @@ def main(argv=None) -> int:
 
     out = {}
     for name, dirs in arms.items():
-        rep = _report_arm(name, dirs, a.top, a.drop_first, a.listeners, a.drop_rounds)
+        rep = _report_arm(name, dirs, a.top, a.drop_first, a.listeners, a.drop_rounds,
+                          a.hitch, a.hitch_pct)
         if rep:
             out[name] = rep
     b = (out.get("baseline") or {}).get("script_ms_per_frame") or {}

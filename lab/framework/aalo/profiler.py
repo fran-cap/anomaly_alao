@@ -13,8 +13,20 @@ fields.  A line may carry an engine timestamp/sigil prefix, so we look for
     ALAOPROF|1|win|seq=1|t0=..|t1=..|span_ms=..|frames=..|total_units=..|..
     ALAOPROF|1|cb|seq=1|name=actor_on_update|calls=..|units=..|nested=..
     ALAOPROF|1|lst|seq=1|name=actor_on_update#foo.script:412|calls=..|units=..
+    ALAOPROF|1|hit|seq=1|scope=cb|name=..|max=..|above=..|first_t=..|first_frame=..|first_units=..|floor=..|b=0,1,..
     ALAOPROF|1|eow|seq=1|frames_total=..
     ALAOPROF|1|err|install failed: ..
+
+``hit`` lines (idea I-058, only from the hitch build of the overlay) are the odd
+one out: everything else is per window and gets reset by the dump, while a
+``hit`` line is a RUN-scoped running total.  A hitch is a rare event and the
+interesting one - the first inventory open of the session - lives in the very
+first window, which every report drops.  So the last ``hit`` line for a name is
+the whole-run answer, and two windows' lines subtract to give one window's.
+``b`` are the counts for buckets 1..N, bucket ``i`` covering
+``[floor*2^(i-1), floor*2^i)`` in timer units, with the last bucket open-ended;
+calls below the floor are not counted there at all and are recovered as
+``calls - above`` from the per-window ``cb``/``lst`` lines.
 
 ``units`` are whatever the engine's ``profile_timer`` counts in; the profiler
 calibrates them against ``os.clock`` at startup and reports the ratio as
@@ -30,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 __all__ = [
-    "Header", "CallbackWindow", "Window", "ProfileLog",
+    "Header", "CallbackWindow", "Window", "HitchStat", "ProfileLog",
     "parse", "load", "load_run", "spread", "compare_runs",
 ]
 
@@ -67,6 +79,9 @@ class Header:
     make_callback: bool = False
     binders: str = "off"
     listeners: str = "off"
+    hitch: str = "off"
+    hitch_floor_ms: float | None = None
+    hitch_buckets: int | None = None
     dump_ms: float | None = None
     ts: float | None = None
     raw: str = ""
@@ -83,6 +98,46 @@ class CallbackWindow:
     calls: int = 0
     units: float = 0.0
     nested: int = 0
+
+
+@dataclass
+class HitchStat:
+    """One run-scoped ``hit`` line: the tail of one callback or one listener."""
+    name: str
+    scope: str = "cb"
+    max_units: float = 0.0
+    above: int = 0              # calls at or above the floor
+    first_t: float = 0.0        # time_global() of the first slow call
+    first_frame: int = 0
+    first_units: float = 0.0
+    floor_units: float = 0.0
+    buckets: list = field(default_factory=list)   # counts for buckets 1..N
+
+    def bucket_floor_units(self, i: int) -> float:
+        """Lower edge of 1-based bucket *i*, in timer units."""
+        return self.floor_units * (2 ** (i - 1))
+
+    def percentile_units(self, pct: float, total_calls: int) -> tuple:
+        """Coarse percentile as a ``(low, high)`` bracket in timer units.
+
+        *total_calls* is every call of the name, fast ones included - the
+        histogram only holds the slow tail, so the fast calls have to be handed
+        in from the ``cb``/``lst`` lines.  ``high`` is ``None`` for the
+        open-ended top bucket, and the bracket is ``(0, floor)`` whenever the
+        percentile falls among the calls that never crossed the floor.
+        """
+        total = max(total_calls, self.above)
+        if total <= 0:
+            return (0.0, self.floor_units)
+        want = total * (1.0 - pct / 100.0)   # how many calls may sit above it
+        seen = 0.0
+        for i in range(len(self.buckets), 0, -1):
+            seen += self.buckets[i - 1]
+            if seen >= want:
+                lo = self.bucket_floor_units(i)
+                hi = None if i == len(self.buckets) else lo * 2
+                return (lo, hi)
+        return (0.0, self.floor_units)
 
 
 @dataclass
@@ -113,6 +168,8 @@ class ProfileLog:
     header: Header | None = None
     windows: list = field(default_factory=list)
     errors: list = field(default_factory=list)
+    # (scope, name) -> the LAST hit line seen, i.e. the whole-run totals
+    hitches: dict = field(default_factory=dict)
 
     # -- conversions -------------------------------------------------------
     @property
@@ -180,6 +237,48 @@ class ProfileLog:
         rows.sort(key=lambda r: r["ms_per_frame"], reverse=True)
         return rows[:top] if top else rows
 
+    def hitch_ranking(self, scope: str | None = None, top: int | None = None,
+                      pct: float = 99.0) -> list:
+        """What the tail of each callback / listener looks like, worst first.
+
+        Ranked by ``max_ms``, because a hitch is judged by its worst frame and
+        not by its average.  Unlike :meth:`ranking` this ignores ``drop_first``
+        entirely: ``hit`` lines are run-scoped and the first window is exactly
+        where the first-open hitch lives.
+        """
+        if not self.hitches:
+            return []
+        # every call of the name, fast ones included, over the whole run
+        totals: dict = {}
+        for w in self.windows:
+            for n, e in w.entries.items():
+                totals[("cb", n)] = totals.get(("cb", n), 0) + e.calls
+            for n, e in w.listeners.items():
+                totals[("lst", n)] = totals.get(("lst", n), 0) + e.calls
+        rows = []
+        for (sc, name), h in self.hitches.items():
+            if scope and sc != scope:
+                continue
+            calls = totals.get((sc, name), h.above)
+            lo, hi = h.percentile_units(pct, calls)
+            rows.append({
+                "scope": sc,
+                "name": name,
+                "calls": calls,
+                "above_floor": h.above,
+                "max_ms": self.to_ms(h.max_units),
+                "first_ms": self.to_ms(h.first_units),
+                "first_t": h.first_t,
+                "first_frame": h.first_frame,
+                "floor_ms": self.to_ms(h.floor_units),
+                "p_pct": pct,
+                "p_lo_ms": self.to_ms(lo),
+                "p_hi_ms": self.to_ms(hi) if hi is not None else None,
+                "buckets": list(h.buckets),
+            })
+        rows.sort(key=lambda r: (r["max_ms"] or 0.0), reverse=True)
+        return rows[:top] if top else rows
+
     def overhead_ms_per_frame(self, drop_first: int = 1) -> float | None:
         """What the instrument itself costs per frame, from its own price tag."""
         if not self.header or self.header.overhead_ns is None:
@@ -231,6 +330,9 @@ def parse(text: str, path=None) -> ProfileLog:
                 make_callback=d.get("make_callback") == "true",
                 binders=d.get("binders", "off"),
                 listeners=d.get("listeners", "off"),
+                hitch=d.get("hitch", "off"),
+                hitch_floor_ms=_num(d, "hitch_floor_ms"),
+                hitch_buckets=_num(d, "hitch_buckets"),
                 dump_ms=_num(d, "dump_ms"),
                 ts=_num(d, "ts"),
                 raw=raw.strip(),
@@ -266,6 +368,24 @@ def parse(text: str, path=None) -> ProfileLog:
                 name=name,
                 calls=int(_num(d, "calls", 0) or 0),
                 units=float(_num(d, "units", 0.0) or 0.0),
+            )
+        elif kind == "hit":
+            name = d.get("name", "?")
+            scope = d.get("scope", "cb")
+            try:
+                buckets = [int(x) for x in (d.get("b") or "").split(",") if x != ""]
+            except ValueError:
+                buckets = []
+            log.hitches[(scope, name)] = HitchStat(
+                name=name,
+                scope=scope,
+                max_units=float(_num(d, "max", 0.0) or 0.0),
+                above=int(_num(d, "above", 0) or 0),
+                first_t=float(_num(d, "first_t", 0.0) or 0.0),
+                first_frame=int(_num(d, "first_frame", 0) or 0),
+                first_units=float(_num(d, "first_units", 0.0) or 0.0),
+                floor_units=float(_num(d, "floor", 0.0) or 0.0),
+                buckets=buckets,
             )
         elif kind == "eow":
             w.complete = True
