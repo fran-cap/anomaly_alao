@@ -197,7 +197,7 @@ not per dispatch. Form B's only extra work is a wrapper on `callback_set`/`callb
 condition is 1.00x, not the usual 1.15x**, so a G2 "fail" is the wanted result.
 
 The dispatch saving itself is I-043's, from a clean run: 0.55 us/dispatch at K=4 up to
-27.6 us at K=73 interpreted, and 110.4 us/frame measured in game.
+27.6 us at K=73 interpreted, and 105.1 us/frame measured in game (warm rounds; 110.1 over all four).
 
 ## 4. The stock-baseline run
 
@@ -215,7 +215,7 @@ requires a `gamedata/` directory, so `build_overlay.py` is not in the path at al
 the mod replaces no file, both arms load the identical loose `axr_main.script` and the only
 difference between them is the monkey patch.
 
-I-043 measured −110.4 us/frame **on top of full ALAO**. This run asks whether a plain GAMMA
+I-043 measured −105.1 us/frame **on top of full ALAO**. This run asks whether a plain GAMMA
 player sees the same thing. It should — nothing ALAO rewrites is in the dispatch path — but
 "should" is why it is being run.
 

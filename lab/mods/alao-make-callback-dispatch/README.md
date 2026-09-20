@@ -2,7 +2,7 @@
 
 One script. It makes every scripted callback in the game cheaper by not re-sorting the
 listener table on every dispatch. Measured saving on a GAMMA 0.9.4 install, standing
-still on one save: **110 microseconds of script time per frame, 15.5% of all script
+still on one save: **105 microseconds of script time per frame, 14.8% of all script
 time**. It did **not** move the frame rate on that scene — see "What it does not buy".
 
 Built by the ALAO lab (ideas I-043 / I-051). Everything below is reproducible from the
@@ -74,6 +74,16 @@ Matching the shipped order bit for bit would mean reimplementing the heap, i.e. 
 the work this mod exists to remove. If you are on a setup where a listener's relative
 position inside a single frame is load-bearing, do not use this.
 
+**How often does this come up?** A scan of the 1350 scripts a live GAMMA profile loads,
+resolving each `RegisterScriptCallback("X", <name>)` to a top-level `function <name>` in
+the same file and looking for a register/unregister of `"X"` inside it, finds **two sites,
+both the same listener**: `drx_da_main.script` (Dynamic Anomalies Overhaul) unregisters
+itself after it has already run — where both dispatchers agree — and registers a different
+function, which is in neither dispatcher's snapshot. So both call the same listeners
+exactly once, and only the order of the rest of that one pass differs, on a path that
+fires after a surge or a level change. The scan cannot see inline closures (64
+registrations) or listener names it cannot resolve (586), so treat that as a floor.
+
 ## Measured
 
 **Instrument:** a script-side profiler (ALAO idea I-048) that wraps `make_callback` and
@@ -85,7 +95,8 @@ reads the engine's `profile_timer`, so the number is script time, not frame time
 
 | | baseline | with the patch | delta |
 |---|---|---|---|
-| script time | 712.3 us/frame | 607.3 us/frame | **-110.4 us (-15.45%)** |
+| script time, **warm** (rounds 2-4, the protocol number) | 712.3 us/frame | 607.3 us/frame | **-105.1 us (-14.8%)** |
+| script time, all 4 rounds | 712.6 us/frame | 602.5 us/frame | -110.1 us (-15.45%) |
 | `actor_on_update` | 667.9 us | 571.2 us | -96.7 us (-14.5%) |
 | per-run means | 700 / 713 / 716 / 720 | 588 / 593 / 607 / 622 | no overlap |
 | fps avg | 213.31 | 210.38 | -1.37% |
@@ -99,7 +110,7 @@ queued separately.
 
 **The frame rate did not move.** -1.37% average, +3.41% on the 1% low, -2.1% p99 — all
 inside the +-2% noise band of that harness, and the average and the low disagree in sign.
-110 us off a ~4750 us frame is 2.3%, at the edge of what the harness can resolve. So: a
+105 us off a ~4750 us frame is 2.2%, at the edge of what the harness can resolve. So: a
 large, reproducible, mechanistically explained saving in script time, and no demonstrated
 frame-rate win on that scene. Both halves of that sentence are the result. One save, one
 spot, standing still; a busy scene with many NPCs online would change the mix.

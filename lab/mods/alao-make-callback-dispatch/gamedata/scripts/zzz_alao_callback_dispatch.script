@@ -64,8 +64,9 @@
 --
 -- See the mod README and tests/test_i051_dispatch_delivery.py in the ALAO repo.
 --
--- MEASURED: 712.6 -> 602.5 us of script time per frame (-110 us, -15.5%), 4x120 s
--- per arm, standing still on one save, GAMMA 0.9.4 + full ALAO.  See the README.
+-- MEASURED: 712.3 -> 607.3 us of script time per frame (-105 us, -14.8%), 4x120 s
+-- per arm, warm rounds only, standing still on one save, GAMMA 0.9.4 + full
+-- ALAO.  The frame rate did not move.  See the README.
 
 local VERSION = "1.0"
 

@@ -176,9 +176,12 @@ in exactly one file:
 
 | | before | after | delta |
 |---|---|---|---|
-| total script time | 712.3 us/frame | 607.3 us/frame | **-110.4 us/frame (-15.45%)** |
+| total script time | 712.3 us/frame | 607.3 us/frame | **-105.1 us/frame (-14.8%)** |
 | `actor_on_update` | 667.9 us | 571.2 us | -96.7 us (-14.5%) |
 | per-run means | 700 / 713 / 716 / 720 | 588 / 593 / 607 / 622 | no overlap between the arms |
+
+(Including the first round of each arm, which runs ~10% high and the protocol drops, the
+same run reads 712.6 -> 602.5, -110.1 us, -15.45%.)
 
 The saving is not confined to the per-frame callbacks: `make_callback` is the funnel, so
 **all 7.5 dispatches per frame** get cheaper. Fifteen different callbacks moved, each by
@@ -187,7 +190,7 @@ The saving is not confined to the per-frame callbacks: `make_callback` is the fu
 
 **And the frame rate did not move**: -1.37% average, +3.41% on the 1% low, -2.1% on the
 p99, all inside that harness's ±2% noise band and disagreeing in sign. I am not claiming
-an fps win. 110 us off a ~4750 us frame is 2.3%, at the edge of what the harness resolves,
+an fps win. 105 us off a ~4750 us frame is 2.2%, at the edge of what the harness resolves,
 and this was one scene, standing still. What is demonstrated is a reproducible 15%
 reduction in scripted CPU time, which is headroom rather than frames on that scene.
 
@@ -225,6 +228,16 @@ possible (an upper bound on pathology, not a frequency in a real frame):
 | unregister during the pass | 480 | 96 | 24 |
 | register during the pass | 140 | 460 | 0 |
 | both | 251 | 294 | 55 |
+
+For what it is worth in practice: resolving every `RegisterScriptCallback("X", <name>)` in
+the 1350 script files a live GAMMA profile loads to a top-level `function <name>` in the
+same file, and searching that body for a register or unregister of `"X"`, finds **two
+sites, both the same listener** (`drx_da_main.script` in Dynamic Anomalies Overhaul). It
+unregisters itself after it has already run — where both dispatchers agree — and registers
+a different function, which is in neither dispatcher's snapshot, so both call the same set
+of listeners exactly once and only the order of the rest of that one pass differs. That
+scan cannot see inline closures (64 registrations) or listener names it cannot resolve
+(586), so it is a floor, not a proof.
 
 Matching the shipped order bit for bit would mean reimplementing the heap, i.e. keeping
 the work this change exists to remove. I think the cached array's behaviour is the more
