@@ -18,6 +18,13 @@
 -- @notes K is the LISTENER COUNT. Live static counts (census of the 1350 live winners):
 -- @notes actor_on_update 125 sites (73 of them permanent), npc_on_update 12, monster_on_update 4.
 -- @notes Listeners are trivial here, so this row is the pure dispatch share.
+-- @notes MEASURED IN GAME (queue 20260919-192703-I-043-3f2729, I-048 profiler): the patch
+-- @notes saves 110.4 us/frame of script time across 7.49 make_callback dispatches per frame.
+-- @notes At K=12 (npc_on_update) this bench predicts 3.03 us/dispatch and the game measured
+-- @notes 2.80 - within 8%. At actor_on_update it predicts 27.6 us (K=73) / 62.7 (K=125) and
+-- @notes the game measured 96.75, i.e. this bench is a FLOOR there; suspected cause is the
+-- @notes protocol's collectgarbage() before each timed run hiding the GC cost of the
+-- @notes K-element keys table plus two closures hspairs allocates per dispatch. Untested.
 -- @setup
 local acc = 0
 
