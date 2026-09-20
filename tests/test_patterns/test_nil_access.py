@@ -137,6 +137,58 @@ def test_second_use_is_marked_unsafe_and_nothing_is_rewritten(analyze, transform
     assert modified is False, f"unsafe multi-use nil access was rewritten:\n{content}"
 
 
+# I-052, the other two shapes the GAMMA gate caught under --fix --fix-nil.
+
+# nta_utils.script: `item and <expr using item>` short-circuits, so the
+# expression never runs on a nil item. ALAO used to only know the
+# `item and item:` shape and wrapped this in a pointless `if item then`.
+SHORT_CIRCUIT_GUARD = """
+function is_axe()
+    local item = db.actor:active_item()
+    return item and string.find(item:section(), "axe", 1, true)
+end
+"""
+
+# ...but `not item and item:section()` guards the wrong way round and is a
+# genuine crash, so the finding must survive.
+INVERTED_SHORT_CIRCUIT = """
+function is_axe()
+    local item = db.actor:active_item()
+    return not item and item:section()
+end
+"""
+
+# soulslike_scenarios.script: the later uses are plain field writes, which never
+# become nil accesses of their own, so the one-line guard would protect line 1
+# of 5. Nothing is auto-fixable here.
+FIELD_USES_AFTER = """
+function heal()
+    local actor = db.actor
+    actor:set_health_ex(1)
+    actor.power = 1
+    actor.radiation = 0
+end
+"""
+
+
+def test_short_circuit_and_counts_as_a_guard(analyze, transform_full):
+    assert "potential_nil_access" not in pattern_names(analyze(SHORT_CIRCUIT_GUARD))
+    modified, content, _ = transform_full(SHORT_CIRCUIT_GUARD, fix_nil=True)
+    assert "if item then" not in content, content
+
+
+def test_not_var_and_is_not_a_guard(analyze):
+    assert "potential_nil_access" in pattern_names(analyze(INVERTED_SHORT_CIRCUIT))
+
+
+def test_later_field_uses_block_the_one_line_guard(analyze, transform_full):
+    hits = findings_named(analyze(FIELD_USES_AFTER), "potential_nil_access")
+    assert hits, "the nil hazard must still be reported"
+    assert all(h.details["is_safe_to_fix"] is False for h in hits)
+    modified, content, _ = transform_full(FIELD_USES_AFTER, fix_nil=True)
+    assert "if actor then" not in content, content
+
+
 # --- known ALAO gap -------------------------------------------------------
 
 SINGLE_LINE_GUARD = """
