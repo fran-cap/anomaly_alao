@@ -12,7 +12,7 @@ hitch profiler in listener mode. Worst single call per capture, milliseconds:
 
 | listener | c1 | c2 | c3 | c4 | shape |
 |---|---:|---:|---:|---:|---|
-| `ActorMenu_on_before_init_mode#ui_inventory.script:93` | 11.4 | 10.1 | 18.5 | 8.4 | **the worst call was the first inventory open in all four captures**; every later open 3.2-6.4 ms |
+| `ActorMenu_on_before_init_mode#ui_inventory.script:93` | 11.4 | 10.1 | 18.5 | 8.4 | the worst call was the first inventory open in all four captures; every later open 3.2-6.4 ms. **This reading did not survive: see "Retraction" below.** In the I-063 runs the worst open is sometimes the first and sometimes not, and the cause is not what this mod assumed. |
 | `actor_on_leave_dialog#ui_pda_encyclopedia_tab.script:407` | 9.5 | 7.0 | 6.5 | 6.4 | one call per capture (the one that unlocked an article) |
 | `actor_on_footstep#footstep_sounds.script:87` | 4.5 | 2.7 | 0.9 | 0.8 | first-on-a-new-surface, settles under 1 ms |
 | `actor_on_jump#eft_jump_sounds.script:71` | 3.5 | 3.1 | 0.9 | 0.9 | same |
@@ -35,8 +35,15 @@ twelve `RegisterScriptCallback`s. Nothing in `__init`, `InitControls` or
 `InitCallbacks` touches `db.actor`, `level` or `alife()` — checked line by line
 in the live copy (`G.A.M.M.A. Accurate Defense Values`, the top enabled mod that
 ships the file; three other mods ship a shadowed copy). `GUI` is only set back
-to nil by `UIInventory:actor_on_net_destroy`, i.e. on a level change. So the
-cost is once per level load and it lands on the frame you pressed I.
+to nil by `UIInventory:actor_on_net_destroy`, i.e. on a level change.
+
+**That analysis is correct and irrelevant on this install.** Two other mods
+already build `GUI` at `actor_on_first_update`, before this mod's listener runs,
+so `start()` never takes that branch and the per-open cost is something else
+entirely. See "Retraction" and "Why an inventory open is bimodal 4-20 ms" below.
+The inventory prewarm stays in the mod because it is free when `GUI` already
+exists (one truthiness test) and it is the correct thing to do on an install
+that does not have those two mods.
 
 **`ui_pda_encyclopedia_tab.set_article()`** opens with `local guide = get_ui()`,
 and `get_ui` is `SINGLETON = SINGLETON or pda_encyclopedia_tab()`. That
@@ -59,7 +66,7 @@ casts five rays per jump/land — and this mod does not touch it.
 
 | target | what is cold (first call only) | what is paid every call | Lua vs engine |
 |---|---|---|---|
-| `ui_inventory.script:93` | `UIInventory()`: xml parse + widget tree + 6 cell containers | `Reset()`, `IMode_Init`, `ParseInventory` over the actor's items, `ShowDialog` | mostly engine (xml, widget ctors); the Lua part is the ~600 lines of `InitControls` |
+| `ui_inventory.script:93` | `UIInventory()`: xml parse + widget tree + 6 cell containers — **but already built at frame 7 by two other mods on this install, so nothing here is cold in practice** | `Reset()`, `IMode_Init`, `ParseInventory` over the actor's ruck, `UICellContainer:Reinit` (sort + per-item grid scan + `UICellItem` construction when the pool grows), `ShowDialog` | mostly engine (xml, widget ctors); the Lua part is the ~600 lines of `InitControls` |
 | `ui_pda_encyclopedia_tab.script:407` | `pda_encyclopedia_tab()` via `get_ui()` | `InitCategories()` + `SelectCategory` + `SelectArticle` per unlock, `size_table(locked_articles)` twice per `unlock_article`, `actor_menu.set_notification` | engine (xml, list widgets, `game.translate_string`) |
 | `eft_jump_sounds.script:71/:89` | the engine's load of each `jump\jump_*` / `landing\landing_*` path | 5 geometry raycasts, one ray object per ray, `oleh_sound_utils.get_outfit_class()` | engine both ways |
 | `footstep_sounds.script:87` | the engine's load of each `footstep\n_*`, `cloth\*`, `gear_rattle\*`, `ladder\*` path | queue shuffle, `db.actor:get_total_weight()`, and on ladders 4 more raycasts | engine |
@@ -146,23 +153,147 @@ Attended run `20260920-165259-I-063-953526`: captures 1 and 3 baseline
 (`agent-I057-b`), 2 and 4 variant (`agent-I063-b`), the I-058 routine, hitch
 profiler in listener mode. Worst single call, milliseconds:
 
-| row | baseline (1 / 3) | variant (2 / 4) |
-|---|---:|---:|
-| `ActorMenu_on_before_init_mode#ui_inventory.script:93`, first open | 19.6 / 17.8 | **5.5 / 7.2** — now equal to a later open |
-| `actor_on_leave_dialog#ui_pda_encyclopedia_tab.script:407` | 8.8 / 7.7 | **1.9 / 1.9** |
-| `actor_on_jump` / `actor_on_land` | ~1.1 | ~0.6 |
-| `actor_on_footstep` | 0.9 (12-18 calls over the floor) | **no call reaches the 0.1 ms floor at all** |
-| `actor_on_first_update#zzz_alao_prewarm.script` | — | 44.7 / 43.9 at frame 7 |
+Two runs: `20260920-165259-I-063-953526` (v1.0, sliced) and
+`20260920-171714-I-063-ef2deb` (v1.1, synchronous). Captures 1 and 3 baseline
+(`agent-I057-b`), 2 and 4 variant (`agent-I063-b`), the I-058 routine, hitch
+profiler in listener mode.
 
-That settles the one assumption the design rested on: **holding a constructed
-`sound_object` does keep the engine resource, and every later
+| row | baseline | variant | verdict |
+|---|---:|---:|---|
+| `actor_on_footstep#footstep_sounds.script:87` | 0.81 max, 15 calls over the floor | **no call reaches the 0.1 ms floor at all** | **confirmed** |
+| `actor_on_jump#eft_jump_sounds.script:71` | 0.56 | **0.16** | confirmed |
+| `actor_on_land#eft_jump_sounds.script:89` | 0.50 | **0.15** | confirmed |
+| `actor_on_leave_dialog#ui_pda_encyclopedia_tab.script:407` | 8.8 / 7.7 (run 1), 7.39 / 7.08 (run 2) | 1.9 / 1.9 (run 1 only) | **partial** — the v1.1 variant capture with a dialog recorded no leave-dialog row, so this rests on run 1 |
+| `ActorMenu_on_before_init_mode#ui_inventory.script:93` | — | — | **RETRACTED, see below** |
+| `actor_on_first_update#zzz_alao_prewarm.script` | — | 31.7 / 32.4 at frame 7 (v1.1, whole bundle) | pass |
+| `actor_on_update#zzz_alao_prewarm.script` | — | **row absent** in v1.1 | pass |
+
+The sound rows settle the one assumption the design rested on: **holding a
+constructed `sound_object` does keep the engine resource, and every later
 `sound_object(path)` for that path is cheap.** The footstep row disappearing
 below the floor entirely is as clean a confirmation as this instrument gives.
 
-The same run found the slicer bug above; v1.1 is that fix. The numbers in the
-table were taken with the sliced build, so the three hitch rows are what v1.1
-inherits, while the `actor_on_update` row it complained about is gone by
-construction.
+### Retraction: the inventory row was never this mod's to claim
+
+An earlier version of this file reported the inventory first open going
+19.6 / 17.8 ms → 5.5 / 7.2 ms and credited the prewarm. **That was wrong.** Every
+variant `xray.log` of both runs prints, at frame 7:
+
+```
+[alao_prewarm]   inventory: GUI already built, nothing to do
+```
+
+`ui_inventory.GUI` already exists before `zzz_alao_prewarm`'s listener runs, so
+the inventory prewarm has never executed on this install. The numbers either
+side of it are two different hand-driven captures of a cost that is bimodal
+between 4 and 20 ms, i.e. noise, not a result. Run 2 makes that obvious:
+baseline capture 1 has a max of **5.19** ms with the first open *being* that
+5.19, while baseline capture 3 has a max of **19.26** ms with the first open
+only **8.30**. The first open is not reliably the worst one, which also
+undercuts the original I-058 reading this mod was designed from.
+
+### Who builds `ui_inventory.GUI` first
+
+Grepping the live modlist winners (1346 scripts, top enabled copy of each name,
+then the loose `Anomaly/gamedata/scripts` patches, then the db) for
+`ui_inventory.GUI =` gives 8 hits, 7 live. Two of them run at
+`actor_on_first_update`, both before this mod (script load order is
+alphabetical, so both register their listener before `zzz_alao_prewarm`):
+
+| script | mod | when |
+|---|---|---|
+| `custom_functor_autoinject.script:421`, inside `process_queue()` called from `actor_on_first_update` at :435 | *447- FDDA Redone - lizzardman* | **first update** — and it is already in the I-058 hitch data at 50.35 ms |
+| `zzz_rax_sortingplus_mcm.script:112`, directly in `actor_on_first_update` at :108 | *110- SortingPlus - RavenAscendant* | **first update** |
+| `rax_dynamic_custom_functor.script:40`, in `add_functor_now` | *110- SortingPlus* | lazy, on demand |
+| `custom_functor_autoinject.script:511/522/530` | *FDDA Redone* | lazy, same file |
+| `zz_ui_inventory_better_stats_bars.script:1614`, in `actor_on_before_hit` | *G.A.M.M.A. Keybinds fixes* | on first hit |
+
+So GAMMA already prewarms the inventory object behind the loading screen, and
+has done since long before this mod. Deliverable (a) of I-063 was solving a
+problem the modpack had already solved — which is worth knowing, and is exactly
+why the log line that says "nothing to do" was worth printing.
+
+### Why an inventory open is bimodal 4-20 ms
+
+With `GUI` pre-built, `start()` never runs `UIInventory()`. The whole cost is
+`IMode_Init()` → `Reset()` + `IMode_ResetInventories()` + `UpdateInfo(true)`,
+and `IMode_ResetInventories` is one line that matters:
+
+```lua
+self.CC["actor_bag"]:Reinit( self:ParseInventory(db.actor) )
+```
+
+`UICellContainer:Reinit` (live copy: *G.A.M.M.A. Guns Have No Condition*'s
+`utils_ui.script`) does `self:Reset()`, then `spairs(t, sort_order)` — which on
+GAMMA is the `hspairs` min-heap from `_g_patches.script`, not `table.sort` — and
+then `AddItem` per item. Per item that is:
+
+* `SYS_GetParam(0, sec, "kind")` in `ParseInventory`, plus
+  `SYS_GetParam(2, sec, "inv_grid_width")` and `..."inv_grid_height"` in
+  `FindFreeCell` — **three uncached ltx reads**, because GAMMA's Modded Exes
+  `_g_patches.script` leaves `SYS_GetParam` uncached;
+* `FindSimilar` (a hash lookup when `stack_all` is on, which
+  `enable_item_picker` sets for `actor_bag`), else
+* `FindFreeCell`, which scans `for r = rKind.row, #self.grid do for c = 1, cols do
+  IsFreeRoom(r, c, w, h)` — restarting from `rKind.row` for **every** item, so
+  placement is O(N · rows · cols · w · h), and calls `Grow()` + recurses when the
+  grid fills;
+* `AddItemInCell`, which constructs a `UICellItem` **only** `if (not self.cell[indx])`,
+  and each new one runs four `xml:InitStatic` calls in `InitControls`;
+* `self.cell[indx]:Set(obj, area)`, which is where the icon texture is bound.
+
+The load-bearing detail: **`UICellContainer:Reset()` never removes a cell.** It
+calls `ci:Reset()` on each one and clears the index tables, so `self.cell` and
+`self.grid` are *high-water marks that only grow*, and they live as long as the
+`GUI` object — the whole session, until a level change nils it.
+
+That gives exactly two modes:
+
+* **cheap (~4-6 ms)** — the pool and the grid already cover this ruck, so the
+  open is `Reset` + a sort + N grid scans + N `Set`s and no construction;
+* **expensive (15-20 ms, once 37.4)** — `indx` passes the high-water mark, so new
+  `UICellItem`s get built (4 `InitStatic` each) and/or `Grow()` extends the grid,
+  and every later scan is over a bigger grid.
+
+The high-water mark rises whenever the ruck gains distinct stacks — which is
+what looting does. That explains the first open usually being worst (empty
+pool), *and* baseline capture 3's 8.30 first / 19.26 later (the player looted in
+between), *and* the per-window series 6.4, 37.4, 15.2, 6.8, 20.1, 6.0, 4.0, 4.2:
+a ~4-6 ms floor with spikes on the growth opens. GC is not needed to explain any
+of it, and neither is the icon cache — though both would ride along on the same
+opens.
+
+### The cut this points at, and what it needs first
+
+Three candidates, cheapest first:
+
+1. **Memoise the three per-item `SYS_GetParam` reads.** `kind`,
+   `inv_grid_width` and `inv_grid_height` are static per section and are read
+   uncached on every item of every open. A section-keyed table removes 3N
+   uncached ltx crossings per open. Reachable as a monkey patch on the
+   `UIInventory` / `UICellContainer` class tables — no file replaced. Helps both
+   modes, proportional to N, does not touch the spikes.
+2. **Prewarm the cell pool, not the object.** Behind the loading screen, after
+   whoever built `GUI`, run the `Reinit` once against the actor's current ruck so
+   the pool and grid are sized before the first open. Moves the first-open spike
+   only; later growth after looting still costs. Non-identity to check first:
+   `AddItem` fires `Callback("On_CC_Add", ...)`, which other mods subscribe to.
+3. **Fix the quadratic placement.** `FindFreeCell` restarts at `rKind.row` for
+   every item; a per-row first-free-column cursor, or resuming from the last
+   successful position, makes placement near-linear. Biggest win, but it is a
+   change to `utils_ui.script` — 13 mods deep, and the live winner is *Guns Have
+   No Condition* — so it is a byte-asserting patcher, not a monkey patch.
+
+**None of this should be built before it is measured**, because the hypothesis is
+a correlation and the hitch profiler cannot show a correlation: it keeps only
+max, first and a log2 histogram per listener, so it cannot say which open was
+expensive or what the pool looked like at the time. That is what
+`alao-profiler-hitch-trace-inv` is for (below): one line per inventory open with
+`cells` / `grid` / `idxer` sampled immediately before and after the call. If the
+expensive opens are the ones where `cells` or `grid` grows, candidates 2 and 3
+are the right targets and 1 is a rounding error; if they are not, the
+explanation above is wrong and the next suspect is the icon texture bind in
+`UICellItem:Set`.
 
 ## What could not be verified offline (and how it turned out)
 
@@ -223,6 +354,31 @@ likely section in the background while the current animation plays, which is a
 change to someone else's state machine. Neither is in this mod. The section set
 also has to come from somewhere - it is driven by which item the player uses -
 so (a) needs an enumeration pass over the FDDA config first.
+
+## The instrument the inventory question needs
+
+`lab/profiler-hitch` gained a `TRACE_LISTENERS` flag (default `nil`, so the
+shipped behaviour and the two locked overlays are unchanged): name a listener,
+or a prefix of its label, and every call of it emits
+
+```
+ALAOPROF|1|trace|n=..|name=..|units=..|frame=..|t=..|pre=..|post=..
+```
+
+`pre` and `post` are cheap covariates sampled immediately before and after the
+call, **outside the timer**, so the trace cannot inflate the duration it
+reports. The probe for this question returns
+`cells=<#CC["actor_bag"].cell>,grid=<#grid>,idxer=<idxer>`, and returns `"na"`
+rather than erroring if `ui_inventory.GUI` is not there. `TRACE_MAX_LINES`
+(400) caps the output so a mis-aimed pattern cannot flood the engine log.
+
+`py -3.12 lab/tools/i063_build_trace_overlay.py` builds exactly one new overlay,
+`alao-profiler-hitch-trace-inv` (listener mode + I-051 invalidate + the trace
+pointed at `ActorMenu_on_before_init_mode#ui_inventory.script`). It refuses to
+write any of the five existing `alao-profiler*` overlays — those carry every
+locked gen-3/gen-4/gen-5 measurement — and unlike `i058_build_overlays.py` it
+never rebuilds them. `aalo/profiler.py` ignores `kind` values it does not know,
+so a traced log parses exactly as before; read the trace lines by grepping.
 
 ## Tests
 
