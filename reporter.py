@@ -71,6 +71,12 @@ PERFORMANCE_IMPACT = {
     # with a real C function. Medium and not high because the absolute saving
     # is tens of nanoseconds per body per frame.
     'repeated_time_global': 'medium',
+    # I-059: a "do once" latch that is a local of the function never latches,
+    # so whatever the author meant to run once runs on every call. The cost is
+    # whatever is inside the guard, which is unbounded; the one live GAMMA site
+    # (zzz_player_injuries, actor_on_update) leaks an ActorMenu.get_maingame()
+    # engine call plus two field writes per frame. Report-only, RED.
+    'once_latch_local_to_function': 'high',
 
     # LOW - minor impact
     'table_getn': 'low',
