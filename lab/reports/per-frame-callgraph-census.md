@@ -29,6 +29,14 @@ The loose patches are live code that exists in **neither** corpus; a census that
 the two extracted corpora silently uses the wrong `axr_main.script`. 19745 function bodies,
 107250 call sites inside them, 0 analysis failures.
 
+Spot-checked against the three files this has actually bitten someone on: the census resolves
+`bind_monster.script` and `axr_main.script` to the loose copies, and `_g.script` to the db one
+(no mod and no loose file ships it). Note that `build_overlay.py --bottom` has the
+corresponding bug — agent-I043 found it scanning only enabled mod dirs when computing what is
+already shipped, so `ref3-vanilla-bottom` installs the ALAO-rewritten **db** `bind_monster`
+over the live loose one. This census does not share it; the fix there is to add the loose
+script dir to `shipped` in `build_bottom()`.
+
 ## 1. Why this is a lab tool and not an analyzer pass
 
 The per-file analysis runs in a `multiprocessing` pool of picklable workers under a per-file
@@ -237,12 +245,29 @@ At a realistic 6 ns average: 1.1 us, 0.022%. To clear 23.9 us at 6 ns per execut
 ~4000 site-executions per frame; there are 178 sites, so each would have to run 22 times
 every frame. Hop 2 adds 28 more sites and changes nothing.
 
+Two corrections from agent-I043's measured run `20260919-192703-I-043-3f2729`, both of which
+tighten the margin and neither of which changes the verdict:
+
+- **The real denominator for a script-side rewrite is now measured: total Lua is ~712 us of
+  the 4770 us frame** (I-048's profiler, `gammabaseline`, standing still). The generous 2.8 us
+  is 0.39% of *script* time, not just 0.059% of the frame. Still far under a frame-based gate,
+  but the honest framing is that ALAO is competing for a 712 us slice, not a 4770 us one.
+- **`tools/microbench.py` is a lower bound for allocation-heavy rewrites**, by I-043's
+  argument: the protocol's mandatory `collectgarbage()` before each timed run plus best-of-9
+  excludes exactly the GC cost that an allocating rewrite removes, and their bench
+  under-predicted the measured saving by 2.2–3.7x. Most patterns in the table above are
+  scalar caching that allocates nothing, so the factor should not apply to them — but if it
+  applied in full to all of them, the generous bound becomes ~11 us, which lands **just under
+  the 11.9 us near-miss floor**. That is a thinner margin than a 40x gap and it is worth
+  saying out loud.
+
 **Nothing in the GREEN set clears 0.5% of the frame, before or after the propagation, and
-nothing is in the 0.25–0.5% near-miss band either.** The whole one-hop GREEN set is an order
-of magnitude below the near-miss floor even at the generous bound, so no measured call
-frequency rescues it: reaching 11.9 us would need every one of the 178 sites to run ~12 times
-per frame at the best-case 15.8 ns. This is the same verdict I-021 and I-040 already got
-in-game, now with the enlarged set.
+nothing is in the 0.25–0.5% near-miss band** — though under the worst-case reading of the
+microbench caveat the generous bound arrives within ~7% of that floor rather than an order of
+magnitude below it. The realistic estimate (1.1 us, or ~4.4 us with a 4x GC factor) stays well
+clear. This is the same verdict I-021 and I-040 already got in-game, now with the enlarged
+set. If anyone wants to overturn it, the thing to attack is the allocation question, not the
+site count.
 
 `debug_statement` is the one family where the arithmetic is not obviously dead, and only
 because its per-call cost is two orders of magnitude larger. Measured Lua-side cost of one
@@ -272,6 +297,12 @@ does turns entirely on how many of the 198 are behind `if DEV_DEBUG`-style guard
 many NPCs are online — which a static census cannot answer. Classify it as
 **near miss / above gate, pending measured call frequency from the I-048 profiler**: the
 per-call cost is measured, the frequency is not.
+
+The 770 ns is itself a **lower** bound, for two independent reasons that both point the same
+way. The engine `log()` write is stubbed out here. And by I-043's microbench argument the
+protocol's `collectgarbage()` excludes GC cost, which `printf` generates in quantity — a
+`{...}` varargs table, the `sr` closure and the `string.gsub` result string, per call. So the
+threshold count is at most 31 and realistically lower.
 
 ### What the profiler (I-048) should instrument
 
