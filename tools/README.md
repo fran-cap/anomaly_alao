@@ -127,6 +127,40 @@ whether the failures came from the report or the probe.
 
 ---
 
+## corpus_matrix.py
+
+Runs `corpus_run.py` once per fix-flag combination, sequentially, and prints one
+gate table over the lot.
+
+```bash
+py -3.12 lab\coord\coord.py run corpus --ttl 3600 -- \
+  py -3.12 tools/corpus_matrix.py --corpus C:\code\GIT\anomaly_alao\extracted\gamma \
+      --corpus-name gamma-0.9.4 --label i052 --summary-json gamma-matrix.json
+```
+
+Why (I-052): **idempotence is a property of a flag combination, not of ALAO.**
+Every gate up to gen-3 ran plain `--fix`, and both defects I-052 fixed were
+invisible there - one needed `--fix-debug` (`sr_monster.script`, G5=1 in
+`20260919-184338-vanilla-i044-fixdebug`), the other `--fix-nil` (24 GAMMA files
+in `20260919-192746-gamma-i046`). One run per combination is the only way the
+gate sees that class of bug.
+
+| flag | meaning |
+|---|---|
+| `--combos a,b,c` | which combinations to run. Default `fix,fix-debug,fix-nil,fix-debug-nil`; `all` adds `fix-yellow`, `fix-experimental`, `fix-dead-code`, `everything`. |
+| `--label SLUG` | each run is labelled `<slug>-<combo>`, so the run ids stay readable |
+| `--summary-json PATH` | the gate table as JSON as well as on stdout |
+| everything else | `--corpus`, `--corpus-name`, `--jobs`, `--keep-work`, `--notes`, `--out-root` pass straight through; trailing extra args go to `corpus_run.py` |
+
+The table has one row per combination: run id, files modified, edits, **G4**
+(compile failures), **G5** (idempotence violations), **G9** (captures), parse
+failures, timeouts, crashes, findings. Exit code is non-zero if any of G4/G5/G9,
+crashes, or a child return code is non-zero, so it works as a CI gate. Runs are
+never parallel - G6 timings would be meaningless - so hold the `corpus` lock
+around the whole matrix and expect gamma x 4 combos to take a while.
+
+---
+
 ## corpus_compare.py
 
 Diffs two runs and prints markdown.

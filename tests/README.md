@@ -94,6 +94,13 @@ folds the inner edits into its own replacement text instead.
 twice and demand identical bytes. Anything a second pass still changes is an
 optimization ALAO reported and then threw away.
 
+Since I-052, `test_every_flag_combination_is_a_fixpoint` runs that guard over
+all eight supported flag combinations (`FLAG_COMBOS`) x every shape in
+`IDEMPOTENCE_CASES`, because both gen-3 fixpoint defects were combination-only:
+stable under `--fix`, moving under `--fix-debug` / `--fix-nil`. Put a new
+idempotence shape in `IDEMPOTENCE_CASES` and it is covered by the whole matrix
+for free. `tools/corpus_matrix.py` is the same idea at corpus scale.
+
 ## What the reports tell you now (I-029 / I-035 / I-037, 2026-09-11)
 
 Three strict xfails in `test_cli.py` were dropped here because the defects they
