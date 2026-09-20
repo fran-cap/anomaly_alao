@@ -28,11 +28,13 @@ lease.  A lease that expires without a heartbeat is stale and may be broken.
     coord run corpus --owner agent-I001 --ttl 900 -- py -3.12 tools/corpus_run.py ...
         (acquire, run the command with a heartbeat, release; exit code passthrough)
 
-Queue (FIFO, one JSON file per item, moved between pending/running/done/failed):
+Queue (FIFO, one JSON file per item, moved between pending/held/running/done/failed):
 
     coord queue submit --idea I-001 --agent agent-I001 --file request.json
-    coord queue list [--state pending|running|done|failed|all]
+    coord queue list [--state pending|held|running|done|failed|all]
     coord queue claim  [--owner fps-runner]           # oldest pending -> running
+    coord queue hold    <id> | --all                  # pending -> held, runner ignores it
+    coord queue release <id> | --all                  # held -> pending, same place in line
     coord queue done   <id> --result result.json
     coord queue fail   <id> --error "text"
     coord queue show   <id>
@@ -62,7 +64,10 @@ COORD_ROOT = Path(__file__).resolve().parent
 LOCKS = COORD_ROOT / "locks"
 QUEUE = COORD_ROOT / "queue"
 STATUS = COORD_ROOT / "status"
-QUEUE_STATES = ("pending", "running", "done", "failed")
+# `held` is a parking bay, not a stage of the pipeline: an item sits there
+# instead of `pending` and queue_claim never looks at it, so the runner idles
+# while a corpus job gets a quiet box (gen-4 did this by hand with `move`).
+QUEUE_STATES = ("pending", "held", "running", "done", "failed")
 KNOWN_LOCKS = ("game", "corpus", "ideas", "extract")
 # Taking the left lock also waits until every lock on the right is free. A timed
 # corpus run (8 workers) on the same box as a frametime capture wrecks both,
@@ -287,6 +292,46 @@ def queue_claim(owner: str) -> dict | None:
     return None
 
 
+def _queue_move(item_id: str, src_state: str, dst_state: str, owner: str,
+                stamp: str) -> dict:
+    """Move one item between two parking states. Anything already running or
+    finished is left alone - moving those would race the runner."""
+    src, state = _find_item(item_id)           # raises if there is no such item
+    if state != src_state:
+        raise ValueError(f"queue item {src.stem} is {state}, not {src_state}")
+    dst = QUEUE / dst_state / src.name
+    # rename first, like queue_claim does: if the runner got there in between,
+    # the rename fails and we do not resurrect an item it is already running
+    os.rename(src, dst)
+    it = _read_json(dst)
+    it["state"] = dst_state
+    it[stamp] = _iso()
+    it[f"{stamp}_by"] = owner
+    _write_json(dst, it)
+    return it
+
+
+def queue_hold(item_id: str, owner: str) -> dict:
+    """pending -> held. The runner stops seeing it."""
+    _ensure_dirs()
+    return _queue_move(item_id, "pending", "held", owner, "held_at")
+
+
+def queue_release(item_id: str, owner: str) -> dict:
+    """held -> pending. Priority and submit time are untouched, so it goes back
+    into the same place in the ordering it had before."""
+    _ensure_dirs()
+    return _queue_move(item_id, "held", "pending", owner, "released_at")
+
+
+def queue_hold_all(owner: str) -> list[dict]:
+    return [queue_hold(it["id"], owner) for it in queue_list("pending")]
+
+
+def queue_release_all(owner: str) -> list[dict]:
+    return [queue_release(it["id"], owner) for it in queue_list("held")]
+
+
 def queue_finish(item_id: str, ok: bool, result: dict | None = None, error: str = "") -> dict:
     path, _state = _find_item(item_id)
     it = _read_json(path)
@@ -414,6 +459,17 @@ def _cmd_queue(a) -> int:
         print(json.dumps(queue_finish(a.id, True, result), indent=2))
     elif a.op == "fail":
         print(json.dumps(queue_finish(a.id, False, error=a.error or ""), indent=2))
+    elif a.op in ("hold", "release"):
+        one = queue_hold if a.op == "hold" else queue_release
+        every = queue_hold_all if a.op == "hold" else queue_release_all
+        if a.all:
+            items = every(a.owner)
+            if not items:
+                print(f"nothing to {a.op}")
+        else:
+            items = [one(a.id, a.owner)]
+        for it in items:
+            print(f"[{it['state']:7s}] {it['id']}  idea={it['idea']}")
     elif a.op == "show":
         p, _ = _find_item(a.id)
         print(p.read_text(encoding="utf-8"))
@@ -450,7 +506,10 @@ def main(argv=None) -> int:
     rn.set_defaults(fn=_cmd_run)
 
     q = sub.add_parser("queue")
-    q.add_argument("op", choices=("submit", "list", "claim", "done", "fail", "show"))
+    q.add_argument("op", choices=("submit", "list", "claim", "hold", "release",
+                                  "done", "fail", "show"))
+    q.add_argument("--all", action="store_true",
+                   help="hold/release every item in the source state")
     q.add_argument("id", nargs="?")
     q.add_argument("--idea")
     q.add_argument("--agent", default=os.environ.get("ALAO_AGENT", getpass.getuser()))
@@ -485,6 +544,8 @@ def main(argv=None) -> int:
         a.wrapped = tail
     if a.cmd == "queue" and a.op == "submit" and not a.idea:
         ap.error("queue submit needs --idea")
+    if a.cmd == "queue" and a.op in ("hold", "release") and not a.id and not a.all:
+        ap.error(f"queue {a.op} needs an id or --all")
     if a.cmd == "lock" and a.op != "status" and not a.name:
         ap.error("lock needs a name")
     try:
