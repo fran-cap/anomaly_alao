@@ -26,7 +26,7 @@ overlay carried a db-derived `bind_monster.script` over GAMMA's loose patched on
   Run `build_overlay.py` from the main checkout.
 - Gates G4-G9 as before; G9 is now built into `tools/corpus_run.py` (`captures` in results.json).
 - If the runner code changed, the user must restart `fps_runner.py`; a running runner keeps old code.
-- Create agent worktrees from the lab branch head, and check `git log -1` in each before starting.
+- All work is on `main` now (the lab branch was merged and deleted 2026-09-19). Agent worktrees branch from `main`; check `git log -1` in each before starting.
 
 ## The gen-4 beam
 
