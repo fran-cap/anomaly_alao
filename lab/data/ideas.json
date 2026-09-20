@@ -786,14 +786,14 @@
       "category": "measurement",
       "generation": 5,
       "parent": "I-049",
-      "status": "proposed",
-      "score": 8.5,
+      "status": "kept",
+      "score": 9.5,
       "risk": "low",
       "expected_gain": "high",
       "hypothesis": "I-049 (-222), I-050a (-107) and the dispatch mod (-89..-105) were each measured alone against ~710 us. They touch different code, so they should stack to roughly 300-400 us/frame of script time, more than half the budget; at that size fps should finally move.",
       "change": "One overlay with all three (plus the I-050b patch, free), 4x120 s vs ref3-alao-b; then one listener-mode pair to see the new ranking and explain I-050a's 563->611 drift. The dispatch mod needs invalidate() after wrap_all_listeners in listener mode.",
       "measure": "script us/frame and fps avg / 1% low.",
-      "notes": "i049-listeners-request.json is already prepared."
+      "notes": "i049-listeners-request.json is already prepared. MEASURED 2026-09-19, 20260919-232541-I-054-d26d45 (overlay gen4-all-b, 4 files differ from ref3-alao-b): 714.8 -> 309.5 us/frame warm, -405 us (-57%), no overlap (696-744 vs 297-330); actor_on_update 678.8 -> 279.1. The wins stack almost additively (sum of solo deltas 434). fps avg 207.7 -> 215.4 (+3.7%, about one launch sd, suggestive only), 1% low 158.4 -> 179.7 (+13.5%), p99 5.75 -> 5.33 ms. Still open: the listener-mode pair for the new ranking."
     },
     {
       "id": "I-055",

@@ -842,7 +842,12 @@ What each one found:
 
 Cross-cutting facts:
 
-- **Three structural fixes are worth ~400 us of a ~710 us script budget** if they stack (unmeasured; I-054).
+- **The wins stack: 714.8 -> 309.5 us/frame, -405 us (-57%)** with all four patches in one arm (I-054,
+  `20260919-232541-I-054-d26d45`, overlay `gen4-all-b`, no overlap: 696-744 vs 297-330; sum of the solo deltas
+  is 434). `actor_on_update` 678.8 -> 279.1. First arm where fps moves: avg 207.7 -> 215.4 (+3.7%, about one
+  launch-to-launch sd, so suggestive only), 1% low 158.4 -> 179.7 (+13.5%), p99 5.75 -> 5.33 ms. 405 us is 8.4%
+  of the 4.8 ms frame and avg fps moved less than half of that, so the script slice is not purely serial with
+  whatever bounds the frame.
   Generation 1-3 pattern rewrites were worth 1-3 us each. Profile first.
 - **Check the locks after a bench as well as before.** Two benches started clean and finished under I-052's
   corpus lock; one would have invented a 10% penalty (0.89x where the clean run says 1.00x).

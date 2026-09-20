@@ -14,6 +14,7 @@ All script us/frame, I-048 profiler in both arms, 4x120 s, round 1 of each arm d
 | + I-049 `drx_da_main` shared dispatcher | 742.2 -> 519.8 | **-222** | `20260919-210108-I-049-35365e` |
 | + I-050a ledge-grabbing cold-camera guard | 710.7 -> 604.0 | **-107** | `20260919-211043-I-050-025a5a` |
 | + I-050b player-injuries crossing cut | 701.7 -> 686.0 | -16, arms overlap, under the bar | `20260919-211144-I-050-34ad1e` |
+| **all four together** (`gen4-all-b`) | 714.8 -> 309.5 | **-405 (-57%)**; fps avg +3.7%, 1% low +13.5% | `20260919-232541-I-054-d26d45` |
 | **stock** GAMMA + dispatch mod (no ALAO) | 713.5 -> 624.4 | **-89** | `20260919-211347-I-051-21408e` |
 
 ## The rules now
@@ -37,7 +38,7 @@ All script us/frame, I-048 profiler in both arms, 4x120 s, round 1 of each arm d
 
 | Idea | Deciding question | Instrument |
 |---|---|---|
-| **I-054** combined arm | Do I-049 + I-050a + the dispatch mod stack to ~300-400 us/frame (over half the script budget), and does fps finally move at that size? Then one listener-mode pair for the new ranking and to explain I-050a's variant drift (563 -> 611 over rounds). The dispatch mod needs `invalidate()` after `wrap_all_listeners` in listener mode. `overlays/i049-listeners-request.json` is prepared. | profiler + fps |
+| **I-054** listener-mode pair | The combined arm is measured (-405 us, table above). Left: one listener-mode pair (`ref3-alao-b` vs `gen4-all-b`) for the new ranking of the remaining ~310 us and to explain I-050a's variant drift. The dispatch mod needs `invalidate()` after `wrap_all_listeners` in listener mode. | profiler, listener mode |
 | **I-053** a moving / busy-hub save | Everything is standing still, which flatters I-050a's guard (it never fires while moving) and starves npc/monster callbacks. **Needs the user to make and lock the save.** | profiler A/A first |
 | **I-051 publishing** | Mod folder `lab/mods/alao-make-callback-dispatch/` and PR draft `lab/docs/i051-upstream-pr-draft.md` are ready. Same question for the I-049 and I-050a patches (`--pristine` patcher output; both are Demonized's mods). **The user decides whether and where.** | |
 | **I-055** multi-line-argument hoist gap | `_edit_repeated_calls` bails at paren depth > 0, so reported `repeated_device` / `repeated_db_actor` never land; `device()` alone is 177 redundant calls / 121 functions / 59 files. Run `lab/tools/i050a_paren_gap_scan.py` to size it. | corpus matrix |
