@@ -64,7 +64,7 @@ from pathlib import Path
 
 __all__ = [
     "Header", "CallbackWindow", "Window", "HitchStat", "ProfileLog",
-    "WalkoutHeader", "SlowFrame", "TraceCall",
+    "WalkoutHeader", "SlowFrame", "TraceCall", "BinderProbe",
     "parse", "load", "load_run", "spread", "compare_runs",
 ]
 
@@ -164,7 +164,14 @@ class HitchStat:
 
 @dataclass
 class WalkoutHeader:
-    """The I-062 ``wdr`` line: which extra doors this build actually opened."""
+    """The I-062 ``wdr`` line: which extra doors this build actually opened.
+
+    ``selfcheck`` is the field that matters most.  The first in-game run
+    wrapped zero binder classes and said nothing about it - every ``frm`` line
+    just read ``u_bnd=0.000`` and ``spawn=0``, which is indistinguishable from
+    a quiet scene.  An axis that wrapped nothing measured NOTHING; it did not
+    measure nothing happening, and :meth:`problems` says so out loud.
+    """
     walkout: str = "off"
     binder_update: bool = False
     frames: str = "off"
@@ -172,9 +179,29 @@ class WalkoutHeader:
     frame_max: int | None = None
     rescan_every: int | None = None
     pending: int = 0
+    selfcheck: str = ""
     misses: str = ""
+    ver: int | None = None
     ts: float | None = None
     raw: str = ""
+    # one BinderProbe per target, hit or miss, from the `bnx` lines
+    probes: list = field(default_factory=list)
+
+    def problems(self) -> list:
+        """Human-readable reasons not to trust an axis in this log."""
+        out = []
+        w = self.wrapped
+        if isinstance(w.get("bnd"), int) and w["bnd"] == 0:
+            out.append("bnd=0: NO binder or server class was wrapped, so u_bnd, "
+                       "spawn and destroy are structurally zero and say nothing "
+                       "about the scene")
+        if isinstance(w.get("eng"), int) and w["eng"] == 0:
+            out.append("eng=0: no engine-called global was wrapped")
+        if isinstance(w.get("evt"), int) and w["evt"] == 0:
+            out.append("evt=0: no deferred-call registration hook took")
+        if self.selfcheck and self.selfcheck != "ok":
+            out.append(f"the overlay's own self-check says `{self.selfcheck}`")
+        return out
 
     @property
     def wrapped(self) -> dict:
@@ -190,6 +217,23 @@ class WalkoutHeader:
             except ValueError:
                 out[k.strip()] = v
         return out
+
+
+@dataclass
+class BinderProbe:
+    """One I-062 ``bnx`` line: what the overlay saw at one wrap target.
+
+    ``mod`` / ``cls`` are the Lua ``type()`` of the module and of the class
+    object, and ``via`` is where the class was found (``module``, ``global`` or
+    ``none``).  The first run had no such line, which is why "zero classes
+    wrapped" took a whole capture to notice.
+    """
+    target: str = ""
+    wrapped: int = 0
+    mod: str = ""
+    cls: str = ""
+    via: str = ""
+    why: str = ""
 
 
 @dataclass
@@ -600,10 +644,24 @@ def parse(text: str, path=None) -> ProfileLog:
                 frame_max=_num(d, "frame_max"),
                 rescan_every=_num(d, "rescan_every"),
                 pending=int(_num(d, "pending", 0) or 0),
+                selfcheck=d.get("selfcheck", ""),
                 misses=d.get("misses", ""),
+                ver=_num(d, "ver"),
                 ts=_num(d, "ts"),
                 raw=raw.strip(),
+                probes=log.walkout.probes if log.walkout else [],
             )
+            continue
+        if kind == "bnx":               # I-062 v2, one wrap target's diagnosis
+            probe = BinderProbe(
+                target=d.get("target", "?"),
+                wrapped=int(_num(d, "wrapped", 0) or 0),
+                mod=d.get("mod", ""), cls=d.get("cls", ""),
+                via=d.get("via", ""), why=d.get("why", ""),
+            )
+            if log.walkout is None:
+                log.walkout = WalkoutHeader()
+            log.walkout.probes.append(probe)
             continue
         if kind == "frm":               # I-062, one slow frame
             top = []

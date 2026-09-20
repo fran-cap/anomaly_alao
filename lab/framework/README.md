@@ -343,6 +343,41 @@ cached into a local, `update()` on classes outside the target list, and every
 engine-side cost by construction. A wrapper propagates at most three return
 values and does not `pcall`.
 
+#### v2, after the first in-game run (`20260920-185607-I-062-a1c78b`)
+
+Two faults, both of which made a capture say less than it appeared to.
+
+1. **Zero binder classes were wrapped, silently.** `class "x" (object_binder)`
+   in Anomaly is a **luabind class object - userdata**, not a table, so
+   `type(cls) ~= "table"` bailed on all 32 targets and `rawget` could not have
+   read them anyway. Every `frm` line read `u_bnd=0.000, spawn=0`, which looks
+   exactly like a quiet scene. v2 indexes the class normally under `pcall`,
+   accepts userdata, looks in the module namespace **and** as a bare global,
+   prints one `bnx` line per target naming `type(mod)`, `type(cls)`, where the
+   class was found and what the first method attempt said, and sets
+   `selfcheck=bnd-zero` in `wdr` plus an `err` line. `profile_report --frames`
+   prints a `!!` banner for it. **An axis that wrapped nothing measured
+   NOTHING; it did not measure nothing happening.**
+2. **Deferred functors were labelled by the plumbing.** The worst walk-era
+   frame in all three captures was 29 ms, ~90% script, blamed on
+   `call_cond:_g.script:456` - the bridge closure `AddUniqueCall` builds
+   around somebody else's functor, with the real owner swallowed as `nested`
+   on the same axis. v2 labels by the functor's own `short_src:linedefined`
+   plus its registering caller (`@file:line`) and, for a time event, its
+   sanitised `obj_id.ev_id`; and `level.add_call` does not wrap what
+   `AddUniqueCall` hands it, so the innermost owner gets the time.
+
+Settled by that run and not worth re-asking: **`device().time_delta` equals the
+`time_global()` delta exactly**, frame for frame, so either clock is fine.
+Other things it did establish: `visual_memory_manager.get_visible_value` is
+20 µs per call at 1.7 calls/frame (the I-056 lead, now measured);
+`smart_terrain.setup_gulag_and_logic_on_spawn` is 16-19 ms per call during the
+level load; the walk-out frames themselves are 17-42 ms with **1-3% visible
+script and no GC drop**; and there is a one-off 786 ms frame, 707 ms of it in
+`actor_on_update#bind_campfire.script:176`
+(`game.start_tutorial("tutorial_campfire_*")`), the first time you approach a
+campfire in a session.
+
 ```
 py -3.12 lab/tools/i062_engine_entry_census.py --top 30
 py -3.12 lab/tools/i062_build_overlays.py      # alao-profiler-walkout[-listeners-inv]

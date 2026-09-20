@@ -106,7 +106,6 @@ function CreateTimeEvent(obj_id, ev_id, timer, f, ...)
     __queue[#__queue + 1] = {f = f, args = {...}}
     return true
 end
-function AddUniqueCall(f) __unique = f end
 function ProcessEventQueue()
     __extra = __extra + 30
     for i = 1, #__queue do
@@ -114,7 +113,23 @@ function ProcessEventQueue()
         e.f(unpack(e.args))
     end
 end
-level = {add_call = function(cond, act) __calls = {cond, act} end}
+
+-- level.add_call and AddUniqueCall in their REAL shape: _g.script's
+-- AddUniqueCall builds a bridge closure around the caller's functor and hands
+-- THAT to level.add_call.  The first in-game run labelled the bridge
+-- (`call_cond:_g.script:456`) instead of the owner, and the bridge being on
+-- the same axis swallowed the owner as `nested`.
+__lvl = {}
+level = {add_call = function(cond, act) __lvl[#__lvl + 1] = {cond, act} end}
+function AddUniqueCall(func)
+    level.add_call(function()          -- the plumbing closure, _g.script:456
+        func()
+        return false
+    end, function() return true end)
+end
+function __run_level_calls()
+    for i = 1, #__lvl do __lvl[i][1]() end
+end
 
 -- Two binder classes the walkout build's target list names.  They are plain
 -- tables here; in the game they are luabind class tables, which is why the
@@ -718,3 +733,234 @@ def test_the_binder_update_axis_is_priced():
     # the stub's profile_timer is pure Lua and therefore an UPPER bound on what
     # the engine's C++ timer costs; anything past this is a coding mistake
     assert per_call_us < 6.0, f"{per_call_us:.2f} us per wrapped binder update"
+
+# ---------------------------------------------------------------------------
+# v2: the two faults the first in-game run exposed
+# (run 20260920-185607-I-062-a1c78b, three captures, all of them bnd=0)
+# ---------------------------------------------------------------------------
+
+# A luabind class object is USERDATA with an __index/__newindex metatable, not
+# a table.  `newproxy(true)` is the only way to build one of those in pure
+# LuaJIT 2.0, and it reproduces both of the v1 faults exactly: `type(cls)` is
+# not "table", and `rawget` cannot read it at all.
+#
+# Also here: a module that does not exist until something touches `_G`, because
+# Anomaly loads script namespaces lazily through the global metatable; and a
+# class that lives only as a bare global, which is the other place luabind's
+# `class "..."` can leave one.
+LUABIND_STUB = r"""
+function __luabind_class(store)
+    local u = newproxy(true)
+    local mt = getmetatable(u)
+    mt.__index    = function(_, k) return store[k] end
+    mt.__newindex = function(_, k, v) store[k] = v end
+    return u
+end
+
+__ub_spawned, __ub_updated = 0, 0
+local motivator = {}
+function motivator:net_spawn(se)
+    __ub_spawned = __ub_spawned + 1
+    __extra = __extra + 4000
+    return true
+end
+function motivator:update()
+    __ub_updated = __ub_updated + 1
+    __extra = __extra + 12
+end
+xr_motivator = {motivator_binder = __luabind_class(motivator)}
+
+-- bind_crow does not exist until _G is asked for it
+__lazy_hits = 0
+local lazy = {
+    bind_crow = function()
+        __lazy_hits = __lazy_hits + 1
+        local store = {}
+        function store:update() __extra = __extra + 7 end
+        return {crow_binder = __luabind_class(store)}
+    end,
+}
+setmetatable(_G, {__index = function(t, k)
+    local mk = lazy[k]
+    if mk then
+        local v = mk()
+        rawset(t, k, v)
+        lazy[k] = nil
+        return v
+    end
+end})
+
+-- se_restrictor exists ONLY as a bare global, with no se_zones module at all
+local restr = {}
+function restr:on_register() __extra = __extra + 90 end
+se_restrictor = __luabind_class(restr)
+
+-- the engine looks a method up on the class and calls it with the instance
+function __engine_call(cls, m, inst, arg)
+    local f = cls[m]
+    return f(inst, arg)
+end
+"""
+
+
+def _run_luabind(src, frames=30):
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(ENGINE_STUB)
+    lua.execute(WIRING)
+    lua.execute(LUABIND_STUB)
+    lua.execute(src)
+    lua.eval("on_game_start")()
+    if frames:
+        lua.eval("__drive")(frames)
+    return lua
+
+
+@pytest.fixture(scope="module")
+def luabind():
+    lua = _run_luabind(_src())
+    lua.execute("""
+        __inst = {}
+        for i = 1, 3 do __engine_call(xr_motivator.motivator_binder, "net_spawn", __inst, {}) end
+        for i = 1, 5 do __engine_call(xr_motivator.motivator_binder, "update", __inst) end
+        __engine_call(bind_crow.crow_binder, "update", __inst)
+        __engine_call(se_restrictor, "on_register", __inst)
+    """)
+    return {"lua": lua, "log": _dump_and_parse(lua)}
+
+
+def test_a_luabind_userdata_class_gets_wrapped(luabind):
+    """v1 bailed on `type(cls) ~= "table"` and wrapped 0 of 32 classes in game."""
+    rows = {r["name"]: r for r in luabind["log"].axis_ranking("bnd", top=None, drop_first=0)}
+    assert "xr_motivator.motivator_binder.net_spawn" in rows, sorted(rows)
+    assert "xr_motivator.motivator_binder.update" in rows
+    assert rows["xr_motivator.motivator_binder.net_spawn"]["us_per_call"] == pytest.approx(4000, rel=0.2)
+    # and the class still behaves: the body ran, the boolean came back
+    assert luabind["lua"].eval("__ub_spawned") == 3
+    assert luabind["lua"].eval("__ub_updated") == 5
+
+
+def test_a_lazily_loaded_binder_module_is_reached_through_the_g_metatable(luabind):
+    """Anomaly materialises a script namespace on the first `_G` reference."""
+    assert luabind["lua"].eval("__lazy_hits") == 1
+    rows = {r["name"] for r in luabind["log"].axis_ranking("bnd", top=None, drop_first=0)}
+    assert "bind_crow.crow_binder.update" in rows
+
+
+def test_a_class_that_lives_only_as_a_bare_global_is_found(luabind):
+    rows = {r["name"] for r in luabind["log"].axis_ranking("bnd", top=None, drop_first=0)}
+    assert "se_zones.se_restrictor.on_register" in rows, sorted(rows)
+    probes = {p.target: p for p in luabind["log"].walkout.probes}
+    assert probes["se_zones.se_restrictor"].via == "global"
+    assert probes["xr_motivator.motivator_binder"].via == "module"
+
+
+def test_every_target_gets_a_bnx_line_naming_the_types_it_saw(luabind):
+    """The line that turns "bnd=0" from a wasted capture into a diagnosis."""
+    probes = luabind["log"].walkout.probes
+    assert len(probes) == 32, len(probes)
+    hit = {p.target: p for p in probes if p.wrapped > 0}
+    assert "xr_motivator.motivator_binder" in hit
+    p = hit["xr_motivator.motivator_binder"]
+    assert p.cls == "userdata" and p.mod == "table" and p.why in ("ok", "unverified")
+    missing = next(p for p in probes if p.target == "bind_car.car_binder")
+    assert missing.wrapped == 0 and missing.via == "none"
+    assert "not found" in missing.why
+
+
+def test_the_self_check_shouts_when_nothing_was_wrapped():
+    """A zero axis measured NOTHING; it did not measure nothing happening."""
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(ENGINE_STUB)
+    lua.execute(WIRING)
+    lua.execute("xr_motivator = nil; bind_monster = nil")   # no binder class anywhere
+    lua.execute(_src())
+    lua.eval("on_game_start")()
+    log = _dump_and_parse(lua)
+    assert log.walkout.selfcheck == "bnd-zero", log.walkout.raw
+    assert log.walkout.wrapped["bnd"] == 0
+    problems = log.walkout.problems()
+    assert problems and "bnd=0" in problems[0]
+    assert any("self-check" in e for e in log.errors), log.errors
+
+
+def test_the_build_carries_a_version(luabind):
+    assert luabind["log"].walkout.ver == 2
+
+
+def test_a_unique_call_is_labelled_by_its_owner_not_the_plumbing():
+    """FAULT 2: every capture's worst walk-era frame blamed `_g.script:456`.
+
+    That line is the bridge closure AddUniqueCall builds around the caller's
+    functor.  Two things had to change: label by the functor's own definition
+    site, and stop level.add_call from wrapping the bridge - one outer region
+    on the same axis was swallowing the owner as `nested`.
+    """
+    lua = _run(_src(), frames=10)
+    lua.execute('__owner = loadstring("return function() __extra = __extra + 5000 end", '
+                '"@owner_mod.script")()')
+    lua.execute("AddUniqueCall(__owner)")
+    lua.eval("__run_level_calls")()
+    lua.eval("__drive")(20)
+    log = _dump_and_parse(lua)
+    names = [r["name"] for r in log.axis_ranking("evt", top=None, drop_first=0)]
+    owner = [n for n in names if n.startswith("uniq:owner_mod.script:")]
+    assert owner, names
+    assert not [n for n in names if n.startswith("call_cond:")], names
+    rows = {r["name"]: r for r in log.axis_ranking("evt", top=None, drop_first=0)}
+    assert rows[owner[0]]["us_per_call"] == pytest.approx(5000, rel=0.3)
+
+
+def test_a_plain_level_add_call_is_still_wrapped():
+    """Only the AddUniqueCall bridge is skipped, not every add_call."""
+    lua = _run(_src(), frames=10)
+    lua.execute('__c = loadstring("return function() __extra = __extra + 300; return false end", '
+                '"@caller_mod.script")()')
+    lua.execute("level.add_call(__c, function() return true end)")
+    lua.eval("__run_level_calls")()
+    lua.eval("__drive")(20)
+    names = [r["name"] for r in _dump_and_parse(lua).axis_ranking("evt", top=None, drop_first=0)]
+    assert any(n.startswith("call_cond:caller_mod.script:") for n in names), names
+
+
+def test_a_time_event_label_carries_its_ids_and_its_registration_site():
+    lua = _run(_src(), frames=10, extra=r"""
+        __te = 0
+        function __register()
+            CreateTimeEvent("squad_42", "regen|tick", 0, function()
+                __te = __te + 1
+                __extra = __extra + 700
+                return true
+            end)
+        end
+    """)
+    lua.eval("__register")()
+    lua.eval("__drive")(20)
+    names = [r["name"] for r in _dump_and_parse(lua).axis_ranking("evt", top=None, drop_first=0)]
+    tagged = [n for n in names if "squad_42.regen_tick" in n]
+    assert tagged, names
+    # the pipe in the ev_id must not have broken the line grammar
+    assert "|" not in tagged[0]
+    assert "@" in tagged[0], "no registration site on the label"
+    assert lua.eval("__te") > 0
+
+
+HAND_V2 = """
+ALAOPROF|1|hdr|ts=1|timer=profile_timer|units_per_ms=1000.000000|calib_ms=250|calib_units=250000|overhead_ns=200|make_callback=true|binders=off|listeners=off|dump_ms=30000|hitch=on|hitch_floor_ms=0.1000|hitch_buckets=14
+ALAOPROF|1|wdr|ver=2|ts=1|walkout=bnd=0+update,eng=12,evt=3|binder_update=true|frames=on|frame_floor_ms=12|frame_max=400|rescan_every=600|pending=40|selfcheck=bnd-zero|misses=xr_motivator.motivator_binder
+ALAOPROF|1|bnx|target=xr_motivator.motivator_binder|wrapped=0|mod=table|cls=userdata|via=module|why=class is userdata
+ALAOPROF|1|err|I-062 self-check bnd-zero: bnd=0 eng=12 evt=3 - the axes that read zero measured NOTHING.
+ALAOPROF|1|win|seq=1|t0=0|t1=30000|span_ms=30000|frames=6000|total_units=600000|calls=6000|nested=0|names=1
+ALAOPROF|1|cb|seq=1|name=thing|calls=6000|units=600000.000|nested=0
+ALAOPROF|1|eow|seq=1|frames_total=6000
+"""
+
+
+def test_parser_surfaces_a_zero_axis_from_a_real_shaped_log():
+    log = _profiler.parse(HAND_V2)
+    w = log.walkout
+    assert w.ver == 2 and w.selfcheck == "bnd-zero"
+    assert w.wrapped == {"bnd": 0, "eng": 12, "evt": 3}
+    probs = w.problems()
+    assert len(probs) == 2 and "structurally zero" in probs[0]
+    assert w.probes[0].cls == "userdata" and w.probes[0].wrapped == 0
+    assert log.errors and "self-check" in log.errors[0]

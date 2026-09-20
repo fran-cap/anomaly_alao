@@ -126,6 +126,17 @@ def _report_frames(name, dirs, top, min_ms=0.0):
         print(f"#### {name}: no `frm` lines - the overlay was not the walkout build\n")
         return []
     rows.sort(key=lambda r: r["ms"], reverse=True)
+    # An axis that wrapped nothing measured NOTHING. It did not measure nothing
+    # happening, and the first run proved how easy that is to miss.
+    if wdr:
+        for p in wdr.problems():
+            print(f"> **!! {p}**\n")
+        if wdr.probes and any(p.wrapped == 0 for p in wdr.probes):
+            bad = [p for p in wdr.probes if p.wrapped == 0]
+            print(f"> {len(bad)} of {len(wdr.probes)} binder targets wrapped nothing; "
+                  f"first few: "
+                  + "; ".join(f"`{p.target}` (mod={p.mod}, cls={p.cls}, via={p.via}, {p.why})"
+                              for p in bad[:3]) + "\n")
     if wdr:
         print(f"#### {name}: slow frames (floor {_fmt(wdr.frame_floor_ms, 0)} ms, "
               f"wrapped {wdr.walkout}"

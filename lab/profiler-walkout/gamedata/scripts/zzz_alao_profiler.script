@@ -130,6 +130,12 @@ local TRACE_MAX_LINES   = 400   -- hard cap, so a bad pattern cannot flood the l
 -- because pcall changes error semantics in a game that relies on them.
 -- =========================================================================
 
+-- Bumped whenever the instrument changes in a way that makes two runs
+-- non-comparable. v2 = the first in-game run's two faults fixed: luabind class
+-- objects are userdata so nothing was wrapped, and deferred functors were
+-- labelled by _g.script's plumbing instead of their owner.
+local WALKOUT_VER       = 2
+
 local WRAP_BINDERS_I062 = true  -- the bnd axis (see above); independent of the
                                 -- old WRAP_BINDERS, which stays off
 local WRAP_BINDER_UPDATE = true -- :update is the only per-object PER-FRAME
@@ -905,50 +911,100 @@ local function axis_wrapper(A, label, orig, kind, is_method)
 	end
 end
 
--- Replace cls[mname] and verify the assignment took. These are luabind-backed
--- class tables; `rawget` on purpose, so we only ever wrap a method the mod
--- actually defines in Lua. An inherited C++ method left alone is a method we
--- could not attribute to a script anyway.
+-- Replace cls[mname] and verify the assignment took.
+--
+-- v2, after the first in-game run (20260920-185607-I-062-a1c78b) wrapped
+-- exactly ZERO of the 32 binder and server classes while the engine-called
+-- globals wrapped fine. `_G[module]` therefore works; what did not is
+-- everything this function used to assume:
+--
+--   * `type(cls) ~= "table"` bailed out. A `class "x" (object_binder)` in
+--     Anomaly is a luabind class object, which is USERDATA with an __index /
+--     __newindex metatable, not a table. Accept userdata.
+--   * `rawget(cls, mname)` cannot read a userdata at all, and on a class object
+--     it would skip exactly the methods we want. Index normally, under pcall.
+--   * the identity check `rawget(...) == wrapper` can be false on a class
+--     object that re-binds on access even though the write took, so a readback
+--     that is a function but not our object is reported as `unverified` rather
+--     than thrown away.
+--
+-- Indexing normally also means an INHERITED method gets wrapped when the class
+-- does not define its own. That is deliberate now: we assign into this class
+-- only, the parent is untouched, and an inherited net_spawn that the engine
+-- calls per object is exactly the cost this build is hunting.
 local function wrap_axis_method(A, cls, mname, label, kind)
-	if type(cls) ~= "table" then return false, "not a table" end
-	local orig = rawget(cls, mname)
-	if type(orig) ~= "function" then return false, "not defined in lua" end
+	local ct = type(cls)
+	if ct ~= "table" and ct ~= "userdata" then return false, "class is " .. ct end
+	local okr, orig = pcall(function() return cls[mname] end)
+	if not okr then return false, "read threw" end
+	if type(orig) ~= "function" then return false, "no method" end
 	local wrapper = axis_wrapper(A, label, orig, kind, true)
-	cls[mname] = wrapper
-	if rawget(cls, mname) ~= wrapper then return false, "assignment refused" end
-	return true, "ok"
+	local okw = pcall(function() cls[mname] = wrapper end)
+	if not okw then return false, "write threw" end
+	local okb, back = pcall(function() return cls[mname] end)
+	if okb and back == wrapper then return true, "ok" end
+	if okb and type(back) == "function" then return true, "unverified" end
+	return false, "write refused"
+end
+
+-- Where does the class actually live? Two candidates, because the answer
+-- differs between Anomaly's own binders and mod ones: the module namespace
+-- (`bind_stalker.actor_binder`, which is the idiom every mod monkey-patches
+-- with) and the bare global that luabind's `class "..."` can leave behind.
+-- Try both and SAY which one hit - guessing is what produced bnd=0.
+local function resolve_class(modname, clsname)
+	local okm, mod = pcall(function() return _G[modname] end)
+	local modtype = okm and type(mod) or "error"
+	if okm and (type(mod) == "table" or type(mod) == "userdata") then
+		local ok, c = pcall(function() return mod[clsname] end)
+		if ok and c ~= nil then return c, "module", modtype end
+	end
+	local ok, c = pcall(function() return _G[clsname] end)
+	if ok and c ~= nil then return c, "global", modtype end
+	return nil, "none", modtype
 end
 
 -- One pass over a target list. Anything it cannot reach goes on `pending` and
 -- is re-tried every RESCAN_EVERY frames: a module can be pulled in lazily by
 -- the first reference to it, so "absent at on_game_start" is not "absent".
+-- One target. Returns how many methods were wrapped plus a diagnostic string
+-- that goes straight into a `bnx` line, so a zero can never again be a silent
+-- zero: it names the type of the module, the type of the class object, where
+-- the class was found, and what the first method attempt said.
 local function wrap_binder_one(A, modname, clsname)
 	local key = modname .. "." .. clsname
-	local ok, done = pcall(function()
-		local mod = _G[modname]
-		local cls = mod and mod[clsname]
-		if type(cls) ~= "table" then return 0 end
-		local n = 0
+	local ok, n, why = pcall(function()
+		local cls, via, modtype = resolve_class(modname, clsname)
+		if cls == nil then
+			return 0, "mod=" .. modtype .. "|cls=nil|via=none|why=class not found"
+		end
+		local count, first = 0, nil
+		local function try(m, kind)
+			local done, msg = wrap_axis_method(A, cls, m, key .. "." .. m, kind)
+			if first == nil or (done and first ~= "ok") then first = msg end
+			if done then count = count + 1 end
+		end
 		for j = 1, #BINDER_METHODS do
 			local m = BINDER_METHODS[j]
-			local kind = (m == "net_spawn") and 1 or (m == "net_destroy") and 2 or 0
-			if wrap_axis_method(A, cls, m, key .. "." .. m, kind) then n = n + 1 end
+			try(m, (m == "net_spawn") and 1 or (m == "net_destroy") and 2 or 0)
 		end
 		if WRAP_BINDER_UPDATE then
 			for j = 1, #BINDER_UPDATE_METHODS do
-				local m = BINDER_UPDATE_METHODS[j]
-				if wrap_axis_method(A, cls, m, key .. "." .. m, 0) then n = n + 1 end
+				try(BINDER_UPDATE_METHODS[j], 0)
 			end
 		end
-		return n
+		return count, "mod=" .. modtype .. "|cls=" .. type(cls) .. "|via=" .. via
+			.. "|why=" .. tostring(first)
 	end)
-	return (ok and done) or 0, key
+	if not ok then return 0, key, "mod=?|cls=?|via=?|why=pcall: " .. tostring(n) end
+	return n or 0, key, why
 end
 
-local function wrap_binder_targets(A, targets)
+local function wrap_binder_targets(A, targets, diag)
 	for i = 1, #targets do
 		local modname, clsname = targets[i][1], targets[i][2]
-		local n, key = wrap_binder_one(A, modname, clsname)
+		local n, key, why = wrap_binder_one(A, modname, clsname)
+		if diag then diag[#diag + 1] = { key, n, why } end
 		if n > 0 then
 			wrap_counts.bnd = wrap_counts.bnd + n
 		else
@@ -995,7 +1051,26 @@ end
 -- What it cannot see: anything registered BEFORE this installs, i.e. during
 -- module load. ProcessEventQueue is on the globals list precisely so those
 -- still show up in aggregate.
-local function functor_label(prefix, f)
+-- A functor's OWN definition site, and optionally the site that registered it.
+--
+-- v2, after the first in-game run. Every capture's worst walk-era frame was
+-- 29 ms with 90% script and one scope on top: `call_cond:_g.script:456` at
+-- 25.8-26.3 ms. That label is a lie of omission - `_g.script:456` is the
+-- generic closure AddUniqueCall builds around level.add_call, so the label
+-- named the plumbing and not one of the 300+ owners whose body was actually
+-- running. Two things fix it, and both are at registration time so neither
+-- costs anything per call:
+--
+--   * label by the owner: the functor's own short_src:linedefined, plus the
+--     REGISTERING caller one level up (debug.getinfo(2)), plus - for a time
+--     event - its obj_id/ev_id strings, which in this codebase are usually
+--     the most informative thing about it;
+--   * attribute to the innermost: while our AddUniqueCall wrapper is running,
+--     level.add_call does NOT wrap what it is handed, because what it is
+--     handed is _g.script's bridge around a functor we have already wrapped.
+--     One outer region on the same axis would otherwise swallow the inner one
+--     as `nested`, which is exactly what happened.
+local function functor_label(prefix, f, extra, up)
 	local src, line = "?", 0
 	if debug and debug.getinfo and type(f) == "function" then
 		local ok, info = pcall(debug.getinfo, f, "S")
@@ -1005,15 +1080,39 @@ local function functor_label(prefix, f)
 			line = info.linedefined or 0
 		end
 	end
-	return prefix .. ":" .. src .. ":" .. line
+	local label = prefix .. ":" .. src .. ":" .. line
+	if extra and extra ~= "" then label = label .. "#" .. extra end
+	if up and debug and debug.getinfo then
+		-- +1 because this frame is itself on the stack
+		local ok, ci = pcall(debug.getinfo, up + 1, "Sl")
+		if ok and ci then
+			local csrc = tostring(ci.short_src or "?")
+			csrc = string.match(csrc, "([^\\/]+)$") or csrc
+			if csrc ~= src or (ci.currentline or 0) ~= line then
+				label = label .. "@" .. csrc .. ":" .. tostring(ci.currentline or 0)
+			end
+		end
+	end
+	return label
+end
+
+-- ev_id / obj_id come from the caller and end up in a pipe-separated log line,
+-- so strip anything that would break the grammar.
+local function evt_tag(a, b)
+	local s = tostring(a or "?") .. "." .. tostring(b or "?")
+	return (string.gsub(s, "[|,~=%s]", "_"))
 end
 
 local function wrap_time_events(A)
 	local evt_seen = {}
-	local function wrap_functor(prefix, f)
+	local in_auc = false
+	local function wrap_functor(prefix, f, extra, up)
 		if type(f) ~= "function" then return f end
 		if evt_seen[f] then return evt_seen[f] end
-		local w = axis_wrapper(A, functor_label(prefix, f), f, 0, false)
+		-- keyed by the function, so a named functor registered twice keeps the
+		-- label of its FIRST registration. Anonymous closures - which is most
+		-- of the 508 CreateTimeEvent sites - get one label each.
+		local w = axis_wrapper(A, functor_label(prefix, f, extra, up), f, 0, false)
 		evt_seen[f] = w
 		wrap_counts.evt = wrap_counts.evt + 1
 		return w
@@ -1023,7 +1122,7 @@ local function wrap_time_events(A)
 	local cte = rawget(_G, "CreateTimeEvent")
 	if type(cte) == "function" then
 		_G.CreateTimeEvent = function(a, b, c, f, ...)
-			return cte(a, b, c, wrap_functor("evt", f), ...)
+			return cte(a, b, c, wrap_functor("evt", f, evt_tag(a, b), 2), ...)
 		end
 		n = n + 1
 	else
@@ -1033,7 +1132,12 @@ local function wrap_time_events(A)
 	local auc = rawget(_G, "AddUniqueCall")
 	if type(auc) == "function" then
 		_G.AddUniqueCall = function(f, ...)
-			return auc(wrap_functor("uniq", f), ...)
+			local wrapped = wrap_functor("uniq", f, nil, 2)
+			in_auc = true
+			local ok, r = pcall(auc, wrapped, ...)
+			in_auc = false
+			if not ok then error(r, 0) end
+			return r
 		end
 		n = n + 1
 	else
@@ -1048,7 +1152,12 @@ local function wrap_time_events(A)
 		local ac = rawget(lv, "add_call")
 		if type(ac) ~= "function" then return end
 		local wrapper = function(cond, act, ...)
-			return ac(wrap_functor("call_cond", cond), wrap_functor("call_act", act), ...)
+			if in_auc then
+				-- _g.script's own bridge; the owner inside it is already wrapped
+				return ac(cond, act, ...)
+			end
+			return ac(wrap_functor("call_cond", cond, nil, 2),
+			          wrap_functor("call_act", act, nil, 2), ...)
 		end
 		lv.add_call = wrapper
 		if rawget(lv, "add_call") == wrapper then n = n + 1 end
@@ -1158,13 +1267,14 @@ local function install()
 	-- the bnd axis running does not disturb the cb accumulator at all, which
 	-- is the whole reason the old WRAP_BINDERS mode was unusable.
 	local walkout = "off"
+	local bnd_diag = {}
 	if WRAP_BINDERS_I062 or WRAP_GLOBALS or WRAP_TIME_EVENTS then
 		local parts = {}
 		if WRAP_BINDERS_I062 then
 			local A = new_axis("bnd")
 			A.timer = new_timer()
 			A.last = A.timer:time()
-			pcall(wrap_binder_targets, A, BINDER_TARGETS)
+			pcall(wrap_binder_targets, A, BINDER_TARGETS, bnd_diag)
 			parts[#parts + 1] = "bnd=" .. wrap_counts.bnd
 				.. (WRAP_BINDER_UPDATE and "+update" or "")
 		end
@@ -1196,11 +1306,35 @@ local function install()
 
 	-- I-062: a second header line, so the original one keeps its exact shape
 	-- and every parser written against it still works.
-	printf("ALAOPROF|1|wdr|ts=%s|walkout=%s|binder_update=%s|frames=%s|frame_floor_ms=%s|frame_max=%s|rescan_every=%s|pending=%s|misses=%s",
-		win_t0, walkout, tostring(WRAP_BINDER_UPDATE),
+	--
+	-- `selfcheck` exists because the first run wrapped zero binder classes and
+	-- nothing said so: every frm line simply read u_bnd=0.000 and spawn=0,
+	-- which is indistinguishable from a quiet scene. A zero now announces
+	-- itself here AND as an `err` line, and profile_report refuses to be quiet
+	-- about it.
+	local selfcheck = "ok"
+	if WRAP_BINDERS_I062 and wrap_counts.bnd == 0 then selfcheck = "bnd-zero" end
+	if WRAP_GLOBALS and wrap_counts.eng == 0 then
+		selfcheck = (selfcheck == "ok") and "eng-zero" or (selfcheck .. ",eng-zero")
+	end
+	printf("ALAOPROF|1|wdr|ver=%s|ts=%s|walkout=%s|binder_update=%s|frames=%s|frame_floor_ms=%s|frame_max=%s|rescan_every=%s|pending=%s|selfcheck=%s|misses=%s",
+		WALKOUT_VER, win_t0, walkout, tostring(WRAP_BINDER_UPDATE),
 		FRAMES and "on" or "off", FRM_FLOOR_MS, FRM_MAX_LINES,
-		RESCAN_EVERY, pending_n,
+		RESCAN_EVERY, pending_n, selfcheck,
 		(#wrap_misses > 0) and table.concat(wrap_misses, " ") or "none")
+	-- one line per binder target, hit or miss, with the types it actually saw.
+	-- 32 lines once per run; this is the line that would have made the first
+	-- run's bnd=0 a five-minute diagnosis instead of a wasted capture.
+	for i = 1, #bnd_diag do
+		printf("ALAOPROF|1|bnx|target=%s|wrapped=%s|%s",
+			bnd_diag[i][1], bnd_diag[i][2], bnd_diag[i][3])
+	end
+	if selfcheck ~= "ok" then
+		printf("ALAOPROF|1|err|I-062 self-check %s: bnd=%s eng=%s evt=%s - the axes that "
+			.. "read zero measured NOTHING, they did not measure nothing happening. "
+			.. "See the bnx lines.",
+			selfcheck, wrap_counts.bnd, wrap_counts.eng, wrap_counts.evt)
+	end
 
 	printf("ALAOPROF|1|hdr|ts=%s|timer=%s|units_per_ms=%s|calib_ms=%s|calib_units=%s|calib_spin=%s|overhead_ns=%s|make_callback=%s|binders=%s|listeners=%s|dump_ms=%s|hitch=%s|hitch_floor_ms=%s|hitch_buckets=%s",
 		win_t0, timer_kind,
