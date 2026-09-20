@@ -137,6 +137,26 @@ def test_unknown_method_is_assumed_compilable(classify):
     assert by_name["actor_on_update"].mode == "compiled"
 
 
+@pytest.mark.parametrize("method", ["section_name", "profile_name"])
+def test_se_object_name_getters_are_engine_calls(classify, method):
+    """I-042: both were missing from ENGINE_NYI_METHODS.
+
+    `se_obj:section_name()` / `:profile_name()` are LuaBind exports on the
+    server object, same as `:id()` - a body whose only engine call was one of
+    them used to come back `compiled`, which is exactly the wrong answer for
+    every mode-gated decision downstream.
+    """
+    by_name, _ = classify("""
+        function actor_on_update(se_obj)
+            local s = se_obj:%s()
+            return s
+        end
+    """ % method)
+    info = by_name["actor_on_update"]
+    assert info.mode == "interpreted"
+    assert any(method in r and "NYICF" in r for r in info.reasons)
+
+
 def test_conditional_only_abort_is_mixed(classify):
     by_name, _ = classify("""
         function actor_on_update(flag)
@@ -293,6 +313,40 @@ def test_capital_update_method_counts_too(write_script):
     analyzer = ASTAnalyzer()
     analyzer.analyze_file(path)
     assert [cb.name for cb in analyzer.per_frame_callbacks] == ["CBar:Update"]
+
+
+def test_local_function_callback_counts_as_per_frame(write_script):
+    """I-042: `local function actor_on_update` + RegisterScriptCallback.
+
+    The commonest shape in mod scripts (36 of the 144 live per-frame
+    registrations in the GAMMA profile) and the visitor used to skip it, so
+    every one of those bodies was invisible to the classifier.
+    """
+    path = write_script("""
+        local function actor_on_update()
+            local s = "a" .. "b"
+        end
+        function on_game_start()
+            RegisterScriptCallback("actor_on_update", actor_on_update)
+        end
+    """)
+    analyzer = ASTAnalyzer()
+    findings = analyzer.analyze_file(path)
+    assert [cb.name for cb in analyzer.per_frame_callbacks] == ["actor_on_update"]
+    assert find_one(findings, "jit_mode").details["jit_mode"] == "interpreted"
+    cb = analyzer.per_frame_callbacks[0]
+    assert cb.end_line > cb.start_line
+
+
+def test_local_function_with_an_ordinary_name_is_not_per_frame(write_script):
+    path = write_script("""
+        local function build_table()
+            local s = "a" .. "b"
+        end
+    """)
+    analyzer = ASTAnalyzer()
+    analyzer.analyze_file(path)
+    assert analyzer.per_frame_callbacks == []
 
 
 def test_non_update_method_is_not_per_frame(write_script):

@@ -324,6 +324,12 @@ ENGINE_NYI_GLOBALS = frozenset({
 # under-reports rather than over-reports "interpreted".
 ENGINE_NYI_METHODS = frozenset({
     'position', 'direction', 'health', 'set_health', 'id', 'section',
+    # I-042: `section_name` and `profile_name` were missing. They are the two
+    # most common engine getters in the mod corpus after :id()/:name()
+    # (222 sites in 82 of the 1350 live scripts) and both are LuaBind C
+    # functions, so a body whose only engine call was one of them classified
+    # as `compiled`.
+    'section_name', 'profile_name',
     'clsid', 'name', 'alive', 'parent', 'level_vertex_id', 'game_vertex_id',
     'object', 'best_enemy', 'best_danger', 'best_item', 'active_item',
     'active_detector', 'active_slot', 'item_in_slot', 'get_enemy',
@@ -1204,9 +1210,25 @@ class ASTAnalyzer:
                     )
 
         is_hot = func_name in HOT_CALLBACKS
+        # I-042: `local function actor_on_update()` + RegisterScriptCallback is
+        # the normal shape in mod scripts - 36 of the 144 live per-frame
+        # registrations in the GAMMA profile - and this visitor never built a
+        # PerFrameCallbackInfo for it, so all of them were invisible to I-010 /
+        # I-013. The name rule is the same one the global form uses.
+        is_per_frame = _is_per_frame_callback_name(func_name)
 
         self.function_depth += 1
         self._enter_scope(func_name, line, 'function', is_hot, node=node)
+
+        pf_info = None
+        if is_per_frame:
+            pf_info = PerFrameCallbackInfo(
+                name=func_name,
+                start_line=line,
+                end_line=-1,
+                scope=self.current_scope,
+            )
+            self.per_frame_callbacks.append(pf_info)
 
         if hasattr(node, 'args') and node.args:
             for arg in node.args:
@@ -1216,6 +1238,8 @@ class ASTAnalyzer:
         self._visit(node.body)
 
         end_line = self._get_end_line(node)
+        if pf_info is not None:
+            pf_info.end_line = end_line
         self._exit_scope(end_line)
         self.function_depth -= 1
 
