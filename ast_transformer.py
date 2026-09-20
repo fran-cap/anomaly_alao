@@ -103,12 +103,18 @@ def warn_if_no_luajit(quiet: bool = False) -> bool:
     return False
 
 
-def mask_lua_code(source: str) -> str:
+def mask_lua_code(source: str, keep_strings: bool = False) -> str:
     """Blank out comments and string literals, keeping every offset intact.
 
     Handy whenever we want to sweep the source for identifiers and must not
     pick up a name from a comment ("-- tg is the throttle") or a string. Used
     by the global-name sweep here and by the G9 capture gate (I-046).
+
+    With keep_strings=True only comments are blanked and string literals are
+    left alone - but they are still *parsed*, so a `--` living inside a string
+    no longer starts a comment. That is the I-052 bug: several line scans used
+    to chop at the first `--`, and `printf("idle state --- false")` then looked
+    like an unterminated `printf(` to the paren-depth check.
     """
     out = list(source)
     i, n = 0, len(source)
@@ -142,7 +148,8 @@ def mask_lua_code(source: str) -> str:
                     j += 1
                     break
                 j += 1
-            blank(i, min(j, n))
+            if not keep_strings:
+                blank(i, min(j, n))
             i = j
             continue
         m = re.match(r'\[(=*)\[', source[i:])
@@ -150,7 +157,8 @@ def mask_lua_code(source: str) -> str:
             close = ']' + m.group(1) + ']'
             end = source.find(close, i + m.end())
             end = n if end < 0 else end + len(close)
-            blank(i, end)
+            if not keep_strings:
+                blank(i, end)
             i = end
             continue
         i += 1
@@ -201,6 +209,37 @@ class ASTTransformer:
         self._file_globals_cache: Optional[Set[str]] = None
         self._vector_scratch_names: Set[str] = set()
         self._source_identifiers: Optional[Set[str]] = None
+        # I-052: offset-preserving views of self.source used by the line scans.
+        # `_masked` has comments AND strings blanked, `_decommented` only the
+        # comments. Both are lazy and reset per file in transform_file().
+        self._masked_cache: Optional[str] = None
+        self._decommented_cache: Optional[str] = None
+
+    def _masked(self) -> str:
+        """self.source with comments and string literals blanked out."""
+        if self._masked_cache is None:
+            self._masked_cache = mask_lua_code(self.source)
+        return self._masked_cache
+
+    def _decommented(self) -> str:
+        """self.source with comments blanked out, strings left alone."""
+        if self._decommented_cache is None:
+            self._decommented_cache = mask_lua_code(self.source, keep_strings=True)
+        return self._decommented_cache
+
+    def _masked_line(self, line_num: int) -> Optional[str]:
+        """The masked text of a 1-based line (comments + strings blanked)."""
+        ls, le = self._get_line_span(line_num)
+        if ls is None:
+            return None
+        return self._masked()[ls:le]
+
+    def _decommented_line(self, line_num: int) -> Optional[str]:
+        """The text of a 1-based line with its comment (if any) blanked."""
+        ls, le = self._get_line_span(line_num)
+        if ls is None:
+            return None
+        return self._decommented()[ls:le]
 
     def _compute_line_offsets(self):
         """Compute and cache line start offsets for efficient lookups."""
@@ -246,6 +285,8 @@ class ASTTransformer:
         self._vector_scratch_names: Set[str] = set()
         self._source_identifiers: Optional[Set[str]] = None
         self._file_globals_cache: Optional[Set[str]] = None
+        self._masked_cache = None
+        self._decommented_cache = None
 
         # run analyzer with user-specified cache_threshold
         self.analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
@@ -1596,14 +1637,12 @@ class ASTTransformer:
         for check_ln in range(init_line + 1, loop_end + 1):
             if check_ln in concat_set:
                 continue
-            ls, le = self._get_line_span(check_ln)
-            if ls is None:
+            # strip the comment, keep the strings (I-052: chopping at the first
+            # `--` used to hide a use of `var` that sat after a `--` inside a
+            # string literal, which is the wrong way to be wrong here)
+            line_text = self._decommented_line(check_ln)
+            if line_text is None:
                 continue
-            line_text = self.source[ls:le]
-            # strip comments
-            comment_pos = line_text.find('--')
-            if comment_pos >= 0:
-                line_text = line_text[:comment_pos]
             if var_pattern.search(line_text):
                 return  # variable used outside concat lines, not safe to transform
         
@@ -2109,12 +2148,8 @@ class ASTTransformer:
                 
                 # scan backwards from first_call.line to find unmatched if/elseif/while
                 for check_line in range(first_call.line, scope.start_line - 1, -1):
-                    ls, le = self._get_line_span(check_line)
-                    if ls is not None:
-                        line_text = self.source[ls:le]
-                        # remove comments
-                        if '--' in line_text:
-                            line_text = line_text[:line_text.find('--')]
+                    line_text = self._masked_line(check_line)
+                    if line_text is not None:
                         stripped = line_text.strip().lower()
                         
                         # check for then/do - if found before if/while, we're NOT in a condition
@@ -2156,33 +2191,14 @@ class ASTTransformer:
                 has_branch_between_calls = False
 
                 for check_line in range(scope.start_line, first_call.line + 1):
-                    ls, le = self._get_line_span(check_line)
-                    if ls is not None:
-                        line_text = self.source[ls:le]
-                        # skip comments
-                        if '--' in line_text:
-                            line_text = line_text[:line_text.find('--')]
-                        # skip strings
-                        in_string = False
-                        clean_line = ""
-                        i = 0
-                        while i < len(line_text):
-                            c = line_text[i]
-                            if c in ('"', "'") and not in_string:
-                                in_string = c
-                            elif c == in_string:
-                                # count preceding backslashes
-                                num_bs = 0
-                                j = i - 1
-                                while j >= 0 and line_text[j] == '\\':
-                                    num_bs += 1
-                                    j -= 1
-                                if num_bs % 2 == 0:
-                                    in_string = False
-                            elif not in_string:
-                                clean_line += c
-                            i += 1
-                        
+                    # I-052: one masked view instead of "chop at -- then walk the
+                    # quotes". The old order chopped inside string literals, so
+                    # printf("idle state --- false") left a dangling `(` and the
+                    # paren check below bailed out of a perfectly good hoist.
+                    line_text = self._masked_line(check_line)
+                    if line_text is not None:
+                        clean_line = line_text
+
                         brace_depth += clean_line.count('{') - clean_line.count('}')
                         paren_depth += clean_line.count('(') - clean_line.count(')')
 
@@ -2227,17 +2243,13 @@ class ASTTransformer:
                 if last_call.line > first_call.line:
                     depth = 0
                     for check_line in range(first_call.line + 1, last_call.line + 1):
-                        cls, cle = self._get_line_span(check_line)
-                        if cls is None:
+                        # comments and strings blanked in one pass (I-052);
+                        # keywords living inside either must not count toward
+                        # block nesting, and a `--` inside a string must not
+                        # swallow the rest of the line
+                        text = self._masked_line(check_line)
+                        if text is None:
                             continue
-                        text = self.source[cls:cle]
-                        # strip line comment and quoted strings (keywords inside
-                        # them must not count toward block nesting)
-                        cpos = text.find('--')
-                        if cpos != -1:
-                            text = text[:cpos]
-                        text = re.sub(r'"(?:\\.|[^"\\])*"', '', text)
-                        text = re.sub(r"'(?:\\.|[^'\\])*'", '', text)
                         words = re.findall(r'\b[a-z]+\b', text.lower())
                         has_for_while = any(w in ('for', 'while') for w in words)
                         opens = closes = 0
@@ -2389,13 +2401,12 @@ class ASTTransformer:
         # (expression broken across lines by a trailing operator / `=` / comma).
         pl = ins_line - 1
         while pl >= 1:
-            pls, ple = self._get_line_span(pl)
-            if pls is None:
+            # comment blanked, strings kept: a line ending in a string literal
+            # is a finished statement, and blanking the string would make it
+            # look like it ended on the `=` (I-052)
+            ptext = self._decommented_line(pl)
+            if ptext is None:
                 break
-            ptext = self.source[pls:ple]
-            cpos = ptext.find('--')
-            if cpos != -1:
-                ptext = ptext[:cpos]
             pstr = ptext.rstrip()
             if pstr == '':
                 pl -= 1

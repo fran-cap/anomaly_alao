@@ -3862,20 +3862,46 @@ class ASTAnalyzer:
 
     def _analyze_nil_access(self):
         """Generate findings for potential nil access patterns."""
+        # I-052: --fix-nil wraps ONE line in `if var then ... end`. If the same
+        # nil source is used again on another line, that guard buys nothing -
+        # the next line crashes on the same nil - and it also made --fix-nil a
+        # non-fixpoint: `--fix` hoists `local actor = db.actor` with four uses
+        # under it, and the next --fix-nil pass guarded use #1 and left #2..#4
+        # (24 GAMMA files, run 20260919-192746-gamma-i046). So only call an
+        # access auto-fixable when guarding its line actually makes the source
+        # safe, i.e. no other unguarded access of the same source elsewhere.
+        # The finding itself stays - the hazard is real, it just needs a human.
+        lines_per_source: Dict[int, Set[int]] = {}
+        for access in self.nil_accesses:
+            lines_per_source.setdefault(id(access.nil_source), set()).add(
+                access.access_line)
+
         for access in self.nil_accesses:
             nil_source = access.nil_source
             reason = NIL_RETURNING_FUNCTIONS.get(nil_source.source_func, 'may return nil')
-            
+
+            is_safe_to_fix = access.is_safe_to_fix
+            other_lines = sorted(
+                lines_per_source.get(id(nil_source), set()) - {access.access_line})
+            if other_lines:
+                is_safe_to_fix = False
+
             # determine severity based on whether it's safe to fix
-            if access.is_safe_to_fix:
+            if is_safe_to_fix:
                 severity = 'YELLOW'  # can be auto-fixed with --fix-nil
                 message = (f"Potential nil access: '{access.var_name}' from {nil_source.source_func}() "
                           f"used without nil check (auto-fixable)")
+            elif other_lines and access.is_safe_to_fix:
+                severity = 'YELLOW'
+                shown = ', '.join(str(l) for l in other_lines[:5])
+                message = (f"Potential nil access: '{access.var_name}' from {nil_source.source_func}() "
+                          f"used without nil check (also used on line(s) {shown}, "
+                          f"so a one-line guard would not help)")
             else:
                 severity = 'YELLOW'  # warning only, needs manual review
                 message = (f"Potential nil access: '{access.var_name}' from {nil_source.source_func}() "
                           f"used without nil check")
-            
+
             self.findings.append(Finding(
                 pattern_name='potential_nil_access',
                 severity=severity,
@@ -3888,7 +3914,8 @@ class ASTAnalyzer:
                     'assign_line': nil_source.assign_line,
                     'access_call': access.access_call,
                     'access_type': access.access_type,
-                    'is_safe_to_fix': access.is_safe_to_fix,
+                    'is_safe_to_fix': is_safe_to_fix,
+                    'other_access_lines': other_lines,
                     'is_local': nil_source.is_local,
                     'reason': reason,
                 },

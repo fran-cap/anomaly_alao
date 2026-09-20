@@ -275,6 +275,27 @@ IDEMPOTENCE_CASES = {
     ),
     "debug": 'function f(x)\n    log("a")\n    printf("b")\n    return x\nend\n',
     "dead_code": "function g()\n    if false then\n        local q = 9\n    end\n    return 0\nend\n",
+    # I-052, the two shapes that used to move on the second pass
+    "nil_on_our_own_cache": (
+        "local speeds = {}\n"
+        "local function actor_on_first_update()\n"
+        "    speeds[0] = db.actor:get_actor_run_coef()\n"
+        "    speeds[1] = db.actor:get_actor_runback_coef()\n"
+        "    speeds[2] = db.actor:get_actor_sprint_koef()\n"
+        "    speeds[3] = db.actor:get_actor_jump_speed()\n"
+        "end\n"
+    ),
+    "dashes_in_a_string": (
+        "function m:update()\n"
+        '    printf("idle state --- false")\n'
+        "    if db.storage[self.id] ~= nil then\n"
+        "        self.a = db.storage[self.id].object\n"
+        "    end\n"
+        "    if db.storage[self.id] ~= nil then\n"
+        "        self.b = db.storage[self.id].object\n"
+        "    end\n"
+        "end\n"
+    ),
 }
 
 ALL_FLAGS = dict(
@@ -284,6 +305,21 @@ ALL_FLAGS = dict(
     fix_nil=True,
     remove_dead_code=True,
 )
+
+# I-052: idempotence is per flag *combination*. Both gen-3 defects only showed
+# up once a second flag was on (--fix-debug, --fix-nil), because the gen-3
+# corpus gates all ran plain --fix. These are the combinations the CLI supports;
+# the corpus gate runs the same list via `tools/corpus_matrix.py`.
+FLAG_COMBOS = {
+    "fix": {},
+    "fix+debug": dict(fix_debug=True),
+    "fix+nil": dict(fix_nil=True),
+    "fix+debug+nil": dict(fix_debug=True, fix_nil=True),
+    "fix+yellow": dict(fix_yellow=True),
+    "fix+experimental": dict(experimental=True),
+    "fix+dead-code": dict(remove_dead_code=True),
+    "all": dict(ALL_FLAGS),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +458,44 @@ def test_a_second_fix_pass_changes_nothing(tmp_path, name):
     assert second_modified is False
 
 
+@pytest.mark.parametrize("combo", sorted(FLAG_COMBOS))
+@pytest.mark.parametrize("name", sorted(IDEMPOTENCE_CASES))
+def test_every_flag_combination_is_a_fixpoint(tmp_path, name, combo):
+    """One pass must land on the converged output for EVERY flag combination.
+
+    Not just for --fix. Both I-052 defects were combination-only: the file was
+    stable under --fix and kept moving under --fix-debug / --fix-nil, and the
+    corpus gate never saw it because it only ever ran --fix.
+    """
+    flags = FLAG_COMBOS[combo]
+    path = tmp_path / f"{name}.script"
+    path.write_text(IDEMPOTENCE_CASES[name], encoding="utf-8")
+
+    ASTTransformer().transform_file(path, backup=False, **flags)
+    after_first = path.read_text(encoding="utf-8")
+
+    ok, err = luajit_compiles(after_first)
+    assert ok, f"{name}/{combo}: first pass produced source LuaJIT rejects: {err}\n{after_first}"
+
+    second_modified, _, _ = ASTTransformer().transform_file(path, backup=False, **flags)
+    after_second = path.read_text(encoding="utf-8")
+
+    assert after_second == after_first, (
+        f"{name}/{combo}: second pass changed the file again\n"
+        f"--- after first ---\n{after_first}\n--- after second ---\n{after_second}"
+    )
+    assert second_modified is False
+
+
 # The shape the corpus gate caught: an object cache ALAO inserted on pass 1 is
-# a nil source on pass 2, so --fix-nil wraps its first use in an `if` and the
-# transform is not a fixpoint. speed.script and 23 other GAMMA files
+# a nil source on pass 2, so --fix-nil wrapped its first use in an `if` and the
+# transform was not a fixpoint. speed.script and 23 other GAMMA files
 # (20260919-192746-gamma-i046, --fix --fix-debug --fix-nil; the gen-3 baselines
-# ran --fix only, which is why nobody had seen it). The guard is also useless
-# as written: it protects speeds[0] and leaves the next three lines to crash on
-# the same nil.
+# ran --fix only, which is why nobody had seen it). The guard was also useless
+# as written: it protected speeds[0] and left the next three lines to crash on
+# the same nil - which is exactly what I-052 fixed. A one-line guard is only
+# offered when it makes the whole nil source safe, so here nothing is guarded
+# and pass 2 has nothing left to do.
 NIL_GUARD_ON_OUR_OWN_CACHE = """\
 local speeds = {}
 
@@ -441,9 +508,6 @@ end
 """
 
 
-@pytest.mark.xfail(strict=True, reason="--fix-nil is not a fixpoint over the caching "
-                                       "families: pass 2 guards the `local actor = db.actor` "
-                                       "that pass 1 inserted (24 GAMMA files)")
 def test_fix_nil_does_not_re_guard_a_cache_we_inserted(tmp_path):
     path = tmp_path / "speed.script"
     path.write_text(NIL_GUARD_ON_OUR_OWN_CACHE, encoding="utf-8")
@@ -456,23 +520,44 @@ def test_fix_nil_does_not_re_guard_a_cache_we_inserted(tmp_path):
     assert after_second == after_first, (
         f"--- after first ---\n{after_first}\n--- after second ---\n{after_second}"
     )
+    # and the half-guard is gone for good, not just stable
+    assert "if actor then" not in after_second, after_second
+
+
+def test_a_guard_that_covers_the_only_use_is_still_offered(tmp_path):
+    """I-052 must not switch --fix-nil off: one use, one guard, still fixed."""
+    path = tmp_path / "one_use.script"
+    path.write_text(
+        "function f(id)\n"
+        "    local o = level.object_by_id(id)\n"
+        "    o:set_visual(\"stalker\")\n"
+        "    return 1\n"
+        "end\n",
+        encoding="utf-8")
+
+    modified, content, _ = ASTTransformer().transform_file(
+        path, backup=False, dry_run=True, fix_nil=True)
+    assert modified is True
+    assert "if o then" in content, content
 
 
 # ---------------------------------------------------------------------------
-# I-044: --fix-debug makes the transform non-idempotent on this shape
+# I-044 / I-052: --fix-debug used to make the transform non-idempotent here
 # ---------------------------------------------------------------------------
 
 # Shrunk (automatically, line by line) out of the real offender:
 # vanilla db `sr_monster.script`, the one idempotence violation in corpus run
 # 20260919-184338-vanilla-i044-fixdebug (`--fix --fix-debug`, 261 files, 4791
-# edits). Plain `--fix` on the same corpus is idempotent, so the debug flag is
-# what tips it over.
+# edits). Plain `--fix` on the same corpus is idempotent, so the debug flag
+# looked like what tipped it over.
 #
-# Pass 1 comments the printf out and DECLINES the repeated_db_storage hoist;
-# pass 2, looking at its own output, applies the hoist. Both outputs compile and
-# both are semantically fine - the bug is that the file keeps moving. The
-# analyzer reports the identical finding (db.storage 4x, lines unchanged) on
-# both inputs, so the divergence is in edit generation, not in the analysis.
+# It was not the debug flag at all. `_edit_repeated_calls` chopped each line at
+# the first `--` before it looked at string literals, so the `---` inside
+# printf("idle state --- false") truncated the line to `printf(` and the
+# paren-depth check concluded the first db.storage sat inside an unclosed call
+# and declined the hoist. Commenting the printf out removed the bad line and
+# pass 2 then hoisted. I-052 masks comments and strings in one offset-preserving
+# pass, so pass 1 hoists and the debug flag changes nothing.
 FIXDEBUG_IDEMPOTENCE_REPRO = """\
 function fake_monster:update( delta )
     if self.idle_state then
@@ -494,10 +579,6 @@ end
 """
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "I-044: with --fix-debug, pass 1 comments the debug call out and skips the "
-    "repeated_db_storage hoist, pass 2 then applies it. G5 violation on "
-    "sr_monster.script in run 20260919-184338-vanilla-i044-fixdebug."))
 def test_fix_debug_second_pass_changes_nothing(tmp_path):
     path = tmp_path / "sr_monster_shape.script"
     path.write_text(FIXDEBUG_IDEMPOTENCE_REPRO, encoding="utf-8")
@@ -514,6 +595,56 @@ def test_fix_debug_second_pass_changes_nothing(tmp_path):
         "second --fix-debug pass changed the file again\n"
         f"--- after first ---\n{after_first}\n--- after second ---\n{after_second}")
     assert second_modified is False
+    assert "local db_storage = db.storage" in after_first, after_first
+
+
+# The root cause on its own, with no debug flag anywhere near it: a `--` inside
+# a string literal ahead of the first cacheable call must not hide the hoist.
+DASHES_IN_A_STRING = """\
+function m:update()
+    local msg = "idle state --- false"
+    if db.storage[self.id] ~= nil then
+        self.a = db.storage[self.id].object
+    end
+    if db.storage[self.id] ~= nil then
+        self.b = db.storage[self.id].object
+    end
+    return msg
+end
+"""
+
+
+def test_a_double_dash_inside_a_string_does_not_block_the_hoist(tmp_path):
+    path = tmp_path / "dashes.script"
+    path.write_text(DASHES_IN_A_STRING, encoding="utf-8")
+
+    modified, content, _ = ASTTransformer().transform_file(
+        path, backup=False, dry_run=True)
+    assert modified is True
+    assert "local db_storage = db.storage" in content, content
+    # the string itself is untouched
+    assert '"idle state --- false"' in content
+    ok, err = luajit_compiles(content)
+    assert ok, err
+
+
+def test_mask_lua_code_keeps_strings_when_asked():
+    from ast_transformer import mask_lua_code
+
+    src = 'local msg = "a -- b" -- real comment\nprintf("x --- y")\n'
+    masked = mask_lua_code(src)
+    kept = mask_lua_code(src, keep_strings=True)
+
+    # offsets and newlines survive both ways
+    assert len(masked) == len(src) and len(kept) == len(src)
+    assert masked.count("\n") == kept.count("\n") == src.count("\n")
+    # a `--` inside a string never starts a comment
+    assert "real comment" not in kept and "real comment" not in masked
+    assert 'local msg = "a -- b"' in kept
+    assert '"a -- b"' not in masked
+    # and the parens of a call whose argument holds `---` stay balanced
+    line2 = kept.split("\n")[1]
+    assert line2.count("(") == line2.count(")") == 1
 
 
 # ---------------------------------------------------------------------------

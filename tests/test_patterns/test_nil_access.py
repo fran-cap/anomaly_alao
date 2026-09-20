@@ -111,8 +111,11 @@ def test_guard_turns_a_crash_into_nil(transform, lua_call):
     assert res is None
 
 
-# A second unguarded use of the same variable is correctly marked unsafe: a
-# single if-then wrapper cannot cover two separate statements.
+# Two unguarded uses of the same variable: a single if-then wrapper cannot
+# cover two separate statements, so NEITHER is auto-fixable. Before I-052 the
+# analyzer called the first one safe and the transformer caught it late with a
+# "does the next line start with o:" check - which only worked when the second
+# use happened to lead its line. Both findings stand; only the fix is off.
 TWO_USES = """
 function f(id)
     local o = level.object_by_id(id)
@@ -125,7 +128,11 @@ end
 
 def test_second_use_is_marked_unsafe_and_nothing_is_rewritten(analyze, transform_full):
     hits = findings_named(analyze(TWO_USES), "potential_nil_access")
-    assert [h.details["is_safe_to_fix"] for h in hits] == [True, False]
+    assert [h.details["is_safe_to_fix"] for h in hits] == [False, False]
+    # each one names the other use, which is why neither is auto-fixable
+    for h in hits:
+        others = h.details["other_access_lines"]
+        assert others and h.line_num not in others
     modified, content, count = transform_full(TWO_USES, fix_nil=True)
     assert modified is False, f"unsafe multi-use nil access was rewritten:\n{content}"
 
