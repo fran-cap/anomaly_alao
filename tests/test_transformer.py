@@ -423,6 +423,64 @@ def test_a_second_fix_pass_changes_nothing(tmp_path, name):
 
 
 # ---------------------------------------------------------------------------
+# I-044: --fix-debug makes the transform non-idempotent on this shape
+# ---------------------------------------------------------------------------
+
+# Shrunk (automatically, line by line) out of the real offender:
+# vanilla db `sr_monster.script`, the one idempotence violation in corpus run
+# 20260919-184338-vanilla-i044-fixdebug (`--fix --fix-debug`, 261 files, 4791
+# edits). Plain `--fix` on the same corpus is idempotent, so the debug flag is
+# what tips it over.
+#
+# Pass 1 comments the printf out and DECLINES the repeated_db_storage hoist;
+# pass 2, looking at its own output, applies the hoist. Both outputs compile and
+# both are semantically fine - the bug is that the file keeps moving. The
+# analyzer reports the identical finding (db.storage 4x, lines unchanged) on
+# both inputs, so the divergence is in edit generation, not in the analysis.
+FIXDEBUG_IDEMPOTENCE_REPRO = """\
+function fake_monster:update( delta )
+    if self.idle_state then
+        if self.st.idle_end <= game.time() then
+            printf("idle state --- false")
+        end
+    end
+    if self.final_action and (db.storage[self.monster.id] == nil or self.monster_obj:position():distance_to(self.st.path:point(self.st.path:count()-1)) <= 1) then
+        if db.storage[self.monster.id] ~= nil then
+        end
+    end
+    if self.is_actor_inside == true and self.monster == nil then
+        if target_pos:distance_to(self.current) > self.current:distance_to(self.target) then
+        end
+    elseif self.monster_obj == nil and self.monster ~= nil and db.storage[self.monster.id] ~= nil and not self.final_action then
+        self.monster_obj = db.storage[self.monster.id].object
+    end
+end
+"""
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "I-044: with --fix-debug, pass 1 comments the debug call out and skips the "
+    "repeated_db_storage hoist, pass 2 then applies it. G5 violation on "
+    "sr_monster.script in run 20260919-184338-vanilla-i044-fixdebug."))
+def test_fix_debug_second_pass_changes_nothing(tmp_path):
+    path = tmp_path / "sr_monster_shape.script"
+    path.write_text(FIXDEBUG_IDEMPOTENCE_REPRO, encoding="utf-8")
+
+    first_modified, _, _ = ASTTransformer().transform_file(
+        path, backup=False, fix_debug=True)
+    assert first_modified is True
+    after_first = path.read_text(encoding="utf-8")
+
+    second_modified, _, _ = ASTTransformer().transform_file(
+        path, backup=False, fix_debug=True)
+    after_second = path.read_text(encoding="utf-8")
+    assert after_second == after_first, (
+        "second --fix-debug pass changed the file again\n"
+        f"--- after first ---\n{after_first}\n--- after second ---\n{after_second}")
+    assert second_modified is False
+
+
+# ---------------------------------------------------------------------------
 # --verify-compile (I-004): a rewrite that does not compile is never written
 # ---------------------------------------------------------------------------
 
