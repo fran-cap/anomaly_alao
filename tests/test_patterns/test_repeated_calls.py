@@ -983,3 +983,32 @@ def test_a_multiline_elseif_condition_is_left_alone(transform, compiles, run_bot
     compiles(out)
     run_both(MULTILINE_ELSEIF_CONDITION, out, "f", 1)
     run_both(MULTILINE_ELSEIF_CONDITION, out, "f", 5)
+
+
+# A `while` condition is re-evaluated every iteration, so lifting a call out of
+# it changes how OFTEN it runs, not just when - `while t - time_global() < x do`
+# would never terminate. The hoist declines instead of reasoning about which
+# getters are time-varying. (The `while ` spelling would also reach the
+# hoist-to-function-top path below, which is fine for device(); `while(` would
+# not, and that is the hole this closes. Either way this is no worse than the
+# old bail-out.)
+MULTILINE_WHILE_CONDITION = """
+function f()
+    local n = 0
+    while math.max(
+        device().time_delta,
+        device().precache_frame,
+        device().time_delta,
+        device().precache_frame) < 3 do
+        n = n + 1
+    end
+    return n
+end
+"""
+
+
+def test_a_multiline_while_condition_is_left_alone(analyze, transform, compiles):
+    assert find_one(analyze(MULTILINE_WHILE_CONDITION), "repeated_device")
+    out = transform(MULTILINE_WHILE_CONDITION)
+    assert "local dev = device()" not in out
+    compiles(out)

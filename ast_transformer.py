@@ -2466,7 +2466,12 @@ class ASTTransformer:
             if text is None:
                 return None
             word = re.match(r'\s*([A-Za-z]+)', text)
-            if word and word.group(1) in ('elseif', 'else', 'until'):
+            if word and word.group(1) in ('elseif', 'else', 'until', 'while'):
+                # elseif/else/until: see the docstring.
+                # while: the condition is re-evaluated every iteration, so
+                # lifting an expression out of it changes how many times it
+                # runs, not just when - `while t - time_global() < x do` would
+                # never terminate. Refuse rather than reason about it.
                 return None
             pos = self._get_line_start(line_num)
             if pos is None:
