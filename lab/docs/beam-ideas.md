@@ -969,3 +969,33 @@ Cross-cutting facts:
   not triggered in either corpus, same compiles-yet-wrong class as the `elseif` trap.
 - Known flakes: `test_cli.py::test_txt_report_is_written` under load; `test_i049_dispatcher.py::test_mid_pass_destroy_and_spawn_match_hspairs`
   1 in 4 (the documented `hspairs` pointer-order nondeterminism).
+
+### 12.1 The two attended runs (2026-09-20, user at the keyboard)
+
+**I-057 moving, exploratory** (`20260920-125528-I-057-d2427e`, `gen4-all-b` vs `agent-I057-b`, listener mode, 2 x 180 s,
+the user playing and grabbing ledges in every capture): **370 (368-373) -> 333 (331-336) us/frame, -37 (-10%)**, no
+overlap, run-to-run cv about 1%; fps avg +1.1%, 1% low +7.0%, p99 -6.1% (suggestive only). The per-frame ledge scan row
+is gone (28.2 us this session, not the 68 of 11.1: less camera movement), the on-demand scan appears as a new row at
+5.2 us (0.06 calls/frame, ~89 us per call), `fluid_aim` 15.8 and `battery_warning` 10.8 drop out of the top 14,
+`light_gem_mcm` 12.1 -> 7.9. The pass condition as written (ledge under 1 us) was not met because the scan still runs
+while the climb key is held; the arm clears the 25 us bar regardless. **Climbing felt the same in all four captures.
+I-057 kept.**
+
+**I-058 hitches** (`20260920-125528-I-058-f5edb8`, hitch profiler, 4 captures, scripted routine). Worst call per capture, ms:
+
+| event -> listener | 1 | 2 | 3 | 4 | later calls |
+|---|---:|---:|---:|---:|---|
+| inventory open -> `ui_inventory.script:93` | 11.4 | 10.1 | 18.5 | 8.4 | 3.2-6.4, **the first open is the max every time** |
+| leave dialog -> `ui_pda_encyclopedia_tab.script:407` | 9.5 | 7.0 | 6.5 | 6.4 | one call per capture |
+| jump -> `eft_jump_sounds.script:71` / `camera_reanim_project:126` | 3.5 | 3.1 | 0.9 | 0.9 | 0.2-0.8 |
+| land | 3.0 | 1.2 | 0.8 | 1.2 | 0.2-0.8 |
+| footstep -> `footstep_sounds.script:87` | 4.5 | 2.7 | 0.9 | 0.8 | 0.2-0.8 |
+
+Not looked for and found: `actor_on_info_callback#info_portions.script:58` 4.5-5.4 ms, `on_key_release#ui_hud_dotmarks.script:5924`
+7.3 ms once, and **one 54 ms frame in `actor_on_update#lam2.script:271`** (capture 1, frame 13033), the largest in-play
+script hitch recorded. Load-time cost for scale: `actor_on_first_update` 1.27-1.29 s at frame 7, of which
+`surge_manager.lua:146` is 650-690 ms.
+
+**The hitch bar, as adopted by the user:** >= 5 ms, read as what lands in one frame, not per event. Cold costs stack
+(first jump, land and footstep were within ~170 frames of each other: 3.5 + 3.0 + 4.5 ms), so everything cold is worth
+pre-loading, provided the prewarm lands behind the loading screen or is sliced. Follow-up: I-063 prewarm bundle.

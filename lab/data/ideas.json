@@ -832,13 +832,13 @@
       "generation": 5,
       "parent": "I-050",
       "status": "kept",
-      "score": 8.5,
+      "score": 9.0,
       "risk": "low",
       "expected_gain": "low",
       "hypothesis": "Read-only estimates: 9-11 + 5-6 + 5-6 + 4-5 us/frame, each under the bar, ~25 together. I-050b showed crossing-count estimates can overstate by 2x, so expect less.",
       "change": "Only worth doing as one arm, and only after I-053 exists.",
       "measure": "profiler, one combined arm.",
-      "notes": "Estimates by agent-I050b, unmeasured. GEN-5 2026-09-20 agent/gen5-I057 958b3eb. Track A: the ledge scan is a cache read only from the climb keybind paths; gate the actor_on_update listener and scan on demand at the 4 reader sites (debugMode keeps the old path). Predicted -68 us/frame MOVING, ~0 standing. Track B (fluid_aim, light_gem_mcm, battery_warning throttle-first, actor_effects fog latch): -9.1 engine calls/frame. MEASURED standing 20260920-114512-I-057-e8b3e2, gen4-all-b -> agent-I057-b: 309.7 -> 291.8 warm (-17.9, no overlap), 307.1 -> 294.7 all rounds (-12.4, overlap); all of it in actor_on_update; fps -3.5% inside launch sd. Arms drifted in opposite directions (see I-061). UNDER the bar standing; the deciding run is lab/coord/i057-moving-request.json (needs the user / I-053 save): ledge row must go ~68 -> <1."
+      "notes": "Estimates by agent-I050b, unmeasured. GEN-5 2026-09-20 agent/gen5-I057 958b3eb. Track A: the ledge scan is a cache read only from the climb keybind paths; gate the actor_on_update listener and scan on demand at the 4 reader sites (debugMode keeps the old path). Predicted -68 us/frame MOVING, ~0 standing. Track B (fluid_aim, light_gem_mcm, battery_warning throttle-first, actor_effects fog latch): -9.1 engine calls/frame. MEASURED standing 20260920-114512-I-057-e8b3e2, gen4-all-b -> agent-I057-b: 309.7 -> 291.8 warm (-17.9, no overlap), 307.1 -> 294.7 all rounds (-12.4, overlap); all of it in actor_on_update; fps -3.5% inside launch sd. Arms drifted in opposite directions (see I-061). UNDER the bar standing; the deciding run is lab/coord/i057-moving-request.json (needs the user / I-053 save): ledge row must go ~68 -> <1. MEASURED MOVING 2026-09-20, exploratory (user playing, listener mode, 2x180 s), 20260920-125528-I-057-d2427e: 370 (368-373) -> 333 (331-336) us/frame, -37 (-10%), no overlap, run-to-run cv ~1%; fps avg +1.1%, 1% low +7.0%, p99 -6.1%. The per-frame ledge scan row (28.2 us this session, not 68: less camera movement) is gone; the on-demand scan shows as a new row at 5.2 us (0.06 calls/frame, ~89 us/call); fluid_aim 15.8 and battery_warning 10.8 drop out of the top 14, light_gem 12.1 -> 7.9. The user grabbed ledges in every capture and reports climbing felt the same in all four. KEPT: clears the 25 us bar moving; -18 warm standing."
     },
     {
       "id": "I-058",
@@ -846,14 +846,14 @@
       "category": "instrument",
       "generation": 5,
       "parent": "I-048",
-      "status": "kept",
+      "status": "done",
       "score": 9.0,
       "risk": "low",
       "expected_gain": "high",
       "hypothesis": "The profiler reports per-frame means, which hide what the player feels. The moving run shows ActorMenu_on_before_init_mode at 8-10 ms per call (every inventory open), actor_on_jump 1.5-2.8 ms, actor_on_land 1.2-1.6 ms, actor_on_leave_dialog 2.9 ms; the user reports a large stutter on first PDA / inventory open.",
       "change": "Add per-name and per-listener max and a small histogram (or top-N slowest single calls with frame time) to zzz_alao_profiler; rank listeners inside ActorMenu_on_before_init_mode, actor_on_jump, actor_on_land. Separate first-open cost (UI construction, texture loads: engine side) from every-open cost (script side).",
       "measure": "ms per call by listener, first open vs later opens; a scripted open/close sequence makes it repeatable.",
-      "notes": "Motivated by the user's observation on 2026-09-20. 8 ms of script in one frame is ~2 frames at 215 fps. GEN-5 2026-09-20 agent/gen5-I058 f76f25f. Attribution from the moving run: each event callback is ONE listener - ActorMenu_on_before_init_mode = ui_inventory.script:93 (4-37 ms per open, bimodal), actor_on_leave_dialog = ui_pda_encyclopedia_tab:407 (7-8.7 ms on an article unlock), actor_on_jump/land = eft_jump_sounds:71/89 and actor_on_footstep = footstep_sounds:87 (fresh sound_object per call). Cuts proposed: prewarm UIInventory() after level load; memoize sound_objects by path. Instrument: lab/profiler-hitch (max per call, 14-bucket log2 histogram, first slow call, run-scoped so it survives the dropped first window), overhead 0.96x, overlays alao-profiler-hitch[-listeners-inv], profile_report --hitch, runner untouched. Proposed hitch bar: >= 5 ms off the worst single call of a routine player action. Attended request PREPARED at lab/coord/overlays/i058-hitch-request.json, needs the user."
+      "notes": "Motivated by the user's observation on 2026-09-20. 8 ms of script in one frame is ~2 frames at 215 fps. GEN-5 2026-09-20 agent/gen5-I058 f76f25f. Attribution from the moving run: each event callback is ONE listener - ActorMenu_on_before_init_mode = ui_inventory.script:93 (4-37 ms per open, bimodal), actor_on_leave_dialog = ui_pda_encyclopedia_tab:407 (7-8.7 ms on an article unlock), actor_on_jump/land = eft_jump_sounds:71/89 and actor_on_footstep = footstep_sounds:87 (fresh sound_object per call). Cuts proposed: prewarm UIInventory() after level load; memoize sound_objects by path. Instrument: lab/profiler-hitch (max per call, 14-bucket log2 histogram, first slow call, run-scoped so it survives the dropped first window), overhead 0.96x, overlays alao-profiler-hitch[-listeners-inv], profile_report --hitch, runner untouched. Proposed hitch bar: >= 5 ms off the worst single call of a routine player action. Attended request PREPARED at lab/coord/overlays/i058-hitch-request.json, needs the user. ATTENDED RUN 2026-09-20, 20260920-125528-I-058-f5edb8, 4 captures, worst call per capture in ms: inventory open ui_inventory.script:93 11.4 / 10.1 / 18.5 / 8.4 and it is the FIRST open every time, later opens 3.2-6.4; leave_dialog ui_pda_encyclopedia_tab:407 9.5 / 7.0 / 6.5 / 6.4 every time; jump 3.5 / 3.1 / 0.9 / 0.9, land 3.0 / 1.2 / 0.8 / 1.2, footstep 4.5 / 2.7 / 0.9 / 0.8 (cold sound_object). Also info_portions.script:58 4.5-5.4, ui_hud_dotmarks.script:5924 7.3 once, and one 54 ms frame in actor_on_update#lam2.script:271. The user ADOPTED the 5 ms bar with a refinement: it is about what lands in one frame, cold costs stack, so everything cold is worth pre-loading. Follow-up is I-063."
     },
     {
       "id": "I-059",
@@ -914,6 +914,21 @@
       "change": "Wrap a short list of engine-called globals in the profiler; size it on the busy-hub save.",
       "measure": "us/frame in a crowd.",
       "notes": "Found by agent-I056. Needs I-053. Related: SYS_GetParam is uncached on Modded Exes too, ~10-19 reads/frame (weapon_cover_tilt, fluid_aim, ssfx_weapons_dof, arti_jamming), est. 5-10 us."
+    },
+    {
+      "id": "I-063",
+      "title": "Prewarm bundle for player-triggered hitches",
+      "category": "structural",
+      "generation": 6,
+      "parent": "I-058",
+      "status": "proposed",
+      "score": 9.0,
+      "risk": "medium",
+      "expected_gain": "high",
+      "hypothesis": "First inventory open costs 8-18 ms against 3-6 for later opens; first jump / land / footstep 3-4.5 ms against under 1; these cold costs land in or near the same frame in real play.",
+      "change": "One monkey-patch mod (lab/mods/alao-prewarm): construct UIInventory() behind the loading screen, pooled path-keyed sound_object cache prefilled for the movement sound set, encyclopedia unlock path, a sweep for other cold-signature listeners, lam2.script:271 diagnosis. Prewarm cost must land behind the loading screen or be sliced to <= 0.5 ms/frame.",
+      "measure": "hitch profiler, attended run, per-call max and first-call cost per listener; summed cold cost moved out of play.",
+      "notes": "agent-I063 started 2026-09-20 off main a53b908, overlay on top of agent-I057-b."
     }
   ]
 }
