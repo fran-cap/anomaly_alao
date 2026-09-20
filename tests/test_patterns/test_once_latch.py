@@ -73,6 +73,20 @@ local function actor_on_update()
 end
 """
 
+# a `do` block is not a loop, so the latch is still dead
+LATCH_ACROSS_A_DO_BLOCK = """
+function actor_on_update()
+    local once = false
+    do
+        if not once then
+            expensive()
+            also()
+            once = true
+        end
+    end
+end
+"""
+
 METHOD_UPDATE_LATCH = """
 function binder:update(delta)
     local once = false
@@ -292,6 +306,11 @@ def test_local_function_callback_is_reported(analyze):
     f = find_one(analyze(LOCAL_FUNCTION_LATCH), PATTERN)
     assert f.details["is_per_frame"] is True
     assert f.details["function_name"] == "actor_on_update"
+
+
+def test_a_do_block_between_the_flag_and_the_guard_is_not_a_loop(analyze):
+    f = find_one(analyze(LATCH_ACROSS_A_DO_BLOCK), PATTERN)
+    assert f.details["flag_name"] == "once"
 
 
 def test_binder_update_method_is_reported(analyze):
