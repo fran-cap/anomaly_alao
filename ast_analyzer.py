@@ -4623,6 +4623,16 @@ class ASTAnalyzer:
             hot = label in HOT_CALLBACKS or short in HOT_CALLBACKS
             per_frame = is_per_frame(fnode, short) or hot
 
+            # cheap prefilter: a latch needs the name three times (declare,
+            # read in the guard, flip). Without this, every `local x = nil` in
+            # the corpus pays for a full scan of the rest of its block, which
+            # cost ~7% of analyze time.
+            fstart, fend = self._get_line(fnode), self._get_end_line(fnode)
+            if fend <= fstart:
+                ftext = '\n'.join(self.source_lines)   # no token span, don't guess
+            else:
+                ftext = '\n'.join(self.source_lines[max(0, fstart - 1):fend])
+
             blocks = []
             scan_blocks(fnode.body, blocks)
             for stmts in blocks:
@@ -4639,6 +4649,8 @@ class ASTAnalyzer:
                     if kind is None:
                         continue
                     flag = targets[0].id
+                    if ftext.count(flag) < 3:
+                        continue
                     hit = analyse_candidate(flag, kind, stmts[i + 1:])
                     if not hit:
                         continue
