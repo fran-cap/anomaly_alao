@@ -138,10 +138,43 @@ option keys are false-valued, so the class is common — it just is not read per
 
 ## 4. Bench — `lab/tools/i056_bench.py`
 
-See the numbers section below. Protocol: beam-ideas s.2 with the gen-4 correction — fresh
-`LuaRuntime` per arm per mode, `jit.off()` with no arguments before the chunk loads for the
-interpreted arm plus the self-check, `collectgarbage()` before every timed run, best of 9,
-N stated. Locks verified free before and after.
+Protocol: beam-ideas s.2 with the gen-4 correction — fresh `LuaRuntime` per arm per mode,
+`jit.off()` with no arguments before the chunk loads for the interpreted arm, self-check
+(compiled 1.48 ms / interpreted 6.75 ms = 4.6x, the known scalar-loop figure),
+`collectgarbage()` before every timed run, best of 9, **N = 300 000 reads per run**. Run
+2026-09-20 16:29-16:31 UTC with **all four locks verified free immediately before and
+immediately after** (`corpus`, `extract`, `game`, `ideas`).
+
+Four arms, all driven through the real accessor chain (`ui_options.get` / `ui_mcm.get` ->
+`cfg:r_value`): `live` = `new_ini_file_ex` (no cache), `vanilla` = `_g.script`'s class with the
+false-hole, `fixed` = the same with a presence test + absent-key sentinel, `cached` = a perfect
+memo (ceiling).
+
+`stealth/icon` (false-valued, 2 crossings per read on the live class):
+
+| arm | Lua us/read (JIT on) | Lua us/read (JIT off) | crossings | total us/read @0.25 | saved vs live |
+|---|---:|---:|---:|---:|---:|
+| live | 0.0849 | 0.0865 | 2.00 | 0.585 | — |
+| vanilla | 0.1145 | 0.1133 | 2.00 | 0.615 | **-0.030** (slower) |
+| fixed | 0.0376 | 0.0380 | 0.00 | 0.038 | **+0.547** |
+| cached | 0.0363 | 0.0359 | 0.00 | 0.036 | +0.549 |
+
+`body_health_system/TEXT_BASED_PATCH` (false-valued) reproduces it: live 0.591, vanilla 0.621,
+fixed 0.040, **saved 0.550 us/read**.
+
+`control/general/aim_toggle` (**absent key**, 1 crossing — `line_exist` returns false and
+`r_string` is never reached): live 0.300, vanilla 0.316, fixed 0.037, **saved 0.262 us/read**.
+
+Three things fall out of this:
+
+1. **JIT on and JIT off are within noise of each other in every arm.** The accessor chain
+   contains `s.."&"..k` and `"stealth/"..key`; `BC_CAT` is NYI in LuaJIT 2.0, so no loop over
+   this path ever compiles, in the bench or in the game. The mode question does not arise here.
+2. **The vanilla class is ~0.03 us/read *slower* than the live class**, because its cache probe
+   is a concat plus a table lookup that can never hit for these keys. The false-hole does not
+   merely fail to help, it is a small net cost.
+3. **The whole saving is the two crossings**, 0.5 of the 0.55 us at the assumed price. The
+   measured Lua term is 0.04-0.09 us — small enough that a 3x error in it moves nothing.
 
 **What the bench cannot see.** `line_exist` and `r_string` are luabind calls into the engine's
 `CInifile`; here they are Lua closures over a Lua table. The measured delta is the **Lua side
@@ -152,17 +185,24 @@ conservative *for the idea* — it understates what a cache would save. `--cross
 
 ## 5. Site arithmetic
 
-3 reads/frame x (saving per read). With the 0.25 us/crossing assumption the saving is ~0.55 us
-for a false-valued read (2 crossings removed) and ~0.26 us for an absent key (1 crossing), so:
+Three reads per frame standing still: two false-valued (0.550 and 0.547 us saved each) and one
+absent key (0.262 us saved), all at the 0.25 us/crossing assumption.
 
-- **~1.4 us/frame** at the assumed crossing price.
-- **~5 us/frame** if a real `r_string` crossing costs 1 us instead of 0.25 (4x the assumption).
-- **~11 us/frame** even at an absurd 2.5 us/crossing (10x).
+| assumed price of one crossing | saved per frame | vs the 25 us bar |
+|---|---:|---|
+| 0.25 us (I-050b pessimistic read, the assumption) | **1.36 us** | 5% of the bar |
+| 1.00 us (4x) | **5.1 us** | 20% |
+| 2.50 us (10x) | **12.6 us** | 50%, still below the 15 us "profiler can tell" band |
+| 3.30 us (13x) | 16.5 us | first value that reaches 15 us |
+
+Add `ph_sound`'s `sound/radio/zone` per active scripted sound source and it moves by one read per
+source — and that key is `true`, so it hits even the vanilla cache and a fix buys nothing there.
 
 Against a measured ~310 us/frame script budget in the gen-4 combined arm and a **25 us/frame**
 bar. It does not clear, and it does not reach the 15 us "only the profiler can tell" band either
-unless a single `r_string` crossing costs more than 3 us, which no measurement on this project
-suggests.
+unless a single `r_string` crossing costs more than 3.3 us — 13x the number the team agreed to
+price crossings at, and 4x what I-050b's *whole* 59-crossing removal implies (16 us / 59 =
+0.27 us per crossing, measured in game). No FPS run requested.
 
 ## 6. What this is worth anyway
 
