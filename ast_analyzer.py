@@ -2443,6 +2443,7 @@ class ASTAnalyzer:
         self._analyze_distance_to_comparisons()
         self._analyze_vector_allocations_in_loops()
         self._analyze_pairs_to_ipairs()
+        self._detect_once_latch_local_to_function()
 
     def _find_local_var_info(self, scope: Optional[Scope], name: str) -> Optional[LocalVarInfo]:
         """Walk up the scope chain for the LocalVarInfo a name resolves to."""
@@ -4450,6 +4451,247 @@ class ASTAnalyzer:
                     },
                     source_line=self._get_source_line(info.assign_line),
                 ))
+
+    def _detect_once_latch_local_to_function(self):
+        """RED: a "do once" latch declared `local` INSIDE a function body.
+
+        The shape (zzz_player_injuries.script, on the actor_on_update path):
+
+            local hidehudonce = false
+            if hide_default_hud and not hidehudonce then
+                ... one-time work ...
+                hidehudonce = true
+            end
+
+        The author meant "do this once". The flag is a fresh local on every
+        call, so `not hidehudonce` is always true and the guarded block runs on
+        every call - every frame, when the body is a per-frame callback. The
+        assignment is dead: nothing can read it again in the same call.
+        Hoisting the flag to module level (or dropping the latch) is a semantic
+        change, so this is report-only and never auto-fixed.
+
+        I am deliberately strict here, because a wrong RED costs a modder real
+        time. Everything below has to hold:
+
+        - the declaration is a single `local f = false|nil|true` inside a
+          function body (at chunk level the latch works fine),
+        - every read of `f` after it is in the condition of ONE `if`, and that
+          `if` has no elseif/else,
+        - exactly one assignment to `f`, the LAST statement of that if body,
+          writing the opposite constant,
+        - that if body does more than just flip the flag,
+        - nothing between the declaration and the `if` is a loop - a latch
+          declared outside a loop and flipped inside it is a perfectly good
+          do-once-per-call / break-out flag,
+        - no closure in the region mentions `f` (it could outlive the call),
+          and `f` is not re-declared.
+        """
+        loop_types = (While, Repeat, Fornum, Forin)
+        func_types = (Function, LocalFunction, Method, AnonymousFunction)
+
+        def mentions(node, flag) -> bool:
+            """Does this subtree reference the name `flag` at all?"""
+            if isinstance(node, Name) and node.id == flag:
+                return True
+            for child in self._iter_children(node):
+                if isinstance(child, (Node, list)) and mentions(child, flag):
+                    return True
+            return False
+
+        def const_kind(node) -> Optional[str]:
+            if isinstance(node, (FalseExpr, Nil)):
+                return 'falsy'
+            if isinstance(node, TrueExpr):
+                return 'truthy'
+            return None
+
+        def analyse_candidate(flag, decl_kind, region):
+            """`region` is the statement list the local is visible in."""
+            state = {'reads': [], 'writes': [], 'bad': False}
+
+            def scan(node, depth, test_of):
+                if state['bad'] or node is None:
+                    return
+                if isinstance(node, list):
+                    for item in node:
+                        scan(item, depth, test_of)
+                    return
+                if not isinstance(node, Node):
+                    return
+                if isinstance(node, func_types):
+                    # a closure can outlive the call; if it can see the flag,
+                    # the latch may well be doing something real
+                    if mentions(node, flag):
+                        state['bad'] = True
+                    return
+                if isinstance(node, LocalAssign):
+                    for t in (node.targets or []):
+                        if isinstance(t, Name) and t.id == flag:
+                            state['bad'] = True      # shadowed / re-declared
+                            return
+                    scan(node.values, depth, test_of)
+                    return
+                if isinstance(node, Assign):
+                    targets = node.targets or []
+                    values = node.values or []
+                    if any(isinstance(t, Name) and t.id == flag for t in targets):
+                        if len(targets) != 1 or len(values) != 1:
+                            state['bad'] = True      # multi-assign, not a latch
+                            return
+                        state['writes'].append((node, values[0], depth))
+                    else:
+                        scan(targets, depth, test_of)
+                    scan(values, depth, test_of)
+                    return
+                if isinstance(node, If):
+                    scan(node.test, depth, node)
+                    scan(node.body, depth, None)
+                    scan(node.orelse, depth, None)
+                    return
+                if isinstance(node, loop_types):
+                    for child in self._iter_children(node):
+                        scan(child, depth + 1, None)
+                    return
+                if isinstance(node, Name):
+                    if node.id == flag:
+                        state['reads'].append((node, depth, test_of))
+                    return
+                for child in self._iter_children(node):
+                    scan(child, depth, test_of)
+
+            scan(region, 0, None)
+            if state['bad'] or not state['reads'] or len(state['writes']) != 1:
+                return None
+            if any(t is None or d != 0 for _, d, t in state['reads']):
+                return None      # read outside an if test, or from inside a loop
+            if len({id(t) for _, _, t in state['reads']}) != 1:
+                return None      # more than one guard reads it
+
+            guard = state['reads'][0][2]
+            if guard.orelse:
+                return None
+            assign_node, assign_value, assign_depth = state['writes'][0]
+            if assign_depth != 0:
+                return None
+            kind = const_kind(assign_value)
+            if kind is None or kind == decl_kind:
+                return None      # not a constant, or not a flip
+
+            body = guard.body.body if isinstance(guard.body, Block) else guard.body
+            if not isinstance(body, list) or len(body) < 2:
+                return None      # nothing guarded but the flip itself
+            if body[-1] is not assign_node:
+                return None      # the flip is not the tail of the guard
+            return guard, assign_node, len(body) - 1
+
+        def scan_blocks(node, out):
+            """Every statement list inside one function body, closures aside."""
+            if isinstance(node, list):
+                out.append(node)
+                for item in node:
+                    scan_blocks(item, out)
+                return
+            if not isinstance(node, Node) or isinstance(node, func_types):
+                return
+            if isinstance(node, Block):
+                scan_blocks(node.body, out)
+                return
+            for child in self._iter_children(node):
+                scan_blocks(child, out)
+
+        def func_label(node):
+            if isinstance(node, Method):
+                name = self._node_to_string(node.name) if node.name else '<method>'
+                owner = self._node_to_string(node.source) if getattr(node, 'source', None) else ''
+                short = name.rsplit('.', 1)[-1]
+                return (f'{owner}:{short}' if owner else name), short
+            if isinstance(node, LocalFunction):
+                name = node.name.id if isinstance(node.name, Name) else '<local>'
+                return name, name
+            if isinstance(node, Function):
+                name = self._node_to_string(node.name) if node.name else '<anon>'
+                return name, name.rsplit('.', 1)[-1]
+            return '<anonymous function>', ''
+
+        def is_per_frame(node, short) -> bool:
+            if isinstance(node, Method):
+                return short in PER_FRAME_METHOD_NAMES or _is_per_frame_callback_name(short)
+            return _is_per_frame_callback_name(short)
+
+        def handle_function(fnode):
+            label, short = func_label(fnode)
+            hot = label in HOT_CALLBACKS or short in HOT_CALLBACKS
+            per_frame = is_per_frame(fnode, short) or hot
+
+            blocks = []
+            scan_blocks(fnode.body, blocks)
+            for stmts in blocks:
+                for i, stmt in enumerate(stmts):
+                    if not isinstance(stmt, LocalAssign):
+                        continue
+                    targets = stmt.targets or []
+                    values = stmt.values or []
+                    if len(targets) != 1 or len(values) != 1:
+                        continue
+                    if not isinstance(targets[0], Name):
+                        continue
+                    kind = const_kind(values[0])
+                    if kind is None:
+                        continue
+                    flag = targets[0].id
+                    hit = analyse_candidate(flag, kind, stmts[i + 1:])
+                    if not hit:
+                        continue
+                    guard, assign_node, guarded = hit
+                    decl_line = self._get_line(stmt)
+                    guard_line = self._get_line(guard)
+                    assign_line = self._get_line(assign_node)
+                    where = 'per-frame body' if per_frame else 'function'
+                    cost = ('so the guarded block runs every frame'
+                            if per_frame
+                            else 'so the guarded block runs on every call')
+                    self.findings.append(Finding(
+                        pattern_name='once_latch_local_to_function',
+                        severity='RED',
+                        line_num=decl_line,
+                        message=(
+                            f"Do-once latch '{flag}' is a local of {where} "
+                            f"{label} - it resets on every call, {cost} "
+                            f"(guard on line {guard_line}, {guarded} guarded "
+                            f"statement(s)); '{flag} = ...' on line "
+                            f"{assign_line} is never read again"
+                        ),
+                        details={
+                            'flag_name': flag,
+                            'decl_line': decl_line,
+                            'guard_line': guard_line,
+                            'assign_line': assign_line,
+                            'function_name': label,
+                            'is_per_frame': bool(per_frame),
+                            'guarded_statements': guarded,
+                            'suggestion': (
+                                f"hoist '{flag}' to module level if the work really is "
+                                f"once-per-session, or drop the latch"
+                            ),
+                        },
+                        source_line=self._get_source_line(decl_line),
+                    ))
+
+        def walk_functions(node):
+            if node is None:
+                return
+            if isinstance(node, list):
+                for item in node:
+                    walk_functions(item)
+                return
+            if not isinstance(node, Node):
+                return
+            if isinstance(node, func_types):
+                handle_function(node)
+            for child in self._iter_children(node):
+                walk_functions(child)
+
+        walk_functions(self._ast_tree)
 
     def _analyze_per_frame_callbacks(self):
         """Analyze per-frame callbacks and flag them with performance info.
