@@ -1,0 +1,625 @@
+-- ALAO prewarm bundle (idea I-063).  One script, no game file replaced.
+--
+-- WHAT IS SLOW, and why prewarming is the right shape of fix
+--
+-- The I-058 hitch profiler (attended run 20260920-125528-I-058-f5edb8, four
+-- captures) says the worst single calls of ordinary player actions are:
+--
+--   ActorMenu_on_before_init_mode#ui_inventory.script:93   11.4 / 10.1 / 18.5 / 8.4 ms
+--       and in EVERY capture that worst call was the FIRST inventory open of
+--       the session; every later open in the same session is 3.2-6.4 ms.
+--   actor_on_leave_dialog#ui_pda_encyclopedia_tab.script:407  9.5 / 7.0 / 6.5 / 6.4 ms
+--       one call per capture, the one where an article was unlocked.
+--   actor_on_jump#eft_jump_sounds.script:71   3.5 / 3.1 / 0.9 / 0.9 ms
+--   actor_on_land#eft_jump_sounds.script:89   3.0 / 1.2 / 0.8 / 1.2 ms
+--   actor_on_footstep#footstep_sounds.script:87  4.5 / 2.7 / 0.9 / 0.8 ms
+--
+-- Reading the three sources, all five are the same bug in three costumes: a
+-- resource that is built lazily, on the frame the player asked for something.
+--
+--   * `ui_inventory.start()` does `if (not GUI) then GUI = UIInventory() end`.
+--     `UIInventory:__init` runs `InitControls`, which is one
+--     `CScriptXmlInit():ParseFile("ui_inventory.xml")` plus several hundred
+--     widget constructions and six `utils_ui.UICellContainer`s.  `GUI` is only
+--     dropped again in `UIInventory:actor_on_net_destroy`, i.e. on a level
+--     change, so this is once per level load, on the frame you pressed I.
+--   * `ui_pda_encyclopedia_tab.set_article()` starts with `local guide =
+--     get_ui()`, and `get_ui` is `SINGLETON = SINGLETON or
+--     pda_encyclopedia_tab()`.  That constructor parses `pda_encyclopedia.xml`
+--     and runs `InitCategories()` over every encyclopedia category.  The first
+--     article unlock of the session pays for it.
+--   * `eft_jump_sounds` and `footstep_sounds` build a FRESH `sound_object(path)`
+--     on every single call and throw it away.  Since the Lua side keeps
+--     nothing, the only thing that can explain "first ~4 ms, later under 1 ms"
+--     is engine-side state keyed by the sound's path.  Constructing each path
+--     once is therefore enough to warm it; the scripts keep doing exactly what
+--     they did.
+--
+-- WHAT THIS MOD DOES
+--
+-- All of it at `actor_on_first_update` - frame 7 of the level load, with the
+-- loading screen still up; the profiler puts `on_loading_screen_key_prompt` at
+-- frame ~62, so there are ~55 frames of screen left:
+--
+--   1. build `ui_inventory.GUI` if it is nil,
+--   2. call `ui_pda_encyclopedia_tab.get_ui()`,
+--   3. construct every sound path those three sound scripts can ever ask for.
+--
+-- WHY THE SLICER IS OFF (measured, 20260920-165259-I-063-953526)
+--
+-- Version 1.0 time-sliced step 3 onto `actor_on_update` with a 0.5 ms/frame
+-- construction budget.  That was wrong, and the attended run said so: in the
+-- cold capture, `actor_on_update#zzz_alao_prewarm.script` had 109 slices over
+-- the 0.1 ms floor - 37 frames at 1.6-3.2 ms, 27 at 3.2-6.4, 3 at 6.4-12.8,
+-- worst 17.7 ms - spread over ~110 frames from frame 7, so about half of them
+-- landed AFTER the key prompt, in the player's face.  Blind to the arm order,
+-- the player called that capture the worst of the four.
+--
+-- The reason is simple and it kills the whole idea of a time budget here: ONE
+-- cold `sound_object(path)` costs 2-18 ms.  A budget can only decide whether to
+-- start another item, never how long the one it starts will take, so a 0.5 ms
+-- budget does not bound a slice - it just guarantees exactly one cold load per
+-- frame, for a hundred frames.  Smaller budget, same hitches, more of them.
+--
+-- So step 3 runs synchronously too.  It costs ~250-300 ms on a cold OS file
+-- cache and near zero once warm, on an `actor_on_first_update` that already
+-- costs ~1.3 s behind a loading screen nobody is looking at.  The measured
+-- first_update row went 43.9 -> 44.7 ms for the mod's own listener in the
+-- sliced build; folding the queue in moves the rest there too.
+--
+-- `SLICE_SOUNDS` keeps the old path as an escape hatch.  It defaults off and
+-- should stay off.
+--
+-- WHAT IT DOES NOT DO
+--
+-- It replaces no file and patches no function.  It calls two public entry
+-- points of two other mods and constructs sound objects.  Disabling it changes
+-- nothing except when the work happens.
+--
+-- BEHAVIOURAL NON-IDENTITIES, stated plainly (see README.md for the long form)
+--
+--   a) `UIInventory:__init` ends with twelve `RegisterScriptCallback(...,self)`
+--      lines.  Building GUI early means those twelve listeners exist from the
+--      loading screen instead of from the first inventory open.  Three of them
+--      (`actor_item_to_ruck`, `actor_item_to_slot`, `actor_on_item_drop`) do
+--      work OUTSIDE their `if self:IsShown()` guard - the "unequip artefacts /
+--      helmet / backpack when the outfit goes away" rules - and two of them
+--      (`npc_on_use`, `physic_object_on_use_callback`) call `start("loot", obj)`.
+--      So with this mod the FIRST corpse you loot and the FIRST outfit you take
+--      off in a session behave the way the second one already did.  That is the
+--      mod author's steady-state behaviour, reached one event earlier.
+--   b) The sound objects are kept alive in a table and NEVER played.  Nothing
+--      reads them; they exist only so the engine keeps the resource.
+--   c) `get_ui()` builds the encyclopedia tab with the article set as of load.
+--      Every later `set_article` calls `guide:InitCategories()`, which rebuilds
+--      the list from scratch, so nothing goes stale.
+--
+-- WHAT IS NOT VERIFIED OFFLINE
+--
+--   * That the engine's sound cost really is path-keyed and survives with the
+--     object merely held (the Lua side gives no way to ask).  The evidence is
+--     the profile above; the in-game A/B decides it.
+--   * The size of each win.  These are engine-side costs; there is no honest
+--     microbenchmark for them.  What is countable is what moves: one
+--     `UIInventory()`, one `pda_encyclopedia_tab()` and N `sound_object()`
+--     constructions, out of play and into the loading screen.
+
+local VERSION = "1.3"
+
+-- ---------------------------------------------------------------------------
+-- configuration
+-- ---------------------------------------------------------------------------
+
+local PREWARM_INVENTORY    = true
+local PREWARM_ENCYCLOPEDIA = true
+local PREWARM_SOUNDS       = true
+
+-- v1.2, TARGET 1.  Grow the actor_bag cell pool behind the loading screen.
+--
+-- The v1.0 inventory prewarm was a no-op on GAMMA, because FDDA Redone
+-- (custom_functor_autoinject.script:435) and SortingPlus
+-- (zzz_rax_sortingplus_mcm.script:108) both build ui_inventory.GUI at
+-- actor_on_first_update already.  But they build the OBJECT with an EMPTY cell
+-- pool, and the per-call trace of the walk-out run 20260920-185607-I-062-a1c78b
+-- shows that the pool is the actual cost:
+--
+--   open 1   cells 0 -> 19, grid 0 -> 7    17.4 / 9.2 / 7.9 / 12.0 ms
+--   every later open, cells 19 -> 19, grid 7 -> 7    3.5 - 4.9 ms
+--
+-- So grow the pool at first update instead.  See the README for why this fires
+-- no callback anybody listens to.
+local PREWARM_INV_POOL     = true
+-- Spare empty cells to build beyond what the ruck needs right now, so the first
+-- few loots do not have to grow the pool either.  Each one is one UICellItem,
+-- i.e. four xml:InitStatic calls, paid at frame 7.  0 disables headroom.
+local POOL_HEADROOM        = 12
+
+-- v1.3.  The grid is the OTHER high-water mark, and v1.2 missed it: the run
+-- 20260920-194429-I-063-d9e519 traced the variant's first open as
+-- `cells 31 -> 31, grid 3 -> 7` - the cells were pre-built but the grid still
+-- had to grow.
+--
+-- Why 3 and not 7: cell placement depends on the sort method, and
+-- `UICellContainer:GetSortMethod` falls back to `sort_by_sizekind` when
+-- `sort_method` is nil.  SortingPlus sets it (`zzz_rax_sortingplus_mcm.script`
+-- :115) in ITS actor_on_first_update, and `zzz_alao_prewarm` sorts before
+-- `zzz_rax_sortingplus_mcm` alphabetically, so this mod's listener runs FIRST
+-- and lays the pool out under a different sort than the real open then uses.
+-- Under `sort_by_kind` every new kind group starts a fresh row
+-- (`FindFreeCell` does `self.rKind.row = self.row_end + 1`), which is why the
+-- real open needs more rows than a dense sizekind layout.
+--
+-- Rather than chase the sort order, over-provision: `UICellContainer:Grow` is
+--
+--     local rows = #self.grid + 1
+--     self.grid[rows] = {}
+--     for i = 1, self.cols do self.grid[rows][i] = true end
+--
+-- i.e. one Lua table and `cols` booleans.  No static, no texture, no engine
+-- call of any kind.  Grid rows are free, so buy plenty: enough that even a
+-- one-row-per-stack layout fits without a single Grow() at open time.
+local GRID_ROWS_PER_CELL   = 1.0
+local GRID_MIN_ROWS        = 8
+
+-- v1.2, TARGET 2.  Warm the engine's tutorial sequencer.
+--
+-- bind_campfire.script:176 (G.A.M.M.A. Cooking Overhaul) calls
+-- game.start_tutorial("tutorial_campfire_ignite" / "_extinguish") when the actor
+-- walks near a campfire.  In the walk-out run that listener had EXACTLY ONE call
+-- of 705 / 716 ms per capture - a 786 ms frame, which the player felt - and
+-- every other call was under 0.8 ms.  One call per session, whichever tutorial
+-- came first, is the signature of a one-time engine cost: the tutorial
+-- sequencer parsing ui\game_tutorials.xml and loading its UI.
+--
+-- So start and immediately stop a tutorial at first update, behind the loading
+-- screen.  TUTORIAL_NAME is the no-op sequence this mod injects into
+-- game_tutorials.xml through DXML (modxml_zzz_alao_prewarm_tutorial.script);
+-- point it at an existing tutorial only if that injection is unavailable.
+local PREWARM_TUTORIAL     = true
+local TUTORIAL_NAME        = "alao_prewarm_noop"
+
+-- Time-slice the sound queue onto actor_on_update instead of building it in
+-- one go at first update.  DEFAULT OFF, and it should stay off: see the
+-- "why the slicer is off" note above.  It is kept only as an escape hatch for
+-- an install where a ~300 ms first_update is somehow a problem.
+local SLICE_SOUNDS         = false
+
+-- Only used when SLICE_SOUNDS is on.
+local BUDGET_MS            = 0.5
+-- If the timer cannot be calibrated, fall back to this many items per frame.
+local FALLBACK_BATCH       = 6
+-- Never slice for longer than this many frames, whatever happens.
+local MAX_SLICE_FRAMES     = 1200
+-- How long to spend calibrating profile_timer against os.clock, milliseconds.
+local CALIB_MS             = 40
+
+local VERBOSE              = true
+
+-- `jump_sound = sound_object("jump\\jump_" .. material .. math.random(5))` and
+-- `land_sound = sound_object("landing\\landing_" .. material .. math.random(3))`
+-- in eft_jump_sounds.script.  The 5 and the 3 are literals in that file, so
+-- they are literals here; everything else is read out of the live mod's tables.
+local JUMP_VARIANTS = 5
+local LAND_VARIANTS = 3
+
+-- footstep_sounds.script and eft_jump_sounds.script both index a file-local
+-- `exo_classes` that this mod cannot reach.  These are the values it can hold
+-- on the shipped mods ("light" / "medium"), and every construction is pcall'd,
+-- so a path that does not exist on someone's install costs one failed call.
+local EXO_CLASSES = {"light", "medium"}
+
+-- ---------------------------------------------------------------------------
+-- state
+-- ---------------------------------------------------------------------------
+
+local timer          = nil
+local units_per_ms   = nil
+local budget_units   = nil
+
+local queue          = {}     -- sound paths still to construct
+local qi             = 1
+local warm           = {}     -- constructed sound_objects, held so the engine keeps them
+local failed         = 0
+local slicing        = false
+local slice_frames   = 0
+local sounds_done    = false
+
+local report         = {}     -- one line per thing done, printed when we finish
+
+local function note(fmt, ...)
+	report[#report + 1] = strformat and strformat(fmt, ...) or string.format(fmt, ...)
+end
+
+-- ---------------------------------------------------------------------------
+-- timer
+-- ---------------------------------------------------------------------------
+
+-- Same trick as the I-048 profiler: profile_timer's units are not documented,
+-- so measure them against os.clock instead of assuming.  time_global() is no
+-- use here - it only advances once per frame.
+local function calibrate()
+	if not profile_timer then return nil end
+	local t = profile_timer()
+	local c0 = os.clock()
+	local c1 = c0
+	t:start()
+	while (c1 - c0) * 1000 < CALIB_MS do
+		c1 = os.clock()
+	end
+	t:stop()
+	local ms = (c1 - c0) * 1000
+	local u = t:time()
+	if ms <= 0 or u <= 0 then return nil end
+	return u / ms
+end
+
+-- ---------------------------------------------------------------------------
+-- the sound path set
+-- ---------------------------------------------------------------------------
+
+local function distinct_values(t)
+	local seen, out = {}, {}
+	if type(t) ~= "table" then return out end
+	for _, v in pairs(t) do
+		if type(v) == "string" and not seen[v] then
+			seen[v] = true
+			out[#out + 1] = v
+		end
+	end
+	return out
+end
+
+local function push(path)
+	queue[#queue + 1] = path
+end
+
+-- Built from the LIVE tables of whichever copy of those scripts won the load
+-- order, so this follows the mod rather than a hardcoded list.
+local function build_sound_queue()
+	local ej = rawget(_G, "eft_jump_sounds") or eft_jump_sounds
+	if type(ej) == "table" and type(ej.available_materials) == "table" then
+		local mats = distinct_values(ej.available_materials)
+		for _, m in ipairs(mats) do
+			for i = 1, JUMP_VARIANTS do push("jump\\jump_" .. m .. i) end
+			for i = 1, LAND_VARIANTS do push("landing\\landing_" .. m .. i) end
+		end
+		note("jump/land: %s materials", #mats)
+		for _, c in ipairs(EXO_CLASSES) do
+			push("exo-gear-walk-jump-land\\servo_exo_jump_" .. c)
+			push("exo-gear-walk-jump-land\\servo_exo_land_" .. c)
+		end
+	else
+		note("jump/land: eft_jump_sounds.available_materials missing, skipped")
+	end
+
+	local fs = rawget(_G, "footstep_sounds") or footstep_sounds
+	if type(fs) == "table" and type(fs.limit) == "table" then
+		local lim = fs.limit
+
+		-- `sound_object("footstep\\" .. move_state .. material .. n)`.
+		-- move_state is always "n_" in the shipped file (every other entry of
+		-- `limit` is commented out), and water_ is handled by the engine.
+		local n_lim = lim["n_"]
+		if n_lim and type(fs.available_materials) == "table" then
+			local mats = distinct_values(fs.available_materials)
+			local cnt = 0
+			for _, m in ipairs(mats) do
+				if m ~= "water_" then
+					cnt = cnt + 1
+					for i = 1, n_lim do push("footstep\\n_" .. m .. i) end
+				end
+			end
+			note("footsteps: %s materials x %s samples", cnt, n_lim)
+		end
+
+		-- cloth\cloth_N and gear_rattle\gear_rattle_N: in `limit` the keys that
+		-- already carry their own folder are exactly the `extra_sounds` ones.
+		for k, v in pairs(lim) do
+			if type(k) == "string" and string.find(k, "\\", 1, true) then
+				for i = 1, v do push(k .. i) end
+			end
+		end
+
+		-- ladder\<material><part><N>
+		if type(fs.ladder_materials) == "table" then
+			for _, m in ipairs(distinct_values(fs.ladder_materials)) do
+				for _, part in ipairs({"foot-0", "hand-0"}) do
+					local class = m .. part
+					local l = lim[class]
+					if l then
+						for i = 1, l do push("ladder\\" .. class .. i) end
+					end
+				end
+			end
+		end
+
+		for _, c in ipairs(EXO_CLASSES) do
+			push("exo-gear-walk-jump-land\\servo_exo_walk_" .. c .. "_1")
+			push("exo-gear-walk-jump-land\\servo_exo_walk_" .. c .. "_2")
+		end
+	else
+		note("footsteps: footstep_sounds.limit missing, skipped")
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- the indivisible prewarms
+-- ---------------------------------------------------------------------------
+
+local function prewarm_inventory()
+	local m = rawget(_G, "ui_inventory") or ui_inventory
+	if type(m) ~= "table" then return note("inventory: no ui_inventory module") end
+	if m.GUI then return note("inventory: GUI already built, nothing to do") end
+	if type(m.UIInventory) ~= "function" and type(m.UIInventory) ~= "table" then
+		return note("inventory: no UIInventory class")
+	end
+	local ok, gui = pcall(m.UIInventory)
+	if ok and gui then
+		m.GUI = gui
+		note("inventory: UIInventory() built")
+	else
+		note("inventory: UIInventory() FAILED: %s", tostring(gui))
+	end
+end
+
+-- TARGET 1: grow CC["actor_bag"]'s cell pool and grid to cover the ruck.
+--
+-- Only actor_bag is lazy.  `IMode_ResetInventories` is one line -
+-- `self.CC["actor_bag"]:Reinit(self:ParseInventory(db.actor))` - and it is the
+-- ONLY Reinit an "inventory" mode open performs; actor_equ, actor_belt and
+-- actor_quick get their cells in InitControls via AddItemManual, so they are
+-- already built by whoever built the GUI, and npc_*/actor_trade_* belong to the
+-- loot/trade modes.
+--
+-- ignore_kind = true, the fourth argument, bypasses the sorter's kind filter, so
+-- the pool ends up covering the whole ruck rather than whichever sort tab is
+-- selected - a superset of any first open.  That matters because the sorter
+-- state is not set up yet at first update.
+local function prewarm_inv_pool()
+	local m = rawget(_G, "ui_inventory") or ui_inventory
+	local gui = type(m) == "table" and m.GUI
+	local cc = gui and gui.CC and gui.CC["actor_bag"]
+	if not cc then return note("inv pool: no GUI.CC.actor_bag") end
+	if not (db and db.actor) then return note("inv pool: no db.actor") end
+
+	local before = 0
+	for _ in pairs(cc.cell or {}) do before = before + 1 end
+	if before > 0 then
+		return note("inv pool: already %s cells, nothing to do", before)
+	end
+
+	-- UICellContainer:Callback dispatches ONLY to self.owner[func], and the
+	-- owner is this UIInventory.  The one subscriber, UIInventory:On_CC_Add,
+	-- just sets self.update_info = true.  Suppressing it anyway costs nothing
+	-- and is the mod's own documented mechanism - ui_inventory.script uses it
+	-- for actor_equ, actor_belt, actor_quick and picker.
+	local dc = cc.disable_callback
+	local had_add, had_rm
+	if dc then
+		had_add, had_rm = dc["On_CC_Add"], dc["On_CC_Remove"]
+		dc["On_CC_Add"], dc["On_CC_Remove"] = true, true
+	end
+
+	local ok, err = pcall(function()
+		cc:Reinit(gui:ParseInventory(db.actor, nil, nil, true))
+	end)
+
+	local grown, rows = 0, 0
+	for _ in pairs(cc.cell or {}) do grown = grown + 1 end
+	for _ in pairs(cc.grid or {}) do rows = rows + 1 end
+
+	-- Headroom: spare empty cells, built exactly the way AddItemInCell builds
+	-- them (non-manual, so they use the container's own xml path).  A cell that
+	-- was never :Set has no area, and UICellItem:Reset handles that - it falls
+	-- through to Show(false) instead of FreeRoom.
+	local extra = 0
+	if ok and POOL_HEADROOM > 0 and utils_ui and utils_ui.UICellItem then
+		local base = cc.idxer or grown
+		for i = 1, POOL_HEADROOM do
+			local idx = base + i
+			if not cc.cell[idx] then
+				local ok2 = pcall(function()
+					cc.cell[idx] = utils_ui.UICellItem(cc, cc.st, idx)
+				end)
+				if ok2 then extra = extra + 1 else break end
+			end
+		end
+	end
+
+	-- Leave nothing visible behind.  Reset() clears the index tables, marks
+	-- every grid square free again and hides every cell, but KEEPS the cells -
+	-- which is the whole point, and is exactly what the real open's Reinit does
+	-- to them first anyway.  It does not remove grid ROWS either; the rows are
+	-- simply however many this layout happened to need.
+	pcall(function() cc:Reset() end)
+
+	-- v1.3: so buy more of them.  Free (see the GRID_MIN_ROWS comment), and it
+	-- removes the dependency on this mod and SortingPlus agreeing about the
+	-- sort method at frame 7.
+	local want = math.floor((grown + extra) * GRID_ROWS_PER_CELL)
+	if want < GRID_MIN_ROWS then want = GRID_MIN_ROWS end
+	local before_rows = 0
+	for _ in pairs(cc.grid or {}) do before_rows = before_rows + 1 end
+	pcall(function()
+		local n = before_rows
+		while n < want do
+			cc:Grow()
+			n = n + 1
+		end
+	end)
+	local after_rows = 0
+	for _ in pairs(cc.grid or {}) do after_rows = after_rows + 1 end
+
+	if dc then
+		dc["On_CC_Add"], dc["On_CC_Remove"] = had_add, had_rm
+	end
+
+	if ok then
+		note("inv pool: %s cells + %s headroom, grid %s -> %s rows (laid out in %s)",
+		     grown, extra, before_rows, after_rows, rows)
+	else
+		note("inv pool: FAILED: %s", tostring(err))
+	end
+end
+
+-- TARGET 2: warm the engine's tutorial sequencer.
+local function prewarm_tutorial()
+	if not (game and game.start_tutorial and game.stop_tutorial
+	        and game.has_active_tutorial) then
+		return note("tutorial: engine has no tutorial api")
+	end
+	if game.has_active_tutorial() then
+		return note("tutorial: one is already active, skipped")
+	end
+	local ok, err = pcall(game.start_tutorial, TUTORIAL_NAME)
+	if not ok then
+		return note("tutorial: start_tutorial(%s) FAILED: %s", TUTORIAL_NAME, tostring(err))
+	end
+	-- Did the sequence actually exist?  This is the only way to find out, and
+	-- it is why the line is worth printing: offline nothing can tell us whether
+	-- the injected node parsed.
+	local started = game.has_active_tutorial()
+	pcall(game.stop_tutorial)
+	local still = game.has_active_tutorial()
+	note("tutorial: %s started=%s stopped=%s", TUTORIAL_NAME,
+	     tostring(started), tostring(not still))
+end
+
+local function prewarm_encyclopedia()
+	local m = rawget(_G, "ui_pda_encyclopedia_tab") or ui_pda_encyclopedia_tab
+	if type(m) ~= "table" or type(m.get_ui) ~= "function" then
+		return note("encyclopedia: no ui_pda_encyclopedia_tab.get_ui")
+	end
+	local ok, err = pcall(m.get_ui)
+	note("encyclopedia: get_ui() %s", ok and "built" or ("FAILED: " .. tostring(err)))
+end
+
+-- ---------------------------------------------------------------------------
+-- the sound prewarm
+-- ---------------------------------------------------------------------------
+
+-- Build the whole queue now.  `pcall` per path so one missing sound costs one
+-- failed call, and nothing else.
+local function build_sounds_now()
+	while qi <= #queue do
+		local ok, snd = pcall(sound_object, queue[qi])
+		if ok and snd then warm[#warm + 1] = snd else failed = failed + 1 end
+		qi = qi + 1
+	end
+	sounds_done = true
+	note("sounds: %s built, %s failed, synchronous at first update", #warm, failed)
+end
+
+local function finish_slicing()
+	if not slicing then return end
+	slicing = false
+	sounds_done = true
+	UnregisterScriptCallback("actor_on_update", actor_on_update)
+	note("sounds: %s built, %s failed, %s frames, budget %s ms/frame",
+	     #warm, failed, slice_frames, BUDGET_MS)
+	if VERBOSE then
+		printf("[alao_prewarm %s] done", VERSION)
+		for i = 1, #report do printf("[alao_prewarm]   %s", report[i]) end
+	end
+end
+
+function actor_on_update()
+	if not slicing then return end
+	slice_frames = slice_frames + 1
+
+	if budget_units then
+		local base = timer:time()
+		while qi <= #queue do
+			timer:start()
+			local ok, snd = pcall(sound_object, queue[qi])
+			timer:stop()
+			if ok and snd then warm[#warm + 1] = snd else failed = failed + 1 end
+			qi = qi + 1
+			if (timer:time() - base) >= budget_units then break end
+		end
+	else
+		local n = 0
+		while qi <= #queue and n < FALLBACK_BATCH do
+			local ok, snd = pcall(sound_object, queue[qi])
+			if ok and snd then warm[#warm + 1] = snd else failed = failed + 1 end
+			qi = qi + 1
+			n = n + 1
+		end
+	end
+
+	if qi > #queue or slice_frames >= MAX_SLICE_FRAMES then
+		finish_slicing()
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- entry point
+-- ---------------------------------------------------------------------------
+
+-- actor_on_first_update, not on_game_load: db.actor exists, every mod's
+-- on_game_load has run (the profiler puts on_game_load at frame 6 and this at
+-- frame 7), and the loading screen is still up.  It also fires again after a
+-- level change, which is exactly when UIInventory:actor_on_net_destroy has set
+-- ui_inventory.GUI back to nil.
+function actor_on_first_update()
+	if PREWARM_INVENTORY then prewarm_inventory() end
+	-- after prewarm_inventory, and after FDDA / SortingPlus: this mod's script
+	-- name sorts last, so its listener runs last in the actor_on_first_update
+	-- pass and GUI is there to grow.
+	if PREWARM_INV_POOL then prewarm_inv_pool() end
+	if PREWARM_ENCYCLOPEDIA then prewarm_encyclopedia() end
+	if PREWARM_TUTORIAL then prewarm_tutorial() end
+
+	local queued = 0
+	if PREWARM_SOUNDS and not sounds_done then
+		queue, qi, failed, slice_frames = {}, 1, 0, 0
+		build_sound_queue()
+		queued = #queue
+		if queued == 0 then
+			note("sounds: nothing to queue")
+			sounds_done = true
+		elseif SLICE_SOUNDS then
+			if not timer then
+				units_per_ms = calibrate()
+				timer = profile_timer and profile_timer() or nil
+				budget_units = (timer and units_per_ms) and (BUDGET_MS * units_per_ms) or nil
+			end
+			slicing = true
+			RegisterScriptCallback("actor_on_update", actor_on_update)
+			note("sounds: %s paths queued for slicing, timer %s",
+			     queued, budget_units and "calibrated" or "uncalibrated (fixed batch)")
+			return               -- the report is printed when the queue drains
+		else
+			build_sounds_now()
+		end
+	end
+
+	if VERBOSE then
+		printf("[alao_prewarm %s] done", VERSION)
+		for i = 1, #report do printf("[alao_prewarm]   %s", report[i]) end
+	end
+	report = {}
+end
+
+function on_game_start()
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+end
+
+-- Test hooks.  Nothing in the game calls these.
+function _alao_state()
+	return {queue = queue, qi = qi, warm = warm, failed = failed,
+	        slicing = slicing, frames = slice_frames, report = report,
+	        budget_units = budget_units, sounds_done = sounds_done,
+	        slice_sounds = SLICE_SOUNDS}
+end
+
+-- Non-destructive: the real queue and cursor are put back afterwards, so a test
+-- can ask "what would the queue be" without disturbing a run in progress.
+function _alao_build_queue()
+	local sq, si, sr = queue, qi, report
+	queue, report = {}, {}
+	build_sound_queue()
+	local out = queue
+	queue, qi, report = sq, si, sr
+	return out
+end

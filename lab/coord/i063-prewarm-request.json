@@ -1,0 +1,66 @@
+{
+  "label": "I-063-prewarm-v13",
+  "baseline_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I057-b",
+  "variant_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I063-b",
+  "baseline_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "variant_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler-walkout-listeners-inv",
+  "repeats": 2,
+  "duration_s": 180,
+  "warmup_s": 30,
+  "save": "gammabaseline",
+  "notes": "ATTENDED RUN. THE USER MUST BE AT THE KEYBOARD FOR ALL FOUR CAPTURES. Arms differ by exactly two added files: the variant overlay is agent-I057-b plus gamedata/scripts/zzz_alao_prewarm.script and gamedata/scripts/modxml_zzz_alao_prewarm_tutorial.script (lab/mods/alao-prewarm v1.3). Nothing is replaced and no function is patched. The profiler overlay is gen6-I062's walkout build (WALKOUT_VER 3) - use the path as given, do NOT rebuild it. THE TUTORIAL TARGET IS ALREADY SETTLED by run 20260920-194429-I-063-d9e519: baseline campfire walk-up frames of 755 / 771 ms (724.7 / 736.4 ms script under bind_stalker.actor_binder.update), no such frame in either variant capture, log says 'tutorial: alao_prewarm_noop started=true stopped=true', and the player reported the stutter gone with no UI flash and no stuck input. It is carried here only as a regression check. WHAT v1.3 CHANGES: that same run showed the v1.2 pool prewarm leaving the GRID short - the variant's first open traced 'cells 31 -> 31, grid 3 -> 7', so the cells were pre-built but the grid still grew. Cause: cell placement depends on the sort method, GetSortMethod falls back to sizekind when sort_method is nil, and SortingPlus sets it in ITS actor_on_first_update while zzz_alao_prewarm sorts BEFORE zzz_rax_sortingplus_mcm - so the pool is laid out under one sort and opened under another. v1.3 over-provisions the grid to max(8, cells) rows after the reset; UICellContainer:Grow is one Lua table plus `cols` booleans with no engine call, so rows are free. READ THE EXPECTATION HONESTLY: v1.2 measured 17.03 (cold) / 6.75 (warm) ms for the variant first open against 14.76 / 9.26 for the baseline, i.e. about 2.5 ms in the warm captures and nothing resolvable in the cold ones. Grid growth cannot be worth 17 ms, so cell construction was never the dominant cost and v1.3 is not expected to move it much either. THE FRAME IS MOSTLY NOT SCRIPT: variant capture 4's first-open frame was 37 ms with only 8.5 ms of script (28 ms engine, the UI show itself) and baseline capture 1 was 21 ms with 15.6 ms of script. So ALSO record, per arm, the total frame ms of the frame containing the first ActorMenu_on_before_init_mode trace line, from the frm lines - that, not the listener ms, is what the player feels, and it needs >= 4 captures per arm to separate from the cold/warm spread. This is a HITCH comparison, not an fps or ms/frame one: the player drives the workload by hand, so the mean script ms/frame and the fps delta between the arms mean nothing and must not be quoted. SCRIPTED ROUTINE, identical in every capture: do NOTHING until the 30 s warm-up is over and open NOTHING before the capture starts (the first inventory open of the session must land inside the capture); then at about 0:45 open the inventory (I), wait ~2 s, close it, and after ~10 s open it once more; then walk to the nearest campfire and stand near it until the use prompt appears; then walk away far enough for the prompt to clear and walk back so it triggers a second time; then stop, finishing ~30 s before the end. Read it back with: py -3.12 lab/tools/profile_report.py --queue <id> --listeners --hitch --top 400",
+  "pass_conditions": [
+    {
+      "row": "lst ActorMenu_on_before_init_mode#ui_inventory.script:93 - TARGET 1, the v1.3 fix",
+      "baseline": "first open 14.76 (cold capture) / 9.26 (warm), trace cells 0 -> 19, grid 0 -> 7; later opens 3.75-4.9",
+      "variant_expected": "trace shows pre == post on BOTH counters: cells unchanged AND grid unchanged. v1.2 got the cells right and the grid wrong (31 -> 31, 3 -> 7); v1.3 over-provisions the grid.",
+      "passes_if": "the STRUCTURAL condition: every trace line shows pre cells == post cells and pre grid == post grid, in both variant captures. That is what v1.3 actually fixes and it is deterministic.",
+      "fails_if": "any trace line still shows grid growth - then the over-provision is too small for this ruck, or something re-creates the container between frame 7 and the open.",
+      "note": "The TIMING is a separate question and this row does NOT decide it. v1.2 read 17.03 cold / 6.75 warm against 14.76 / 9.26 - about 2.5 ms in the warm pair and nothing resolvable in the cold pair. Grow() is a Lua table and `cols` booleans with no engine call, so the grid fix cannot be worth milliseconds either. Do not score this target on ms without the frame row below."
+    },
+    {
+      "row": "lst actor_on_update#bind_campfire.script:176 - TARGET 2, ALREADY CONFIRMED, regression check only",
+      "baseline": "one campfire walk-up frame of 755 / 771 ms (724.7 / 736.4 ms of script under bind_stalker.actor_binder.update); every other call <= 0.8 ms",
+      "variant_expected": "no such frame at all, as in run 20260920-194429-I-063-d9e519, plus 'tutorial: alao_prewarm_noop started=true stopped=true' in the log",
+      "passes_if": "NO call >= 50 ms in bind_campfire.script:176 in either variant capture, AND the baseline captures still show one ~700 ms call (otherwise the routine did not reach a campfire and the row says nothing)",
+      "fails_if": "a ~700 ms call is back - a regression, most likely the DXML node no longer parsing; the log line says which."
+    },
+    {
+      "row": "FRAME ms of the first-open frame - the row that decides TARGET 1",
+      "baseline": "capture 1: a 21 ms frame with 15.6 ms of script",
+      "variant_expected": "unknown, and that is the point. Capture 4 of the v1.2 run was a 37 ms frame with only 8.5 ms of script - 28 ms of engine, the UI show itself - so a perfect script-side prewarm can still leave the player a ~30 ms frame.",
+      "passes_if": "the variant's first-open FRAME is at least 5 ms below the baseline's, with >= 4 captures per arm so the cold/warm spread does not swamp it",
+      "fails_if": "the frames are indistinguishable - which would mean the inventory open is an engine cost and no amount of pool prewarming will fix it. Say so and prune the target.",
+      "how": "take the `t` of the first ActorMenu_on_before_init_mode#ui_inventory.script:93 trace line, find the frames spanning it in the frm lines, record total frame ms. Two captures per arm is NOT enough for this row; if the run is only 2x2, report it as indicative and leave the target unscored."
+    },
+    {
+      "row": "where the prewarm cost shows up",
+      "baseline": "n/a",
+      "variant_expected": "all of it on lst actor_on_first_update#zzz_alao_prewarm.script at frame 7. v1.1 measured 31.7 / 32.4 ms for the sound + encyclopedia bundle; v1.2 adds the cell pool (19 + 12 UICellItems, i.e. ~124 xml:InitStatic) and one start/stop of the tutorial sequencer, so expect it to grow by roughly the 17 ms the first open used to cost plus the ~700 ms sequencer load on a cold capture.",
+      "passes_if": "there is NO lst actor_on_update#zzz_alao_prewarm.script row in the hitch table at all, and the first_update row's first_frame is 7. A first_update of one or two seconds is fine - the loading screen is up until frame ~62.",
+      "fails_if": "an actor_on_update#zzz_alao_prewarm row exists (SLICE_SOUNDS was left on), or first_frame is not 7."
+    },
+    {
+      "row": "engine log sanity",
+      "baseline": "n/a",
+      "variant_expected": "one [alao_prewarm 1.3] done block per level load, with lines: 'inventory: GUI already built, nothing to do' (expected on GAMMA), 'inv pool: 19 cells + 12 headroom, grid N -> 31 rows (laid out in N)', 'encyclopedia: get_ui() built', 'tutorial: alao_prewarm_noop started=true stopped=true', 'sounds: 160 built, 0 failed, synchronous at first update'. Plus one '[alao_prewarm] injected <alao_prewarm_noop> into ui\\game_tutorials.xml' from the DXML module.",
+      "passes_if": "the inv pool line reports a non-zero cell count and a final grid row count at least as large as the cell count, and the tutorial line reports started=true",
+      "fails_if": "'inv pool: no GUI.CC.actor_bag' (the prewarm ran before FDDA/SortingPlus - listener order changed), 'inv pool: FAILED' (ParseInventory or Reinit is not callable that early), or 'could NOT inject' from the DXML module."
+    },
+    {
+      "row": "regression check on the rows v1.1 already settled",
+      "baseline": "actor_on_footstep max 0.81 with 15 calls over the floor; eft_jump_sounds:71 0.56, :89 0.50; ui_pda_encyclopedia_tab:407 7.39 / 7.08",
+      "variant_expected": "unchanged from v1.1: footstep row absent, jump 0.16, land 0.15, encyclopedia ~1.9",
+      "passes_if": "no regression on any of these",
+      "fails_if": "any of them comes back - then folding the pool and tutorial prewarms into the same first_update disturbed the sound prewarm."
+    },
+    {
+      "row": "lam2.script:271 - control row, not this mod's",
+      "baseline": "25.6 / 9.2 / 9.0 / 9.8 ms",
+      "variant_expected": "unchanged; nothing in this mod touches FDDA's action machine",
+      "passes_if": "n/a, reported for the record",
+      "fails_if": "n/a"
+    }
+  ]
+}

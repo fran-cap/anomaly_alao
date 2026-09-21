@@ -1,0 +1,96 @@
+-- ALAO prewarm (I-063), TARGET 2: a no-op tutorial to warm the sequencer with.
+--
+-- WHY
+--
+-- `bind_campfire.script:176` (G.A.M.M.A. Cooking Overhaul) calls
+-- `game.start_tutorial("tutorial_campfire_ignite" / "_extinguish")` when the
+-- actor walks near a campfire.  In the walk-out run
+-- 20260920-185607-I-062-a1c78b that listener had **exactly one** call of
+-- 705 / 716 ms per capture - a 786 ms frame, which the player felt - and every
+-- other call was under 0.8 ms.  One call per session, whichever tutorial came
+-- first, is a one-time engine cost: the tutorial sequencer parsing
+-- `ui\game_tutorials.xml` and loading its UI.  Warming it means starting a
+-- tutorial once behind the loading screen - and for that we want one that does
+-- nothing at all.
+--
+-- WHY A NEW NODE RATHER THAN AN EXISTING TUTORIAL
+--
+-- Every proximity tutorial on this stack traps the use key with `<guard_key>`
+-- and (through Catspaw's `modxml_tutorial_hooks`) fires `SendCallback(<name>)`
+-- and writes the on-screen prompt.  Starting one at frame 7 would fire another
+-- mod's callbacks and grab input for however long the start/stop pair takes.  A
+-- node with no `guard_key`, no `function_on_start` / `function_on_stop`, no
+-- sound and no pause cannot do any of that.
+--
+-- HOW
+--
+-- GAMMA runs Modded Exes with DXML, so a script named `modxml_*` is loaded
+-- during XML processing and can edit a parsed XML file in place without
+-- replacing it.  This one appends one node to `ui\game_tutorials.xml`.  That is
+-- the same mechanism `modxml_tutorial_hooks.script` uses, and it means this mod
+-- still replaces no file.
+--
+-- It also registers the new name in `modxml_tutorial_hooks.exceptions`, which
+-- is the protocol that script documents for modpack authors, so Catspaw's hook
+-- pass skips it instead of logging an error about a missing `guard_key`.
+--
+-- WHAT IS NOT VERIFIED OFFLINE, and there is a lot of it
+--
+--   * The exact schema `game_tutorials.xml` requires.  It ships inside the .db
+--     archives; there is no copy in any enabled mod and none loose in
+--     `Anomaly/gamedata/configs`, so it could not be read while writing this.
+--     The node below is modelled on the structure `modxml_tutorial_hooks`
+--     navigates (`<name> / item / main_wnd`, with `guard_key` optional).
+--   * Whether a start immediately followed by a stop is invisible, leaves no
+--     input capture and no lingering static.
+--   * Whether the second `start_tutorial` is then cheap, which is the whole
+--     point.
+--
+-- All three are settled by one attended capture, and the main script prints
+-- `tutorial: alao_prewarm_noop started=.. stopped=..` so the log says whether
+-- the node parsed at all.  If it did not, nothing breaks: `start_tutorial` on
+-- an unknown name is a no-op plus an engine log line, the prewarm reports
+-- `started=false`, and the campfire hitch simply stays where it was.
+
+local TUT_XML  = "ui\\game_tutorials.xml"
+local NAME     = "alao_prewarm_noop"
+
+-- No guard_key (so no input trap), no function_on_start / function_on_stop (so
+-- no scripted side effect), no sound, no pause, and a length short enough that
+-- it would expire on its own even if the explicit stop did not take.
+local NODE = [[
+<]] .. NAME .. [[>
+	<global_wnd length="0.01"/>
+	<item>
+		<length>0.01</length>
+		<main_wnd/>
+	</item>
+</]] .. NAME .. [[>
+]]
+
+local done = false
+
+function on_xml_read()
+	RegisterScriptCallback("on_xml_read", function(xml_file_name, xml_obj, flags)
+		if xml_file_name ~= TUT_XML then return end
+		if done then return end
+		done = true
+
+		-- Play well with modxml_tutorial_hooks: its pass walks every root node
+		-- looking for a `guard_key`, and this one deliberately has none.
+		if modxml_tutorial_hooks and modxml_tutorial_hooks.exceptions then
+			modxml_tutorial_hooks.exceptions[NAME] = true
+		end
+
+		local ok, err = pcall(function()
+			local root = xml_obj:getRoot()
+			xml_obj:insertFromXMLString(NODE, root, #(root.kids or {}) + 1)
+		end)
+		if ok then
+			printf("[alao_prewarm] injected <%s> into %s", NAME, TUT_XML)
+		else
+			printf("[alao_prewarm] could NOT inject <%s> into %s: %s",
+			       NAME, TUT_XML, tostring(err))
+		end
+	end)
+end
