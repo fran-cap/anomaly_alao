@@ -94,6 +94,7 @@ local STEPS_PER_FRAME = 1
 local MAX_LOAD_TARGETS = 96
 
 local VERBOSE         = true
+local MAX_NAMES_LOGGED = 24
 
 local SETTINGS_LTX    = "items\\items\\animations_settings.ltx"
 local SHOW_ANM        = "anm_ea_show"
@@ -275,7 +276,7 @@ local function backpack_steps(out)
 end
 
 local function inventory_steps(out)
-	local items, targets = 0, 0
+	local items, targets, names = 0, 0, {}
 	local function one(owner, obj)
 		items = items + 1
 		local sec = obj:section()
@@ -283,10 +284,13 @@ local function inventory_steps(out)
 		-- over the cap: leave it unseen, so a later pickup of it still warms it
 		if targets >= MAX_LOAD_TARGETS then return end
 		seen_sec[sec] = true
-		if steps_for_setting(out, sec) then targets = targets + 1 end
+		if steps_for_setting(out, sec) then
+			targets = targets + 1
+			names[#names + 1] = sec
+		end
 	end
 	pcall(function() db.actor:iterate_inventory(one, db.actor) end)
-	return targets, items
+	return targets, items, names
 end
 
 -- ---------------------------------------------------------------------------
@@ -378,7 +382,7 @@ function actor_on_first_update()
 	tally_reset()
 
 	local steps = {}
-	local nb, faction, ni, items = 0, "-", 0, 0
+	local nb, faction, ni, items, names = 0, "-", 0, 0, {}
 	if FDDA_BACKPACK then
 		if mcm_on("backpack/enable") then
 			nb, faction = backpack_steps(steps)
@@ -388,7 +392,7 @@ function actor_on_first_update()
 	end
 	if FDDA_INVENTORY then
 		if mcm_on("consumables/enable") then
-			ni, items = inventory_steps(steps)
+			ni, items, names = inventory_steps(steps)
 		else
 			say("fdda inventory: FDDA's consumable animations are off in MCM, skipped")
 		end
@@ -396,6 +400,14 @@ function actor_on_first_update()
 
 	say("fdda: %s backpack sections (faction %s) + %s animated item sections out of %s items in the ruck, %s steps",
 	    nb, faction, ni, items, #steps)
+	-- which animated items this save actually carries; an attended run needs to
+	-- know what to double-click
+	if #names > 0 then
+		local shown = {}
+		for i = 1, math.min(#names, MAX_NAMES_LOGGED) do shown[i] = names[i] end
+		say("fdda items: %s%s", table.concat(shown, ", "),
+		    #names > MAX_NAMES_LOGGED and (" ... +" .. (#names - MAX_NAMES_LOGGED)) or "")
+	end
 	if #steps == 0 then
 		say("fdda: nothing to warm")
 	else

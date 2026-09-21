@@ -1,0 +1,66 @@
+{
+  "label": "I-067-prewarm-v14-fdda",
+  "baseline_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I063-b",
+  "variant_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I067-b",
+  "baseline_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "variant_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler-walkout-listeners-inv",
+  "repeats": 3,
+  "duration_s": 120,
+  "warmup_s": 30,
+  "save": "gammabaseline",
+  "notes": "ATTENDED RUN. CAPTURE COUNT: repeats 3 x 2 arms = 6 captures, the user at the keyboard for all six (~2 min of play each). Baseline = agent-I063-b (agent-I057-b + alao-prewarm v1.3). Variant = agent-I067-b (agent-I057-b + alao-prewarm v1.4). The arms differ by exactly one added file, gamedata/scripts/zzz_alao_prewarm_fdda.script, plus the version string in zzz_alao_prewarm.script (1.3 -> 1.4, no code change). Nothing is replaced, no function is patched. Profiler overlay used as-is, do NOT rebuild it. WHAT v1.4 DOES: at actor_on_first_update (frame ~7, loading screen up) it warms, for FDDA Redone's backpack open/idle/close animation and for every FDDA-animated item in the ruck, the four things liz_fdda_redone_consumables' enter() loads cold on the frame of first use: the hud motion container (game.get_motion_length, a query), the item model (game.motion_exists = the same model_Create under hud_loading, handed back to the model pool), the sound (sound_object held, never played) and the cam .anm file (read into the OS cache). No hud motion is started, no cam effector added, no sound played. WHAT THE TARGET ROW IS: actor_on_update#lam2.script:271. In all 12 earlier I-062/I-063 captures it has ONE call of 9.0-11.6 ms about 1 s after the FIRST inventory open - that is FDDA's backpack_open animation, not an item - and, only when the player used a consumable, a second one of 13.5 / 25.6 / 30.4 ms. Later calls are 0.4-0.8 ms. The frm lines show these frames are script (14 ms frame / 9.8 script; 35 / 30.7), so here listener ms ~= frame ms. SCRIPTED ROUTINE, identical in all six captures: (1) touch NOTHING until the 30 s warm-up is over - no inventory, no item, no quick-use key before the capture starts; (2) at about 0:40 open the inventory (I) and LEAVE IT OPEN for ~4 s so the backpack animation plays (it starts ~1 s after the open); (3) with the inventory still open, use ONE animated consumable from the ruck by double-click - the SAME item in every capture. I could not read the save's ruck offline: the variant's engine log names the candidates in the line '[alao_prewarm]   fdda items: ...' at load, so take the FIRST name on that line (from variant capture 1, or from any earlier v1.4 load) and use that item in all six; if the list is empty the save has no animated consumable and part A2 cannot be run - say so; (4) let the use animation finish (~5-15 s), close the inventory, wait ~5 s; (5) open the inventory ONCE more, wait ~4 s, close it (this gives the warm reference calls); (6) stand still and stop ~30 s before the end. Do not pick anything up, do not loot, do not go near a campfire. This is a HITCH comparison: the player drives the workload by hand, so mean script ms/frame and fps deltas between the arms mean nothing and must not be quoted. Read it back with: py -3.12 lab/tools/profile_report.py --queue <id> --frames --axes --trace --hitch --listeners --top 400, and grep each run's xray.log for 'lam2.script:271' (hit lines: max, first_units, b= buckets) and for '[alao_prewarm'.",
+  "pass_conditions": [
+    {
+      "row": "lst actor_on_update#lam2.script:271 - A1, the backpack animation, first call over the floor (hit line: first_units / first_frame)",
+      "baseline": "9.0-11.6 ms in 12 of 12 earlier captures, ~1 s after the first inventory open; expect the same in all 3 baseline captures",
+      "variant_expected": "the first over-floor call drops to the warm level, 0.4-1.6 ms, and the 6.4-12.8 bucket of the b= histogram stays EMPTY until the item use",
+      "passes_if": "in all 3 variant captures the lam2.script:271 call ~1 s after the first open is >= 5 ms below the baseline's (i.e. <= ~5 ms against ~10), AND the frame containing it (frm line, if it still crosses the 12 ms slow-frame floor at all) is >= 5 ms shorter. Baseline spread across 12 captures is 9.0-11.6, so 3 v 3 resolves a 5 ms move cleanly.",
+      "fails_if": "the variant still shows a 6.4-12.8 ms call there. Then read the log: 'fdda models: 0 loaded' or 'N missing' means the model step did not run; if everything reports loaded and the call is still ~10 ms, the cost is in the part named as engine (hud blend start / first draw) and A1 closes as engine."
+    },
+    {
+      "row": "lst actor_on_update#lam2.script:271 - A2, the first consumable (hit line: max, and the frm line of that frame)",
+      "baseline": "13.5 / 25.6 / 30.4 ms in the three earlier captures that used an item; up to 54 ms on the first launch of a sitting (OS file cache cold)",
+      "variant_expected": "warm level for a consumable enter, which earlier captures put at 3.2-6.4 ms (it includes alife_create_item and FDDA's own work, which this mod does not touch)",
+      "passes_if": "variant max over the item-use call is >= 5 ms below the baseline's in the capture-by-capture pairing (1v2, 3v4, 5v6), same item in both arms",
+      "fails_if": "no difference: then either the item used is not on the 'fdda items:' line (it was not in the ruck at load - check), or the consumable cost is FDDA's script work rather than cold resources.",
+      "note": "Capture 1 is the first launch of the sitting for the baseline and capture 2 for the variant, so the OS-cache-cold outlier, if any, lands on the BASELINE. Do not credit the mod with that; judge A2 on captures 3-6."
+    },
+    {
+      "row": "where the prewarm cost shows up",
+      "baseline": "lst actor_on_first_update#zzz_alao_prewarm.script ~780 ms cold / less warm (v1.2 measured), no fdda row",
+      "variant_expected": "a new lst actor_on_first_update#zzz_alao_prewarm_fdda.script row at frame 7-8, estimated 20-150 ms depending on how many animated sections the ruck holds and whether the OS cache is cold. NO lst actor_on_update#zzz_alao_prewarm_fdda.script row at all (the routine picks nothing up).",
+      "passes_if": "first_frame of the fdda first_update row is <= 8, it is the only fdda row, and on_loading_screen_key_prompt is still at frame ~62 or later",
+      "fails_if": "an actor_on_update#zzz_alao_prewarm_fdda row exists although nothing was picked up, or the first_update row lands after the key prompt."
+    },
+    {
+      "row": "engine log sanity (variant only)",
+      "baseline": "[alao_prewarm 1.3] done block only",
+      "variant_expected": "'[alao_prewarm 1.4] done' block unchanged from v1.3 otherwise, then '[alao_prewarm 1.4] fdda', 'fdda: 3 backpack sections (faction <f>) + N animated item sections out of M items in the ruck, K steps', 'fdda items: ...', 'fdda motions: a hud sections warmed, 0 missing, 0 failed, X ms', 'fdda models: a loaded, 0 missing, 0 failed, X ms', 'fdda sounds: a built, 0 failed, X ms (held, never played)', 'fdda cam files: a read, b not loose, 0 failed, X ms', 'fdda: X ms total, synchronous at first update', 'fdda on-take: armed, 1 step(s) per frame'",
+      "passes_if": "models loaded >= 2 (the two backpack visuals) and motions warmed >= 2, zero 'failed' anywhere",
+      "fails_if": "'not installed, nothing to do' (script namespaces not reachable at first update), 'models: 0 loaded, N missing' (game.motion_exists or getFS():exist not behaving as read from the source), or any '! ' engine error line right after the fdda block.",
+      "note": "The 'fdda models: ... X ms' number is itself the measurement of the model share of the split, which the profiler cannot give: what it reads at load is what left the first-use frame."
+    },
+    {
+      "row": "what the player could notice (ask, blind to the arm order)",
+      "baseline": "n/a",
+      "variant_expected": "nothing new: no flash of a backpack or item on screen during or right after the loading screen, no camera twitch, no stray sound at load, weapon draws normally after load, first backpack animation and first item use look and sound exactly as before",
+      "passes_if": "the player reports no visual or audio difference other than the missing hitch",
+      "fails_if": "anything visible or audible at load, or a wrong-looking item model / texture in the first animation (that would mean a model loaded outside the real hud path differs - turn FDDA_MODELS off and rerun)."
+    },
+    {
+      "row": "TARGET B, first inventory open - control row, v1.4 adds nothing here",
+      "baseline": "lst ActorMenu_on_before_init_mode#ui_inventory.script:93 first open 6.8-17 ms, later 3.5-4.9; first-open frame ~21-37 ms",
+      "variant_expected": "unchanged. Both arms carry the v1.3 pool + grid prewarm, so trace lines should show cells pre == post and grid pre == post in BOTH arms - which is the first in-game check v1.3's grid fix gets.",
+      "passes_if": "n/a for I-067; record the six first-open listener ms and frame ms for the I-063 file",
+      "fails_if": "a trace line still shows grid growth in either arm - then v1.3's over-provision is too small, an I-063 matter."
+    },
+    {
+      "row": "regression check on the rows v1.1-v1.3 settled",
+      "baseline": "no bind_campfire call >= 50 ms (not visited in this routine anyway), footstep row under the floor, no actor_on_update#zzz_alao_prewarm.script row",
+      "variant_expected": "identical",
+      "passes_if": "no regression",
+      "fails_if": "any of them comes back."
+    }
+  ]
+}

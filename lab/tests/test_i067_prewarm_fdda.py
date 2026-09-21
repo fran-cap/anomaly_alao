@@ -136,6 +136,7 @@ def test_log_says_what_it_did():
     assert re.search(r"fdda cam files: 3 read, 0 not loose, 0 failed, \d+ ms", text)
     assert re.search(r"fdda: \d+ ms total, synchronous at first update", text)
     assert "fdda on-take: armed, 1 step(s) per frame" in text
+    assert "[alao_prewarm]   fdda items: vodka, bread" in log
 
 
 def test_log_says_so_when_there_is_nothing_to_do():
