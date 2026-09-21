@@ -50,11 +50,23 @@ COST_SEARCH = 3.0
 COST_CHEAP = 0.05
 NSMARTS = 7
 
-function printf(fmt, ...)
-    local ok, s = pcall(string.format, fmt, ...)
-    LOG[#LOG + 1] = ok and s or tostring(fmt)
+-- Anomaly's printf / strformat: %s is the ONLY directive.  The real ones leave
+-- anything else in the output as literal text and shift the arguments; the stub
+-- raises instead, so a %d or %.1f in a log call fails the test that reaches it.
+BAD_FORMATS = {}
+function strformat(fmt, ...)
+    fmt = tostring(fmt)
+    local stripped = fmt:gsub("%%s", "")
+    if stripped:find("%%") then
+        BAD_FORMATS[#BAD_FORMATS + 1] = fmt
+        error("printf stub: only %s is substituted in game, got: " .. fmt, 0)
+    end
+    local args, i = {...}, 0
+    return (fmt:gsub("%%s", function() i = i + 1 return tostring(args[i]) end))
 end
-strformat = string.format
+function printf(fmt, ...)
+    LOG[#LOG + 1] = strformat(fmt, ...)
+end
 
 CALLBACKS = {}
 function RegisterScriptCallback(name, f)
@@ -99,7 +111,9 @@ local function squad_update(self)
         first = true
         FIRST_CB[self.id] = (FIRST_CB[self.id] or 0) + 1
     end
-    if self.explode then error("boom " .. self.id, 0) end
+    if self.explode then
+        error(type(self.explode) == "string" and self.explode or ("boom " .. self.id), 0)
+    end
     local searched = false
     if not self.target then
         searched = true

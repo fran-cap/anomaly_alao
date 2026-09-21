@@ -55,7 +55,7 @@ def test_kill_switch_registers_nothing_but_still_logs():
     w = World(mode="B", config={"enabled": False})   # config lands before on_game_start
     assert w.g.listeners("actor_on_first_update") == 0
     assert w.g.listeners("actor_on_update") == 0
-    assert any(l.startswith("[alao_stagger 1.0] installed: enabled=false") for l in w.log())
+    assert any(l.startswith("[alao_stagger 1.1] installed: enabled=false") for l in w.log())
     w.load().frames(1200)
     assert not [u for u in w.updates() if u["by"] == "script"]
     assert max(w.in_play_ms().values()) >= 6 * HITCH_BAR_MS   # the bursts are back
@@ -64,7 +64,7 @@ def test_kill_switch_registers_nothing_but_still_logs():
 def test_install_line():
     w = World()
     line = w.log()[0]
-    assert line.startswith("[alao_stagger 1.0] installed: enabled=true sweep_at_load=true")
+    assert line.startswith("[alao_stagger 1.1] installed: enabled=true sweep_at_load=true")
     assert "clock=os.clock" in line
     # nothing per-frame is registered until there is a backlog
     assert w.g.listeners("actor_on_update") == 0
@@ -147,6 +147,54 @@ def test_log_lines_have_the_documented_shape():
     assert re.match(r"\[alao_stagger\] 60 squads, 1 frames, max per frame \d+\.\d ms "
                     r"\(in play 0\.0 ms\), max one squad 3\.0 ms, load sweep 60 in \d+ ms, "
                     r"drain frames 0, skipped 0, errors 0, drained at load", log[2])
+
+
+def test_every_log_call_survives_a_printf_that_only_knows_percent_s():
+    """v1.0 shipped %.0f / %.1f to Anomaly's printf, which only substitutes %s:
+    the numbers stayed literal, the arguments shifted and the errors count never
+    reached the log (queue 20260920-212232-I-065-5603b6).  The stub printf now
+    raises on any other directive; this drives every log site through it."""
+    worlds = [
+        World(mode="B").load(),                                                  # sweep + summary
+        World(mode="A").load(),                                                  # nothing pending
+        World(mode="B", config={"sweep_at_load": False}).load().frames(200),     # OFF line + drained
+        World(mode="B", config={"load_budget_ms": 30}).load().frames(300),       # overflow
+        World(mode="B", engine_starts_at=10 ** 9,
+              config={"sweep_at_load": False, "max_drain_frames": 5}).load().frames(20),  # GAVE UP
+    ]
+    w = World(mode="B")
+    w.g.OBJECTS[103].explode = True                                              # error line
+    worlds.append(w.load())
+    w = World(mode="B", config={"sweep_at_load": False}).load().frames(2)
+    w.g.fire("actor_on_first_update")                                            # interrupted
+    worlds.append(w)
+    for w in worlds:
+        assert len(w.g.BAD_FORMATS) == 0
+        for line in w.log():
+            assert "%" not in line, line
+    # and the numbers land where the words say they do
+    line = World(mode="B").load().log()[1]
+    m = re.match(r"\[alao_stagger\] load sweep: 60 known, 60 pending, 60 updated in (\d+) ms "
+                 r"\(max one squad (\d+\.\d) ms\), (\d+) errors, (\d+) left", line)
+    assert m and m.groups()[1:] == ("3.0", "0", "0"), line
+    assert 90 <= int(m.group(1)) <= 93, line     # 30 searches x 3 ms + 30 cheap x 0.05
+
+
+def test_the_stub_printf_really_refuses_what_the_game_would_garble():
+    w = World(with_mod=False)
+    for bad in ("in %.0f ms", "%d squads", "%5s", "100%"):
+        with pytest.raises(Exception, match="only %s is substituted"):
+            w.g.printf(bad, 1)
+    w.g.printf("%s of %s", 1, "two")
+    assert w.log()[-1] == "1 of two"
+
+
+def test_an_error_message_with_a_percent_in_it_cannot_break_the_log():
+    w = World(mode="B")
+    w.g.OBJECTS[103].explode = "100%d broken %s"
+    w.load()
+    assert any("failed, left to the engine: 100%d broken %s" in l for l in w.log())
+    assert w.state()["errors"] == 1
 
 
 def test_foreign_objects_on_the_board_are_left_alone():

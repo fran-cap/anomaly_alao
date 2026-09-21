@@ -71,11 +71,11 @@
 --
 -- LOG LINES (read them before crediting the mod with anything)
 --
---   [alao_stagger 1.0] installed: enabled=true sweep_at_load=true ...
+--   [alao_stagger 1.1] installed: enabled=true sweep_at_load=true ...
 --   [alao_stagger] load sweep: 523 known, 523 pending, 523 updated in 431 ms (...)
 --   [alao_stagger] 523 squads, 1 frames, max per frame 431.0 ms (in play 0.0 ms), ...
 
-local VERSION = "1.0"
+local VERSION = "1.1"
 
 -- ---------------------------------------------------------------------------
 -- configuration
@@ -127,13 +127,15 @@ local st_max_squad   = 0      -- ms, worst single update
 local st_load_n      = 0
 local st_load_ms     = 0
 
+-- Anomaly's printf / strformat substitute %s and NOTHING else: v1.0 logged
+-- "updated in %.0f ms" literally and shifted every later argument one slot to
+-- the left, so the errors count never reached the log.  The message is built
+-- with Lua's own string.format and handed to printf as the argument of a single
+-- %s, so a '%' inside it (an error message, say) cannot be read as a directive.
+local sfmt = string.format
+
 local function log(fmt, ...)
-	local f = printf or print
-	if strformat then
-		f("[alao_stagger] " .. strformat(fmt, ...))
-	else
-		f("[alao_stagger] " .. string.format(fmt, ...))
-	end
+	printf("[alao_stagger] %s", sfmt(fmt, ...))
 end
 
 -- os.clock() is wall time since process start on the MSVC runtime the engine
@@ -331,11 +333,11 @@ function actor_on_first_update()
 end
 
 function on_game_start()
-	printf("[alao_stagger %s] installed: enabled=%s sweep_at_load=%s load_budget_ms=%s "
+	printf("%s", sfmt("[alao_stagger %s] installed: enabled=%s sweep_at_load=%s load_budget_ms=%s "
 	       .. "frame_budget_ms=%s frame_max_squads=%s clock=%s",
 	       VERSION, tostring(ENABLED), tostring(SWEEP_AT_LOAD), tostring(LOAD_BUDGET_MS),
 	       tostring(FRAME_BUDGET_MS), tostring(FRAME_MAX_SQUADS),
-	       (os and os.clock) and "os.clock" or "NONE")
+	       (os and os.clock) and "os.clock" or "NONE"))
 	if not ENABLED then return end
 	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
 end

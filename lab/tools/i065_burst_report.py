@@ -61,7 +61,9 @@ def read_log(log: Path) -> dict:
                            "worst_update_ms": max(float(x.split("~")[1]) for x in kv["top"].split(",")
                                                   if "~" in x) / upm})
         elif kind == "cb" and kv.get("name") == "squad_on_first_update":
-            first_cb[int(kv["seq"])] = int(kv["calls"])
+            # with the mod the callback fires INSIDE actor_on_first_update, and the profiler
+            # books a callback inside a callback as `nested`, not `calls`
+            first_cb[int(kv["seq"])] = int(kv["calls"]) + int(kv.get("nested", 0) or 0)
         elif kind == "hit" and kv.get("name") == SQUAD:
             hit = {"max_ms": float(kv["max"]) / upm, "first_t": int(kv["first_t"]),
                    "first_frame": int(kv["first_frame"])}

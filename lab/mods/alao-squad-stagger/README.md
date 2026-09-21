@@ -62,7 +62,7 @@ stagger. The per-frame callback exists only while there is a backlog.
 ## Log lines
 
 ```
-[alao_stagger 1.0] installed: enabled=true sweep_at_load=true load_budget_ms=2000 frame_budget_ms=3 frame_max_squads=8 clock=os.clock
+[alao_stagger 1.1] installed: enabled=true sweep_at_load=true load_budget_ms=2000 frame_budget_ms=3 frame_max_squads=8 clock=os.clock
 [alao_stagger] load sweep: 523 known, 523 pending, 523 updated in 431 ms (max one squad 16.0 ms), 0 errors, 0 left for the in-play drain
 [alao_stagger] 523 squads, 1 frames, max per frame 431.0 ms (in play 0.0 ms), max one squad 16.0 ms, load sweep 523 in 431 ms, drain frames 0, skipped 0, errors 0, drained at load
 ```
