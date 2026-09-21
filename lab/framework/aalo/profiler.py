@@ -285,6 +285,8 @@ class NestedCall:
     axis: str = ""
     scope: str = ""
     units: float = 0.0
+    top: bool = True            # false: it ran inside another timed region, so
+                                # it is named but deliberately not broken down
     inside: list = field(default_factory=list)   # [(label, units), ...] worst first
 
 
@@ -577,10 +579,16 @@ class ProfileLog:
     def nested_rows(self, scope_prefix: str | None = None) -> list:
         """I-062 v3 ``nst`` lines, worst call first.
 
-        ``accounted_pct`` is the honest part: how much of the slow call the five
-        slots actually explain.  A low number means the cost is spread across
-        many small regions, or sits in code nothing on the wrap lists reaches -
-        which is an answer too, and not one to read past.
+        ``accounted_pct`` is a coverage hint, not a decomposition, and it can
+        exceed 100%: the five slots are the biggest regions that completed
+        inside the call, and two of them may nest inside each other (a listener
+        and the callback that dispatched it both qualify).  Read it as "the
+        slots reach the bottom of this call" when it is near or above 100, and
+        as "the cost is spread thin, or sits in code nothing on the wrap lists
+        reaches" when it is low - which is an answer too, not something to read
+        past.  ``top`` is False for a region that itself ran inside another
+        timed region: it is named but never broken down, because the slots at
+        that moment belong to whatever contained it.
         """
         rows = []
         for nc in self.nested:
@@ -595,8 +603,9 @@ class ProfileLog:
                 "axis": nc.axis,
                 "scope": nc.scope,
                 "ms": self.to_ms(nc.units),
+                "top": nc.top,
                 "in": inside,
-                "accounted_pct": (100.0 * acc / nc.units) if nc.units else None,
+                "accounted_pct": (100.0 * acc / nc.units) if (nc.units and nc.top) else None,
             })
         rows.sort(key=lambda r: (r["ms"] or 0.0), reverse=True)
         return rows
@@ -755,6 +764,7 @@ def parse(text: str, path=None) -> ProfileLog:
                 axis=d.get("axis", ""),
                 scope=d.get("scope", "?"),
                 units=float(_num(d, "units", 0.0) or 0.0),
+                top=d.get("top", "1") == "1",
                 inside=inside,
             ))
             continue

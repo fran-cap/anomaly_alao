@@ -181,9 +181,12 @@ def _report_frames(name, dirs, top, min_ms=0.0):
 def _report_nested(name, dirs, top):
     """I-062 v3: what was inside the very slow single calls.
 
-    `acct` is the share of the call the five slots explain.  A low number is an
-    answer too - it means the cost is spread thin, or sits in code nothing on
-    the wrap lists reaches.
+    `acct` is a coverage hint, not a decomposition: the slots can nest inside
+    each other (a listener and its callback both qualify), so it can read over
+    100%.  Near or above 100 means the slots reach the bottom of the call; low
+    means the cost is spread thin or sits in code nothing on the wrap lists
+    reaches, which is an answer too.  `nested` in that column means the region
+    itself ran inside another one and is named but not broken down.
     """
     rows = []
     for d in dirs:
@@ -200,8 +203,11 @@ def _report_nested(name, dirs, top):
     print("|---|---:|---:|---|---|---:|---:|---|")
     for i, r in enumerate(rows[:top], 1):
         inside = ", ".join(f"`{n}` {_fmt(ms, 1)}" for n, ms in r["in"][:4]) or "-"
+        # a nested region is named but never broken down: the slots at that
+        # moment belong to whatever region contained it
+        acct = f"{_fmt(r['accounted_pct'], 0)}%" if r["top"] else "nested"
         print(f"| {i} | {r['t']:.0f} | {r['frame']} | {r['axis']} | `{r['scope']}` | "
-              f"{_fmt(r['ms'], 1)} | {_fmt(r['accounted_pct'], 0)}% | {inside} |")
+              f"{_fmt(r['ms'], 1)} | {acct} | {inside} |")
     print()
     return rows
 

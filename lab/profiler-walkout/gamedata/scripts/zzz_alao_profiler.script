@@ -144,7 +144,18 @@ local TRACE_MAX_LINES   = 400   -- hard cap, so a bad pattern cannot flood the l
 --   * a new `sub` axis and `nst` lines, to get inside
 --     bind_smart_terrain.smart_terrain_binder.update, which is 440-457 ms in
 --     ONE call in all four captures with only 6 ms of callbacks in it.
-local WALKOUT_VER       = 3
+-- v4 = what the hamlet run (20260920-201819-I-062-a83793) answered and asked:
+--   * the 440 ms IS se_smart_terrain:try_respawn, 99.97% of the call, in all
+--     four captures. update_jobs never appears and smr_pop.smart_can_respawn
+--     (the gate) is 3 ms across 750 calls, so the cost is entirely AFTER the
+--     gate: one squad being created on the frame the actor arrives.
+--   * so v4 follows the spawn path down, and every level of it gets its OWN
+--     axis, because two functions on one axis mean the inner one is `nested`
+--     and invisible - which is how a 440 ms call had nothing in it to look at
+--     for two runs. bnd -> sub -> spn -> mem -> acr is five independent
+--     timers for five levels of one call stack.
+--   * per-axis nst floors, so a 27 ms evt body gets a breakdown too.
+local WALKOUT_VER       = 4
 
 local WRAP_BINDERS_I062 = true  -- the bnd axis (see above); independent of the
                                 -- old WRAP_BINDERS, which stays off
@@ -181,7 +192,11 @@ local FRM_MAX_LINES     = 400   -- hard cap: a bad scene must not flood the log
 --     they were on. That is the actual breakdown of one bad call.
 local NST               = true
 local NST_FLOOR_MS      = 50
-local NST_MAX_LINES     = 60
+-- v4: per axis, because what counts as "worth a breakdown" is not the same
+-- everywhere. The t~54 s frame is a 27 ms time-event body (it turned out to be
+-- DynamicNewsManager.TickNews) and sat under a 50 ms floor for two runs.
+local NST_FLOOR_BY_AXIS = { cb = 20, evt = 20, lst = 20 }
+local NST_MAX_LINES     = 120
 local NST_SLOTS         = 5
 
 -- What to wrap. Generated from lab/tools/i062_engine_entry_census.py over the
@@ -273,6 +288,17 @@ local GLOBAL_TARGETS = {
 	{ "gulag_general",         "get_job_type" },
 	{ "smr_pop",               "smart_can_respawn" },
 	{ "bind_campfire",         "turn_off_campfires_by_smart_name" },
+	-- v4: the leaf of the whole respawn path. alife_create is the engine
+	-- allocating a server object; if the 440 ms is N of these then the only
+	-- lever is WHEN they happen, not how fast. Its own axis (`acr`) so nothing
+	-- else can be holding the timer when it runs.
+	{ "",                      "alife_create",      "acr" },
+	{ "",                      "alife_create_item", "acr" },
+	{ "smr_pop",               "get_unused_mutant_spawn_table" },
+	{ "smr_pop",               "get_faction_spawn_table" },
+	{ "smr_pop",               "get_mutant_spawn_table" },
+	{ "smr_civil_war",         "setup_factions_relation" },
+	{ "smr_civil_war",         "smart_is_base" },
 }
 
 -- v3: methods that se_smart_terrain:update() calls, on their own axis so the
@@ -289,6 +315,36 @@ local SUB_TARGETS = {
 	{ "smart_terrain", "se_smart_terrain", "register_npc" },
 	{ "smart_terrain", "se_smart_terrain", "clear_job" },
 	{ "smart_terrain", "se_smart_terrain", "check_alarm" },
+	-- the bursts of 30-40 ms frames in the first ~25 s after every load, each
+	-- one many sim_squad_scripted.update calls at 2-3.5 ms with +1.5-4 MB of
+	-- GC. update itself is already on the bnd axis (it is in BINDER_TARGETS),
+	-- so its parts go on `sub`.
+	{ "sim_squad_scripted", "sim_squad_scripted", "specific_update" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "generic_update" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "refresh" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "check_online_status" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "get_script_target" },
+
+	-- --- v4: the respawn path, one axis per level ------------------------
+	-- try_respawn (sub) -> SIMBOARD:create_squad (spn) -> the per-squad and
+	-- per-member work (mem) -> alife_create (acr). smr_pop.smr_handle_spawn is
+	-- deliberately NOT wrapped: it is a dispatcher that returns create_squad's
+	-- result, and wrapping both on one axis would hide create_squad.
+	{ "sim_board", "simulation_board", "create_squad", "spn" },
+
+	{ "sim_squad_scripted", "sim_squad_scripted", "create_npc",   "mem" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "init_squad",   "mem" },
+	{ "sim_board", "simulation_board", "setup_squad_and_group",   "mem" },
+	{ "sim_board", "simulation_board", "assign_squad_to_smart",   "mem" },
+}
+
+-- v4: module-level functions that belong on one of the spawn axes. Same shape
+-- as GLOBAL_TARGETS, kept separate only so the spawn path reads as one block.
+local SPAWN_GLOBALS = {
+	{ "smr_pop",       "remove_disabled_mutants_from_squad", "mem" },
+	{ "smr_pop",       "adjust_squad_size",                  "mem" },
+	{ "smr_pop",       "replace_mutant_variants_in_squad",   "mem" },
+	{ "smr_civil_war", "setup_civil_war_squad",              "mem" },
 }
 
 -- ---------------------------------------------------------------------------
@@ -374,6 +430,7 @@ local ftop_floor     = 0
 -- v3: NST_FLOOR_MS in timer units. math.huge until calibration succeeds, so an
 -- uncalibrated run cannot emit made-up breakdowns.
 local nfloor         = math.huge
+local nfloor_cb      = math.huge   -- v4: the make_callback axis has its own
 local frm_lines      = 0
 local frames_seen_at_floor = 0  -- slow frames the cap suppressed
 
@@ -440,11 +497,16 @@ end
 
 -- Dump them, worst first. Called only when a top-level region crossed the
 -- floor, so at most NST_MAX_LINES times in a run.
-local function dump_nest(label, d, axis)
+-- `istop` is false for a region that ran INSIDE another timed region. Its
+-- breakdown would be the enclosing region's slots - siblings included - so we
+-- print no breakdown at all and say so with top=0. Naming the owner is still
+-- worth a line: the 27 ms body at t~54 s went two runs without a name.
+local function dump_nest(label, d, axis, istop)
 	if nst_lines >= NST_MAX_LINES then return end
 	nst_lines = nst_lines + 1
 	local parts = {}
 	local used = {}
+	if istop then
 	for _ = 1, NST_SLOTS do
 		local best, bu = nil, -1
 		for i = 1, NST_SLOTS do
@@ -456,8 +518,9 @@ local function dump_nest(label, d, axis)
 		used[best] = true
 		parts[#parts + 1] = nsn[best] .. "~" .. string.format("%.3f", nsu[best])
 	end
-	printf("ALAOPROF|1|nst|n=%s|frame=%s|t=%s|axis=%s|scope=%s|units=%s|in=%s",
-		nst_lines, frames_total, now_ms, axis, label,
+	end
+	printf("ALAOPROF|1|nst|n=%s|frame=%s|t=%s|axis=%s|top=%s|scope=%s|units=%s|in=%s",
+		nst_lines, frames_total, now_ms, axis, istop and 1 or 0, label,
 		string.format("%.3f", d),
 		(#parts > 0) and table.concat(parts, ",") or "-")
 end
@@ -696,6 +759,12 @@ dump = function(now)
 			seq, frm_lines, frames_seen_at_floor, FRM_FLOOR_MS,
 			wrap_counts.bnd, wrap_counts.eng, wrap_counts.evt, wrap_counts.sub,
 			nst_lines, NST_FLOOR_MS, pending_n)
+		local axs = {}
+		for i = 1, #axis_order do
+			local t = axis_order[i]
+			axs[#axs + 1] = t .. "=" .. tostring(wrap_counts[t] or 0)
+		end
+		printf("ALAOPROF|1|axw|seq=%s|axes=%s", seq, table.concat(axs, ","))
 	end
 	printf("ALAOPROF|1|eow|seq=%s|frames_total=%s", seq, frames_total)
 
@@ -762,7 +831,7 @@ local function profiled_make_callback(name, ...)
 		if not top then note_nest(name, d) end
 		if d > fr_t3u then note_top(name, d) end
 	end
-	if top and d >= nfloor then dump_nest(name, d, "cb") end
+	if d >= nfloor_cb then dump_nest(name, d, "cb", top) end
 	if d >= hfloor then
 		hitch_hit(hmax, hfirst_t, hfirst_f, hfirst_u, hbuckets, name, d)
 	end
@@ -973,7 +1042,13 @@ end
 
 local function new_axis(tag)
 	local A = {
-		tag = tag, timer = nil, depth = 0, last = 0, fr = 0,
+		-- v4: an axis may want its own nst floor. Converted to timer units
+		-- here, because units_per_ms is known by the time axes are created.
+		tag = tag,
+		nfl = (units_per_ms and units_per_ms > 0 and NST)
+			and ((NST_FLOOR_BY_AXIS[tag] or NST_FLOOR_MS) * units_per_ms)
+			or math.huge,
+		timer = nil, depth = 0, last = 0, fr = 0,
 		units = {}, calls = {}, nested = {},
 		hmax = {}, hft = {}, hff = {}, hfu = {}, hb = {},
 	}
@@ -1025,7 +1100,7 @@ local function axis_wrapper(A, label, orig, kind, is_method)
 			if not top then note_nest(label, d) end
 			if d > fr_t3u then note_top(label, d) end
 		end
-		if top and d >= nfloor then dump_nest(label, d, A.tag) end
+		if d >= A.nfl then dump_nest(label, d, A.tag, top) end
 		if d >= hfloor then
 			hitch_hit(A.hmax, A.hft, A.hff, A.hfu, A.hb, label, d)
 		end
@@ -1160,14 +1235,20 @@ local function wrap_one_global(A, modname, fname)
 	return ok and done and true or false, key
 end
 
-local function wrap_globals(A, targets)
+-- v4: an entry may name its own axis. Two functions on one axis mean the
+-- inner one is `nested` and never timed, so a call chain needs one axis per
+-- level - that is the whole reason alife_create sits on `acr` of its own.
+local function wrap_globals(A, targets, mk)
 	for i = 1, #targets do
-		local modname, fname = targets[i][1], targets[i][2]
-		local done, key = wrap_one_global(A, modname, fname)
+		local modname, fname, tag = targets[i][1], targets[i][2], targets[i][3]
+		local B = A
+		if tag and mk then B = axes[tag] or mk(tag) end
+		local done, key = wrap_one_global(B, modname, fname)
 		if done then
-			wrap_counts.eng = wrap_counts.eng + 1
+			local t = tag or "eng"
+			wrap_counts[t] = (wrap_counts[t] or 0) + 1
 		else
-			pending[#pending + 1] = { "eng", modname, fname }
+			pending[#pending + 1] = { tag or "eng", modname, fname }
 			wrap_misses[#wrap_misses + 1] = key
 		end
 	end
@@ -1334,8 +1415,9 @@ retry_pending = function()
 				got = true
 			end
 		else
-			got = wrap_one_global(axes.eng, a, b)
-			if got then wrap_counts.eng = wrap_counts.eng + 1 end
+			local A = axes[axis] or axes.eng
+			got = A and wrap_one_global(A, a, b)
+			if got then wrap_counts[axis] = (wrap_counts[axis] or 0) + 1 end
 		end
 		if not got then still[#still + 1] = pending[i] end
 	end
@@ -1368,7 +1450,7 @@ local function install_axes(bnd_diag)
 			.. (WRAP_BINDER_UPDATE and "+update" or "")
 	end
 	if WRAP_GLOBALS then
-		pcall(wrap_globals, fresh("eng"), GLOBAL_TARGETS)
+		pcall(wrap_globals, fresh("eng"), GLOBAL_TARGETS, fresh)
 		parts[#parts + 1] = "eng=" .. wrap_counts.eng
 	end
 	if WRAP_TIME_EVENTS then
@@ -1379,17 +1461,32 @@ local function install_axes(bnd_diag)
 	-- timed rather than counted as nested; its leaves are on `eng` for exactly
 	-- the same reason one level further down.
 	if #SUB_TARGETS > 0 then
-		local A = fresh("sub")
 		local n = 0
 		for i = 1, #SUB_TARGETS do
-			local modname, clsname, m = SUB_TARGETS[i][1], SUB_TARGETS[i][2], SUB_TARGETS[i][3]
+			local t = SUB_TARGETS[i]
+			local modname, clsname, m, tag = t[1], t[2], t[3], t[4] or "sub"
 			local key = modname .. "." .. clsname .. "." .. m
+			local A = axes[tag] or fresh(tag)
 			local ok = pcall(function()
 				local cls = resolve_class(modname, clsname)
 				if cls == nil then return end
-				if wrap_axis_method(A, cls, m, key, 0) then n = n + 1 end
+				if wrap_axis_method(A, cls, m, key, 0) then
+					n = n + 1
+					wrap_counts[tag] = (wrap_counts[tag] or 0) + 1
+				end
 			end)
 			if not ok then wrap_misses[#wrap_misses + 1] = key end
+		end
+		for i = 1, #SPAWN_GLOBALS do
+			local t = SPAWN_GLOBALS[i]
+			local A = axes[t[3]] or fresh(t[3])
+			local done, key = wrap_one_global(A, t[1], t[2])
+			if done then
+				n = n + 1
+				wrap_counts[t[3]] = (wrap_counts[t[3]] or 0) + 1
+			else
+				wrap_misses[#wrap_misses + 1] = key
+			end
 		end
 		wrap_counts.sub = n
 		parts[#parts + 1] = "sub=" .. n
@@ -1423,7 +1520,10 @@ local function install()
 	if upm and upm > 0 then                         -- I-062
 		ftop_floor = 0.01 * upm                     -- 10 us
 		fr_t1u, fr_t2u, fr_t3u = ftop_floor, ftop_floor, ftop_floor
-		if NST then nfloor = NST_FLOOR_MS * upm end -- v3
+		if NST then                                 -- v3, per axis in v4
+			nfloor = NST_FLOOR_MS * upm
+			nfloor_cb = (NST_FLOOR_BY_AXIS.cb or NST_FLOOR_MS) * upm
+		end
 	end
 
 	orig_make_callback = axr_main.make_callback

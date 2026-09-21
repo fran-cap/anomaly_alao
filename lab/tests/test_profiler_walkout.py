@@ -884,7 +884,7 @@ def test_the_self_check_shouts_when_nothing_was_wrapped():
 
 
 def test_the_build_carries_a_version(luabind):
-    assert luabind["log"].walkout.ver == 3
+    assert luabind["log"].walkout.ver == 4
 
 
 def test_a_unique_call_is_labelled_by_its_owner_not_the_plumbing():
@@ -1106,7 +1106,7 @@ def test_a_fast_call_never_emits_an_nst_line():
 
 
 def test_the_nst_log_is_bounded():
-    src = _swap(_src(), "local NST_MAX_LINES     = 60", "local NST_MAX_LINES     = 3")
+    src = _swap(_src(), "local NST_MAX_LINES     = 120", "local NST_MAX_LINES     = 3")
     lua = lupa.LuaRuntime(unpack_returned_tuples=True)
     lua.execute(ENGINE_STUB)
     lua.execute(WIRING)
@@ -1144,3 +1144,153 @@ def test_parser_reads_an_nst_line():
 
 def test_an_old_log_has_no_nst_rows():
     assert _profiler.parse(HAND).nested_rows() == []
+
+# ---------------------------------------------------------------------------
+# v4: one axis per level of a call stack
+# (hamlet run 20260920-201819-I-062-a83793: try_respawn is 99.97% of a 440 ms
+# binder update, so the spawn path underneath it has to be followed down)
+# ---------------------------------------------------------------------------
+
+CHAIN_STUB = r"""
+-- four levels of one call stack, each on its own axis in the target lists:
+--   smart_terrain_binder.update (bnd)
+--     se_smart_terrain.try_respawn (sub)
+--       simulation_board.create_squad (spn)
+--         sim_squad_scripted.create_npc (mem)
+--           alife_create (acr)
+__created = 0
+function alife_create(sect, ...)
+    __created = __created + 1
+    __extra = __extra + 20000
+    return {id = __created}
+end
+
+local squad = {}
+function squad:create_npc(smart)
+    __extra = __extra + 1000
+    for _ = 1, 3 do alife_create("stalker") end
+end
+function squad:init_squad() __extra = __extra + 200 end
+sim_squad_scripted = {sim_squad_scripted = squad}
+
+local board = {}
+function board:create_squad(smart, sect)
+    __extra = __extra + 2000
+    squad:create_npc(smart)
+    smr_pop.adjust_squad_size(squad, smart)
+    return squad
+end
+function board:setup_squad_and_group(o) __extra = __extra + 150 end
+function board:assign_squad_to_smart(s, id) __extra = __extra + 120 end
+sim_board = {simulation_board = board}
+
+smr_pop = {}
+function smr_pop.adjust_squad_size(sq, smart) __extra = __extra + 5000 end
+function smr_pop.smr_handle_spawn(sect, smart) return board:create_squad(smart, sect) end
+smr_civil_war = {}
+function smr_civil_war.setup_civil_war_squad(sq, name) __extra = __extra + 400 end
+
+local st = {}
+function st:try_respawn()
+    __extra = __extra + 300
+    local sq = smr_pop.smr_handle_spawn("sect", self)
+    board:setup_squad_and_group(sq)
+    smr_civil_war.setup_civil_war_squad(sq, "hamlet")
+end
+function st:update_jobs() __extra = __extra + 50 end
+smart_terrain = {se_smart_terrain = st}
+
+local binder = {}
+function binder:update()
+    st:update_jobs()
+    st:try_respawn()
+end
+bind_smart_terrain = {smart_terrain_binder = binder}
+
+function __hamlet(ms)
+    __frame = __frame + 1
+    __dev.frame = __frame
+    __tg = __tg + 5
+    bind_smart_terrain.smart_terrain_binder:update()
+    __frame = __frame + 1
+    __dev.frame = __frame
+    __tg = __tg + ms
+    SendScriptCallback("actor_on_update")
+end
+"""
+
+
+@pytest.fixture(scope="module")
+def chain():
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(ENGINE_STUB)
+    lua.execute(WIRING)
+    lua.execute(CHAIN_STUB)
+    lua.execute(_src())
+    lua.eval("on_game_start")()
+    lua.eval("__drive")(60)
+    lua.eval("__hamlet")(60)
+    return {"lua": lua, "log": _dump_and_parse(lua)}
+
+
+def test_every_level_of_the_call_stack_is_timed(chain):
+    """The reason for five axes: two functions on one axis and the inner one is
+    `nested` and never timed - which is how a 440 ms call had nothing in it."""
+    log = chain["log"]
+    got = {}
+    for tag in ("bnd", "sub", "spn", "mem", "acr"):
+        for r in log.axis_ranking(tag, top=None, drop_first=0):
+            got[r["name"]] = (tag, r)
+    for name, tag in (("bind_smart_terrain.smart_terrain_binder.update", "bnd"),
+                      ("smart_terrain.se_smart_terrain.try_respawn", "sub"),
+                      ("sim_board.simulation_board.create_squad", "spn"),
+                      ("sim_squad_scripted.sim_squad_scripted.create_npc", "mem"),
+                      ("alife_create", "acr")):
+        assert name in got, (name, sorted(got))
+        assert got[name][0] == tag, (name, got[name][0])
+    # 3 members x 9 ms of engine allocation, timed on its own axis
+    assert got["alife_create"][1]["us_per_call"] == pytest.approx(20000, rel=0.2)
+    assert chain["lua"].eval("__created") == 3
+    # and the module-level SMR helpers landed on `mem` too
+    assert got["smr_pop.adjust_squad_size"][0] == "mem"
+    assert got["smr_civil_war.setup_civil_war_squad"][0] == "mem"
+
+
+def test_the_nst_line_now_reaches_the_spawn_path(chain):
+    rows = [r for r in chain["log"].nested_rows()
+            if r["scope"].endswith("smart_terrain_binder.update")]
+    assert rows, [r["scope"] for r in chain["log"].nested_rows()]
+    inside = dict(rows[0]["in"])
+    assert "smart_terrain.se_smart_terrain.try_respawn" in inside, inside
+    # the breakdown explains nearly all of the call, which is the point
+    assert rows[0]["accounted_pct"] > 60
+
+
+def test_a_per_axis_nst_floor_catches_a_smaller_evt_body():
+    """The t~54 s frame is a 27 ms time-event body and sat under a 50 ms floor
+    for two runs.  The evt axis gets a 20 ms one."""
+    lua = _run(_src(), frames=10)
+    lua.execute('__b = loadstring("return function() __extra = __extra + 27000; '
+                'return false end", "@newsy.script")()')
+    lua.execute('CreateTimeEvent("news", "tick", 0, __b)')
+    lua.execute("AddUniqueCall(ProcessEventQueue)")
+    lua.eval("__run_level_calls")()
+    lua.eval("__drive")(30)
+    rows = _dump_and_parse(lua).nested_rows()
+    evt = [r for r in rows if r["axis"] == "evt"]
+    assert evt, [(r["axis"], r["scope"]) for r in rows]
+    assert evt[0]["scope"].startswith("evt:newsy.script:")
+    assert evt[0]["ms"] == pytest.approx(27.0, rel=0.2)
+    # it ran inside ProcessEventQueue, so it gets a name but no breakdown -
+    # the slots at that moment belong to the enclosing region
+    assert evt[0]["top"] is False
+    assert evt[0]["in"] == []
+
+
+def test_the_axis_roster_is_reported():
+    lua = _run(_src(), frames=40)
+    lua.eval("alao_profiler_dump")()
+    text = lua.eval("__dumped")()
+    axw = [l for l in text.splitlines() if "|axw|" in l]
+    assert axw, "no axw line"
+    assert "eng=" in axw[-1] and "evt=" in axw[-1]

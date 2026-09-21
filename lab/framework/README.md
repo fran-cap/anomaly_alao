@@ -437,6 +437,141 @@ when the `sub` axis was added, which is a *load-time* error - the overlay would
 not have loaded in the game at all, and only the offline `loadstring` check
 caught it. The axis setup now lives in its own `install_axes()`.
 
+#### v4, after the hamlet run (`20260920-201819-I-062-a83793`)
+
+The `nst` line worked and **falsified the top suspect**. In all four captures
+`bind_smart_terrain.smart_terrain_binder.update` is 439.6 / 432.0 / 445.9 /
+431.7 ms and `in=` reads `smart_terrain.se_smart_terrain.try_respawn` at
+**99.97%** of it, then only `se_stalker_on_spawn` rows at 0.1-0.26 ms
+(`xrs_rnd_npc_loadout.script:136`). `update_jobs` never appears.
+`smr_pop.smart_can_respawn` - the gate - is **3 ms over 750 calls**, and
+`try_respawn` as a whole is **7.8 ms over 920 calls** apart from that one. So
+the cost is entirely *after* the gate, in one squad being created on the frame
+the actor arrives.
+
+The path, read out of the live winners (`smart_terrain.script`,
+`sim_board.script`, `smr_pop.script`, all from *G.A.M.M.A. ZCP 1.4 Balanced
+Spawns*):
+
+```
+se_smart_terrain:try_respawn()                       smart_terrain.script:1599
+  smr_pop.smr_handle_spawn(section, self)            smr_pop.script:1193
+    SIMBOARD:create_squad(smart, section)            sim_board.script:131
+      alife_create(squad_id, ...)                    engine
+      squad:create_npc(smart)                        sim_squad_scripted.script:629
+        alife_create per member                      engine
+      smr_pop.remove_disabled_mutants_from_squad
+      smr_pop.adjust_squad_size                      may create more members
+      smr_pop.replace_mutant_variants_in_squad
+      SIMBOARD:assign_squad_to_smart
+      per member: SIMBOARD:setup_squad_and_group + SendScriptCallback
+      smr_civil_war.setup_civil_war_squad
+  per member: SIMBOARD:setup_squad_and_group         smart_terrain.script:1730
+  smr_civil_war.setup_civil_war_squad                smart_terrain.script:1742
+```
+
+**Already visible from the static read:** the last two lines are *duplicates*.
+`create_squad` already ran `setup_squad_and_group` for every member and
+`setup_civil_war_squad` for the squad; `try_respawn` then does both again. That
+is not the 440 ms on its own, but it is free to delete and it is the kind of
+thing the next `nst` will size exactly.
+
+v4 follows the path down with **one axis per level**, because two functions on
+one axis mean the inner one is `nested` and invisible - which is how a 440 ms
+call had nothing in it to look at for two runs:
+
+| level | axis | what |
+|---|---|---|
+| 1 | `bnd` | `bind_smart_terrain.smart_terrain_binder.update` |
+| 2 | `sub` | `se_smart_terrain.try_respawn` |
+| 3 | `spn` | `simulation_board.create_squad` |
+| 4 | `mem` | `create_npc`, `init_squad`, `adjust_squad_size`, `remove_disabled_mutants_from_squad`, `replace_mutant_variants_in_squad`, `setup_squad_and_group`, `assign_squad_to_smart`, `setup_civil_war_squad` |
+| 5 | `acr` | `alife_create`, `alife_create_item` |
+
+`smr_pop.smr_handle_spawn` is deliberately **not** wrapped: it is a dispatcher
+that returns `create_squad`'s result, and wrapping both on one axis would hide
+`create_squad`. The next `nst` therefore answers the only question that decides
+what a fix can be: **is it N x `alife_create` (engine, so the only lever is
+*when*) or Lua around it (fixable outright)?**
+
+Also v4: per-axis `nst` floors (`cb`/`evt`/`lst` at 20 ms, everything else 50),
+and a region that ran *inside* another one now gets an `nst` line with
+`top=0` and no breakdown - named, but not decomposed, because the slots at that
+moment belong to whatever contained it.
+
+##### The t~54 s job finally has a name
+
+`ProcessEventQueue` reads 26.9-28.7 ms there again, and the frame line's own
+top-3 names the owner: **`evt:dynamic_news_manager.script:250#DynamicNewsManager.TickNews@dynamic_news_manager.script:220`,
+26.7 ms** (live winner: *116- Dialogues Expanded - indyora*). It is a time-event
+body, it is the game's, it fires once a session at that point, and it is in
+every arm.
+
+##### The `sim_squad_scripted.update` bursts
+
+Captures 1, 2 and 3 all show 10-24 frames of 30-40 ms in the first ~25 s after
+the load (t=30-41 s), each frame carrying many
+`sim_squad_scripted.sim_squad_scripted.update` calls at 2-3.5 ms with +1.5-4 MB
+of GC. Static read: `sim_squad_scripted:update` has a `first_update` branch that
+runs once per squad and, among other things, `alife_create_item`s the squad's
+`item_on_all` list for every member. So this is every squad on the level doing
+its one-off first update, spread over the frames after a load. v4 puts
+`specific_update` / `generic_update` / `refresh` / `check_online_status` /
+`get_script_target` on the `sub` axis to split it.
+
+##### Fix options for the 440 ms, with what each one breaks
+
+These are written before the measurement that chooses between them, so that the
+measurement can still say no.
+
+**(a) If it is `alife_create`-bound** (engine time, N members x ~tens of ms):
+nothing makes a member cheaper, so the only lever is *when*. Spread creation
+over frames - one member per frame from a `CreateTimeEvent`. Non-identities,
+all of them real: a squad exists **half-built for N frames**, and
+`squad:squad_members()` is iterated by `setup_squad_and_group`, by
+`smr_civil_war.setup_civil_war_squad` (relations are set per member, so a member
+added later gets none), by task targets and by the simulation's target
+selection, which can pick a one-member squad and then find it has five. A save
+taken mid-build stores a squad whose `already_spawned` count has already been
+incremented. And `create_squad` returns the squad to `try_respawn`, which
+immediately iterates its members - that loop would have to move too. This is the
+option with the worst blast radius and it should only be taken if the time is
+genuinely engine-side.
+
+**(b) Move the roll off the arrival frame.** The gate is `if
+(self.is_on_actor_level and self.dist_to_actor ~= nil) then if (self.dist_to_actor
+< self.respawn_radius) then return end end` - so a respawn fires only while the
+actor is **outside** the radius. It coincides with walking to the hamlet because
+`dist_to_actor` is `self.online and ...distance_to(actor) or math.huge`: while
+the smart is offline the distance is `math.huge`, the radius gate cannot stop
+it, and the very first `update()` after the smart comes online is the first one
+that both has `already_spawned` filled in and passes `smart_can_respawn`. (The
+30% first-spawn skip that would have damped this is commented out at
+`smart_terrain.script:1646-1651`.) If that reading is right - and the next run
+can confirm it by whether `try_respawn` is expensive exactly once per smart -
+then **every smart with `respawn_params` that the player approaches for the
+first time in a session pays one squad spawn**, and this is a whole-map pattern,
+not one hamlet. Sizing it is a config count: how many smarts on a level carry
+`respawn_params`. The fix is to make the first post-online roll happen off the
+arrival frame (defer it by a few seconds via a time event), which changes
+*nothing* about what spawns - only when - and is far cheaper in behaviour than
+(a). Non-identity: a player who runs through a smart and leaves within the
+deferral gets no spawn at all that visit.
+
+**(c) Anything quadratic in SMR.** `smr_civil_war.setup_civil_war_squad` and
+`smr_pop.*` take the squad and the smart's name and consult faction tables;
+`remove_disabled_mutants_from_squad` and `replace_mutant_variants_in_squad` each
+iterate `squad:squad_members()` separately, and `adjust_squad_size` can create
+more members after the first two have already walked the list. Three passes over
+the members plus a fourth in `create_squad` plus a fifth in `try_respawn` is
+five iterations of the same list, and the duplicate
+`setup_squad_and_group` / `setup_civil_war_squad` pair above is a sixth and
+seventh. If the `mem` axis shows these dominating rather than `acr`, this is
+ordinary Lua and fixable outright, with no behavioural change at all beyond
+deleting the duplicate work.
+
+`lab/coord/overlays/i062-smart-terrain-request.json` is the run that chooses.
+
 ```
 py -3.12 lab/tools/i062_engine_entry_census.py --top 30
 py -3.12 lab/tools/i062_build_overlays.py      # alao-profiler-walkout[-listeners-inv]
