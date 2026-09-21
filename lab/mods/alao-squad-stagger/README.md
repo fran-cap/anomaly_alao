@@ -14,14 +14,15 @@ apart between t = 10 s and t = 22 s after the load. Evidence, all from the exist
 | `20260920-201819-I-062-a83793` | 4 | 3 | 25 / 25 / 25 | 15-16 | 4-10 | 38-40 ms | 87-88 % |
 | `20260920-194429-I-063-d9e519` | 4 | 1 | 25 | 17 | 7 | 38 ms | 87 % |
 | `20260920-185607-I-062-a1c78b` | 4 | 1 (by the `squad_on_first_update` window counts; no `frm` squad rows in that profiler build) | | | | | |
+| `20260920-171714-I-063-ef2deb` | 4 | 4 (same) | | | | | |
 
-So it is **not** every load: 5 of 12. The work is the same in all 12 - 523 `squad_on_first_update`
+So it is **not** every load: 9 of 16. The work is the same in all 16 - 523 `squad_on_first_update`
 callbacks, 410-540 ms of `sim_squad_scripted:update` in total - and what differs is where the
 engine's ALife scheduler puts it:
 
-* **mode A (7 of 12):** all 523 first updates land in frame 8, the `actor_on_first_update` frame,
+* **mode A (7 of 16):** all 523 first updates land in frame 8, the `actor_on_first_update` frame,
   behind the loading screen (worst single update 15-17 ms, cold; nobody sees it).
-* **mode B (5 of 12):** the scheduler starts ~10 s after the load and visits ~20 squads per tick,
+* **mode B (9 of 16):** the scheduler starts ~10 s after the load and visits ~20 squads per tick,
   one tick every ~455 ms, 25-26 ticks. Each tick is one frame. Per-squad cost in those frames is
   1.6-4.7 ms; the frame's callback axis is 0.6 ms, so it is not a listener.
 
@@ -37,7 +38,7 @@ applies to the few squad sections that set it.
 
 The search cannot be cut without changing what squads do, and it cannot be cached across a save
 without touching the save format. It can be moved: the engine itself runs it behind the loading
-screen in the majority of loads. The mod makes that the rule. At `actor_on_first_update` it walks
+screen in 7 loads out of 16. The mod makes that the rule. At `actor_on_first_update` it walks
 `SIMBOARD.squads` in id order and calls `squad:update()` on every squad whose `first_update` is
 still `false` - the same call `bind_monster.script`, `xr_effects.script` and `squads_filler.script`
 already make from script. When the scheduler reaches those squads later they are ordinary 50 us
@@ -81,6 +82,6 @@ mode-A load and proves nothing.
 * That `actor_on_first_update` runs before the engine's own sweep in mode-A loads (either order is
   handled; the log line says which happened).
 * Why the engine picks mode A or B. It does not matter for the fix, but it sets the sample size:
-  with p(B) ~ 0.4, six baseline loads see at least one burst with probability 0.95.
+  with p(B) ~ 0.56 (9 of 16), six baseline loads see at least one burst with probability 0.99.
 * The size: expected -25 to -35 ms on each of the ~25 burst frames (they become ordinary frames
   with ~1 ms of squad updates in the tick), in the loads that had them.

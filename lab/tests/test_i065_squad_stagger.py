@@ -2,9 +2,8 @@
 
 The captures say every squad's first `update()` after a load is the expensive
 one (target search), that the engine either sweeps all 523 of them in the
-first-update frame behind the loading screen (mode A) or dribbles them out at
-~20 per ALife tick in play (mode B, 25 frames of 12-40 ms), and that which of
-the two you get is a coin flip per load.  The mod makes every load a mode-A
+first-update frame behind the loading screen (mode A, 7 of 16 loads) or dribbles
+them out at ~20 per ALife tick in play (mode B, 9 of 16: 25 frames of 12-40 ms).  The mod makes every load a mode-A
 load and keeps a per-frame-budgeted drain as the fallback.
 
 These tests are structural: where the work lands, that every squad gets exactly

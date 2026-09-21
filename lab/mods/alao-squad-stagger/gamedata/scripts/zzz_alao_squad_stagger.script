@@ -1,9 +1,9 @@
 -- ALAO squad first-update stagger (idea I-065).  One script, no game file
 -- replaced, no function patched.
 --
--- WHAT IS SLOW (queue items 20260920-201819-I-062-a83793 and
--- 20260920-194429-I-063-d9e519, v2/v3 walk-out profiler, 12 loads of the save
--- `gammabaseline`, 523 squads)
+-- WHAT IS SLOW (queue items 20260920-201819-I-062-a83793, 20260920-194429-I-063-d9e519,
+-- 20260920-185607-I-062-a1c78b and 20260920-171714-I-063-ef2deb: 16 loads of the
+-- save `gammabaseline`, 523 squads; lab/tools/i065_burst_report.py reads them back)
 --
 -- Every squad's FIRST `sim_squad_scripted:update()` after a load is expensive:
 -- 0.8 ms on average, 2-4.7 ms for the ones that have to look for a target, and
@@ -21,10 +21,10 @@
 -- So the 523 first updates cost 410-540 ms per load in total, always.  What
 -- varies is WHERE the engine puts them, and it does one of two things:
 --
---   mode A (7 of 12 loads)  the ALife scheduler's first sweep runs every
+--   mode A (7 of 16 loads)  the ALife scheduler's first sweep runs every
 --       squad in frame 8, the same frame as `actor_on_first_update`, behind the
 --       loading screen (the key prompt is frame ~63).  Nobody sees it.
---   mode B (5 of 12 loads)  nothing happens for ~10 s, then the scheduler
+--   mode B (9 of 16 loads)  nothing happens for ~10 s, then the scheduler
 --       visits ~20 squads per ALife tick, one tick every ~455 ms, for 25-26
 --       ticks (t = 10..22 s after the load).  Each of those ticks is ONE frame
 --       of 12-40 ms, 87-88 % of it script, in the player's face: 25 frames
@@ -37,8 +37,8 @@
 -- calls `squad:update()` on every squad whose `first_update` flag is still
 -- false.  That is the same function the scheduler calls, called the same way
 -- vanilla `bind_monster.script`, `xr_effects.script` and `squads_filler.script`
--- already call it, in the same frame the engine itself picks in the majority of
--- loads.  When the scheduler gets round to those squads later, it finds
+-- already call it, in the same frame the engine itself picks in 7 loads out
+-- of 16.  When the scheduler gets round to those squads later, it finds
 -- `first_update == true` and a target already assigned, and pays 50 us.
 --
 -- If the engine already swept (mode A, and its sweep ran before this

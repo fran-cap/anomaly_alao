@@ -1,0 +1,58 @@
+{
+  "label": "I-065-squad-first-update-sweep",
+  "baseline_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I063-b",
+  "variant_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I065-b",
+  "baseline_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "variant_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler-walkout-listeners-inv",
+  "repeats": 6,
+  "duration_s": 100,
+  "warmup_s": 2,
+  "save": "gammabaseline",
+  "notes": "UNATTENDED. Standing still after the load IS the scene. Arms differ by exactly one added file: the variant overlay is agent-I063-b plus gamedata/scripts/zzz_alao_squad_stagger.script (lab/mods/alao-squad-stagger v1.0, built by lab/coord/i065_build_overlay.py, which also asserts the two trees are otherwise byte-identical). Nothing is replaced and no function is patched. The profiler overlay is gen6-I062's walk-out build - use the path as given, do NOT rebuild it; it already sees the burst (frm rows are run-scoped and are not subject to the dropped first window). THIS IS A HITCH COMPARISON, NOT AN FPS ONE: warmup_s is 2 on purpose, so PresentMon starts ~2-4 s after the 'Game gammabaseline is successfully loaded' marker and the capture contains the tail of the load itself. fps avg / 1% low / p99 and the script ms/frame delta of this item mean NOTHING and must not be quoted. WHAT THE EXISTING CAPTURES SAY (16 loads, lab/tools/i065_burst_report.py): every squad's first update after a load is the expensive one (SIMBOARD:get_squad_target, Lua + luabind, 2-4.7 ms, ~350 kB garbage; 523 squads, 410-540 ms per load in total). In 7 of 16 loads the engine runs all 523 in frame 8 behind the loading screen (mode A, nothing to see). In 9 of 16 it starts ~10 s after the load and does ~20 squads per ALife tick, one tick per ~455 ms: 25 frames >= 12 ms between t = +10 s and +22 s, 15-17 of them >= 20 ms, 4-10 >= 30 ms, worst 38-40 ms, 87-88 % script. Which mode a load gets is outside our control, hence 6 repeats: with p(B) = 0.56 the baseline arm shows at least one burst load with probability 0.99 and at least two with 0.94. WHY duration_s = 100: the profiler only writes frm rows when a 30 s window closes (windows close at game t ~ 36 / 66 / 96 s; the burst ends at t ~ 41 s, the load finishes at t ~ 17-19 s), so the capture has to outlive the t = 66 s window; 100 s after the marker gets the t = 96 s one too. READ IT BACK WITH: py -3.12 lab/tools/i065_burst_report.py --queue <id>   (per load: mode A/B from the squad_on_first_update window counts, the burst frames from the frm rows, the ~455 ms train of >= 12 ms frames from presentmon.csv, and the [alao_stagger] log lines), then py -3.12 lab/tools/profile_report.py --queue <id> --frames --axes --hitch --listeners for the usual tables. Wall time: 12 loads x (~60 s launch+load + 2 + 100) ~ 35 min.",
+  "pass_conditions": [
+    {
+      "row": "engine log sanity - READ THIS FIRST",
+      "baseline": "no [alao_stagger] line at all",
+      "variant_expected": "per load: '[alao_stagger 1.0] installed: enabled=true sweep_at_load=true load_budget_ms=2000 frame_budget_ms=3 frame_max_squads=8 clock=os.clock', then EITHER '[alao_stagger] load sweep: 523 known, 523 pending, 523 updated in ~400-550 ms (max one squad ~16 ms), 0 errors, 0 left for the in-play drain' + '[alao_stagger] 523 squads, 1 frames, max per frame ... (in play 0.0 ms), ... drained at load' OR '[alao_stagger] load sweep: 523 known, 0 pending - the engine got there first ...' (a mode-A load where the engine's sweep ran before our listener).",
+      "passes_if": "every variant load has the install line and one of the two sweep lines, errors = 0, 'left for the in-play drain' = 0",
+      "fails_if": "'clock=NONE' (os.clock missing in the game's Lua: the budgets are blind, the load sweep still runs), errors > 0 (the first one is logged with the squad id and message), a non-zero 'left for the in-play drain' (the sweep blew the 2000 ms cap - then check the drain summary's 'in play' max), or a 'pending' count well under 523 but over 0 (the engine's sweep and ours interleaved - harmless, but say so).",
+      "note": "A variant load that logged '0 pending' was a mode-A load: it has no burst with or without the mod and proves nothing either way. Count only variant loads that logged '523 pending' as treated."
+    },
+    {
+      "row": "burst frames: frm rows led by sim_squad_scripted.update with a >= 1 ms update in them - THE ROW THAT DECIDES I-065",
+      "baseline": "in the mode-B loads (expect 2-5 of 6): 25 frames >= 12 ms, ~455 ms apart, between game t ~ 28 s and ~ 41 s; 15-17 >= 20 ms; worst 38-40 ms",
+      "variant_expected": "zero such frames in every load. The ALife ticks in that stretch carry ~20 ordinary squad updates of 50-60 us, ~1 ms per tick.",
+      "passes_if": "no variant load has a burst frame AND at least two baseline loads do (otherwise the coin came up mode A and the run says nothing - requeue with more repeats). Expected size: -25 to -35 ms on each of ~25 frames per affected load, i.e. 5-7x the 5 ms hitch bar.",
+      "fails_if": "a variant load that logged '523 updated' still shows the train. That would mean the expensive part is NOT tied to the squad's first update (e.g. it is tied to the scheduler's first visit) and the diagnosis is wrong."
+    },
+    {
+      "row": "presentmon.csv: the ~455 ms train of >= 12 ms frames in the first ~40 s of the capture - the same thing seen from outside the game",
+      "baseline": "mode-B loads: ~25 frames in the train, worst ~40 ms",
+      "variant_expected": "0-2 (chance alignments of unrelated slow frames)",
+      "passes_if": "agrees with the frm row",
+      "fails_if": "PresentMon shows a train the profiler does not - then the cost moved somewhere the profiler is not wrapping."
+    },
+    {
+      "row": "where the cost went: lst actor_on_first_update#zzz_alao_squad_stagger.script in the hitch table",
+      "baseline": "n/a",
+      "variant_expected": "one call per load at frame 8, 400-550 ms in a load the engine had not swept, ~0.5 ms in one it had. bnd sim_squad_scripted.update's run max moves to frame 8 (15-17 ms, the cold first call) in every variant load, as it already is in baseline mode-A loads.",
+      "passes_if": "first_frame is 8 and there is NO lst actor_on_update#zzz_alao_squad_stagger.script row (that row only exists if the in-play drain ran)",
+      "fails_if": "an actor_on_update#zzz_alao_squad_stagger row exists - the load sweep hit its cap; read its max against the 5 ms bar."
+    },
+    {
+      "row": "squad_on_first_update per window (cb lines)",
+      "baseline": "mode A: {1: 523}; mode B: split over windows 1 and 2, e.g. {1: 304, 2: 219}",
+      "variant_expected": "{1: 523} in every load",
+      "passes_if": "523 in window 1 in every variant load - every squad still gets its first-update block, exactly once",
+      "fails_if": "a total other than the baseline's (a squad skipped or doubled)."
+    },
+    {
+      "row": "control rows, not this mod's",
+      "baseline": "the ~27 ms dynamic_news_manager TickNews frame at t ~ 54 s; smart_terrain.setup_gulag_and_logic_on_spawn 16-19 ms inside motivator net_spawn at frame 7 (behind the loading screen, first call cold)",
+      "variant_expected": "unchanged",
+      "passes_if": "n/a, reported for the record",
+      "fails_if": "n/a"
+    }
+  ]
+}
