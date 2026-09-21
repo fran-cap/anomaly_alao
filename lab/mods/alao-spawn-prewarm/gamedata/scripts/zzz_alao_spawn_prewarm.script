@@ -48,7 +48,7 @@
 -- one line per squad spawned afterwards with the cold loads that squad still
 -- paid (should be ~0).
 
-local VERSION = "1.0"
+local VERSION = "1.1"
 
 -- ---------------------------------------------------------------------------
 -- switches.  No MCM on purpose.
@@ -81,8 +81,17 @@ local reports      = 0
 local prewarm_runs = 0
 local last         = {}      -- test hook: what the last prewarm did
 
+-- v1.1: Anomaly's printf only substitutes %s.  v1.0 handed it a %.0f and the
+-- engine log read "in %.0f ms ..., 412 cold character loads absorbed5278" - the
+-- arguments shifted one along.  So: format here, with Lua's own string.format,
+-- and give printf one finished string through a single %s.
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", ok and line or (tostring(fmt) .. " <format error: " .. tostring(line) .. ">"))
+end
+
 local function say(fmt, ...)
-	printf("[alao_spawn] " .. fmt, ...)
+	out("[alao_spawn] " .. fmt, ...)
 end
 
 -- ---------------------------------------------------------------------------
@@ -225,7 +234,7 @@ end
 
 function on_game_start()
 	if not ENABLED then
-		printf("[alao_spawn %s] installed but DISABLED by its kill switch", VERSION)
+		out("[alao_spawn %s] installed but DISABLED by its kill switch", VERSION)
 		return
 	end
 	RegisterScriptCallback("on_specific_character_init", on_specific_character_init)
@@ -234,7 +243,7 @@ function on_game_start()
 		RegisterScriptCallback("on_try_respawn", on_try_respawn)
 		RegisterScriptCallback("squad_on_npc_creation", squad_on_npc_creation)
 	end
-	printf("[alao_spawn %s] installed: prewarm=%s report=%s", VERSION,
+	out("[alao_spawn %s] installed: prewarm=%s report=%s", VERSION,
 	       tostring(PREWARM_CHARACTERS), tostring(REPORT_SPAWNS))
 end
 

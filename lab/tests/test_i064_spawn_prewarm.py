@@ -29,9 +29,16 @@ LOADED_AT_LOAD = 52
 
 PRELUDE = r"""
 LOG = {}
+-- Anomaly's printf substitutes %s and nothing else.  Any other directive is a
+-- bug in the caller (v1.0 printed "in %.0f ms" with the arguments shifted), so
+-- the stub refuses it outright.
 function printf(fmt, ...)
-    local ok, s = pcall(string.format, fmt, ...)
-    LOG[#LOG + 1] = ok and s or fmt
+    fmt = tostring(fmt)
+    for d in string.gmatch(fmt, "%%(.)") do
+        if d ~= "s" then error("printf stub: only %s is substituted in game, got %" .. d .. " in: " .. fmt, 2) end
+    end
+    local args, i = {...}, 0
+    LOG[#LOG + 1] = (string.gsub(fmt, "%%s", function() i = i + 1 return tostring(args[i]) end))
 end
 printe = printf
 
@@ -338,7 +345,7 @@ def test_no_per_frame_listener_and_no_time_events():
 def test_install_and_prewarm_lines():
     a = boot(True)
     lines = a.spawn_lines()
-    assert lines[0] == "[alao_spawn 1.0] installed: prewarm=true report=true"
+    assert lines[0] == "[alao_spawn 1.1] installed: prewarm=true report=true"
     assert re.fullmatch(
         r"\[alao_spawn\] prewarm: created and released sim_default_stalker_0 \(id \d+\) in \d+ ms "
         r"behind the loading screen, 5251 cold character loads absorbed", lines[1]), lines[1]
@@ -390,6 +397,24 @@ def test_no_report_while_there_is_no_actor():
     assert not [l for l in a.spawn_lines() if l.startswith("[alao_spawn] squad ")]
 
 
+def test_every_line_reaches_printf_as_one_finished_string():
+    # the v1.0 bug: a %.0f handed to the game's %s-only printf
+    src = mod_source()
+    code = "\n".join(l.split("--", 1)[0] for l in src.splitlines())
+    assert re.findall(r"\bprintf\(([^,)]*)", code) == ['"%s"']
+    a = boot(True)
+    a.respawn(3)
+    a.mod._alao_flush()
+    for l in a.spawn_lines():
+        assert "%" not in l, l
+
+
+def test_printf_stub_refuses_anything_but_percent_s():
+    a = Arm(False)
+    with pytest.raises(Exception, match="only %s"):
+        a.lua.execute('printf("in %.0f ms", 3)')
+
+
 # ---------------------------------------------------------------------------
 # kill switch and containment
 # ---------------------------------------------------------------------------
@@ -397,7 +422,7 @@ def test_no_report_while_there_is_no_actor():
 def test_kill_switch_registers_nothing():
     a = boot(True, ENABLED="false")
     assert [str(n) for n in a.g.REGISTERED.values()] == []
-    assert a.spawn_lines() == ["[alao_spawn 1.0] installed but DISABLED by its kill switch"]
+    assert a.spawn_lines() == ["[alao_spawn 1.1] installed but DISABLED by its kill switch"]
     assert [str(s) for s in a.g.CREATED.values()] == []
 
 
