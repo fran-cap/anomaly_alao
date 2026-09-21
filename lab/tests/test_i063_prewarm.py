@@ -350,6 +350,66 @@ def test_the_first_open_then_constructs_nothing():
     assert pre["cells"] == post["cells"], f"{pre} -> {post}"
 
 
+# ---------------------------------------------------------------------------
+# v1.3: the grid is the other high-water mark
+#
+# Run 20260920-194429-I-063-d9e519 traced the v1.2 variant's first open as
+# `cells 31 -> 31, grid 3 -> 7`: the cells were pre-built, the grid was not.
+# The cause is ordering - `zzz_alao_prewarm` sorts before
+# `zzz_rax_sortingplus_mcm`, so the pool is laid out under the default
+# sizekind sort and SortingPlus then switches to `kind`, which packs one kind
+# group per row and needs more of them.
+# ---------------------------------------------------------------------------
+
+def test_v12_would_have_left_the_grid_short():
+    """The bug, reproduced: lay the pool out under one sort, open under another."""
+    # A kind-sorted open needs strictly more rows than a dense one for the same
+    # ruck, which is why laying the pool out under the wrong sort leaves the
+    # grid short.
+    kind = Arm(False)
+    kind.g.OTHER_MOD_BUILDS_GUI()
+    kind.g.SORT_METHOD = "kind"
+    kind.open_inventory()
+    dense = Arm(False)
+    dense.g.OTHER_MOD_BUILDS_GUI()
+    dense.open_inventory()
+    assert kind.pool()["grid"] > dense.pool()["grid"], (
+        f"kind {kind.pool()['grid']} vs sizekind {dense.pool()['grid']}")
+    # and v1.2's prewarm laid it out densely, because it runs before SortingPlus
+    v12 = Arm(True)
+    v12.first_update(sortingplus=None)
+    assert v12.g.SORT_METHOD is None
+
+
+def test_the_grid_survives_the_prewarm_and_the_first_open_never_grows():
+    a = Arm(True)
+    a.first_update()                        # SortingPlus switches to "kind"
+    pre = a.pool()
+    grows = int(a.g.GROWS)
+    a.open_inventory()
+    post = a.pool()
+    assert int(a.g.GROWS) == grows, "the first open must not call Grow()"
+    assert pre["grid"] == post["grid"], f"grid {pre['grid']} -> {post['grid']}"
+
+
+def test_the_grid_is_provisioned_for_one_row_per_stack():
+    """Grow() is a Lua table and `cols` booleans - no engine call - so buy plenty."""
+    a = Arm(True)
+    a.first_update()
+    p = a.pool()
+    assert p["grid"] >= p["cells"], f"{p}"
+
+
+def test_the_grid_provisioning_holds_for_a_bigger_ruck():
+    a = Arm(True)
+    a.g.RUCK_N = 40
+    a.first_update()
+    pre = a.pool()
+    grows = int(a.g.GROWS)
+    a.open_inventory()
+    assert int(a.g.GROWS) == grows, f"grew at open time from {pre}"
+
+
 def test_headroom_covers_looting_a_few_more_stacks():
     a = Arm(True)
     a.first_update()

@@ -104,7 +104,7 @@
 --     `UIInventory()`, one `pda_encyclopedia_tab()` and N `sound_object()`
 --     constructions, out of play and into the loading screen.
 
-local VERSION = "1.2"
+local VERSION = "1.3"
 
 -- ---------------------------------------------------------------------------
 -- configuration
@@ -133,6 +133,33 @@ local PREWARM_INV_POOL     = true
 -- few loots do not have to grow the pool either.  Each one is one UICellItem,
 -- i.e. four xml:InitStatic calls, paid at frame 7.  0 disables headroom.
 local POOL_HEADROOM        = 12
+
+-- v1.3.  The grid is the OTHER high-water mark, and v1.2 missed it: the run
+-- 20260920-194429-I-063-d9e519 traced the variant's first open as
+-- `cells 31 -> 31, grid 3 -> 7` - the cells were pre-built but the grid still
+-- had to grow.
+--
+-- Why 3 and not 7: cell placement depends on the sort method, and
+-- `UICellContainer:GetSortMethod` falls back to `sort_by_sizekind` when
+-- `sort_method` is nil.  SortingPlus sets it (`zzz_rax_sortingplus_mcm.script`
+-- :115) in ITS actor_on_first_update, and `zzz_alao_prewarm` sorts before
+-- `zzz_rax_sortingplus_mcm` alphabetically, so this mod's listener runs FIRST
+-- and lays the pool out under a different sort than the real open then uses.
+-- Under `sort_by_kind` every new kind group starts a fresh row
+-- (`FindFreeCell` does `self.rKind.row = self.row_end + 1`), which is why the
+-- real open needs more rows than a dense sizekind layout.
+--
+-- Rather than chase the sort order, over-provision: `UICellContainer:Grow` is
+--
+--     local rows = #self.grid + 1
+--     self.grid[rows] = {}
+--     for i = 1, self.cols do self.grid[rows][i] = true end
+--
+-- i.e. one Lua table and `cols` booleans.  No static, no texture, no engine
+-- call of any kind.  Grid rows are free, so buy plenty: enough that even a
+-- one-row-per-stack layout fits without a single Grow() at open time.
+local GRID_ROWS_PER_CELL   = 1.0
+local GRID_MIN_ROWS        = 8
 
 -- v1.2, TARGET 2.  Warm the engine's tutorial sequencer.
 --
@@ -399,17 +426,37 @@ local function prewarm_inv_pool()
 		end
 	end
 
-	-- Leave nothing visible behind.  Reset() clears the index tables, frees the
-	-- grid and hides every cell but KEEPS the cells - which is the whole point,
-	-- and is exactly what the real open's Reinit does to them first anyway.
+	-- Leave nothing visible behind.  Reset() clears the index tables, marks
+	-- every grid square free again and hides every cell, but KEEPS the cells -
+	-- which is the whole point, and is exactly what the real open's Reinit does
+	-- to them first anyway.  It does not remove grid ROWS either; the rows are
+	-- simply however many this layout happened to need.
 	pcall(function() cc:Reset() end)
+
+	-- v1.3: so buy more of them.  Free (see the GRID_MIN_ROWS comment), and it
+	-- removes the dependency on this mod and SortingPlus agreeing about the
+	-- sort method at frame 7.
+	local want = math.floor((grown + extra) * GRID_ROWS_PER_CELL)
+	if want < GRID_MIN_ROWS then want = GRID_MIN_ROWS end
+	local before_rows = 0
+	for _ in pairs(cc.grid or {}) do before_rows = before_rows + 1 end
+	pcall(function()
+		local n = before_rows
+		while n < want do
+			cc:Grow()
+			n = n + 1
+		end
+	end)
+	local after_rows = 0
+	for _ in pairs(cc.grid or {}) do after_rows = after_rows + 1 end
 
 	if dc then
 		dc["On_CC_Add"], dc["On_CC_Remove"] = had_add, had_rm
 	end
 
 	if ok then
-		note("inv pool: %s cells + %s headroom, %s grid rows", grown, extra, rows)
+		note("inv pool: %s cells + %s headroom, grid %s -> %s rows (laid out in %s)",
+		     grown, extra, before_rows, after_rows, rows)
 	else
 		note("inv pool: FAILED: %s", tostring(err))
 	end

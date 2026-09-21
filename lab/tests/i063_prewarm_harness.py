@@ -268,7 +268,12 @@ function ccmt:Callback(func, ...)
     if self.owner and self.owner[func] then return self.owner[func](self.owner, ...) end
 end
 
+GROWS = 0
 function ccmt:Grow()
+    -- The real one is a Lua table and `cols` booleans: no static, no texture,
+    -- no engine call.  Counted here only so a test can assert it never happens
+    -- at open time.
+    GROWS = GROWS + 1
     local rows = #self.grid + 1
     self.grid[rows] = {}
     for i = 1, COLS do self.grid[rows][i] = true end
@@ -284,14 +289,25 @@ function ccmt:Reset()
     end
 end
 
+-- How densely items pack. "kind" starts a fresh row per kind group, which is
+-- what SortingPlus turns on AFTER this mod's listener has run; the nil/default
+-- sizekind layout packs COLS per row.  That difference is the v1.2 grid bug.
+SORT_METHOD = nil
+
 function ccmt:AddItem(obj)
     local id = tostring(obj)
     if self.indx_id[id] then return end
-    -- one free row per item, growing when full (the quadratic scan is not
-    -- modelled; what matters here is WHEN a cell gets constructed)
+    local per_row = (SORT_METHOD == "kind") and 1 or COLS
     local placed = nil
     for r = 1, #self.grid do
-        if self.grid[r][1] then self.grid[r][1] = false placed = r break end
+        local used = 0
+        for c = 1, COLS do if self.grid[r][c] == false then used = used + 1 end end
+        if used < per_row then
+            for c = 1, COLS do
+                if self.grid[r][c] then self.grid[r][c] = false placed = r break end
+            end
+            break
+        end
     end
     if not placed then
         self:Grow()
@@ -375,11 +391,19 @@ class Arm:
             self.mod.on_game_start()
 
     # -- driving ----------------------------------------------------------
-    def first_update(self, others_build_gui=True):
-        """FDDA / SortingPlus build the GUI first; then our listener runs."""
+    def first_update(self, others_build_gui=True, sortingplus="kind"):
+        """One actor_on_first_update pass, in the live registration order.
+
+        `custom_functor_autoinject` (FDDA) builds the GUI first, then ours runs
+        - `zzz_alao_prewarm` sorts before `zzz_rax_sortingplus_mcm` - and then
+        SortingPlus sets the sort method, which changes how densely the next
+        open packs the grid.  That ordering is the whole of the v1.2 grid bug.
+        """
         if others_build_gui:
             self.g.OTHER_MOD_BUILDS_GUI()
         self.g.SendScriptCallback("actor_on_first_update")
+        if sortingplus:
+            self.g.SORT_METHOD = sortingplus
 
     def open_inventory(self):
         self.g.ui_inventory.start("inventory")

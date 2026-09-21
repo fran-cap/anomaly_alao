@@ -6,15 +6,31 @@ file and patches no function: it calls public entry points of other mods,
 constructs sound objects, and appends one node to a UI xml through DXML. Disable
 it and nothing changes except *when* that work happens.
 
-## v1.2 in one table
+## Scoreboard
 
-| target | what is cold | what v1.2 does | measured |
-|---|---|---|---|
-| inventory **cell pool** | `CC["actor_bag"]` is built empty; the first open constructs one `UICellItem` (4 `InitStatic`) per stack | grow the pool + grid at first update, plus 12 spare cells | first open 17.4 / 9.2 / 7.9 / 12.0 ms vs 3.5-4.9 for every later open |
-| **tutorial sequencer** | the first `game.start_tutorial` of the session parses `ui\game_tutorials.xml` and loads its UI | start and immediately stop a no-op tutorial at first update | `bind_campfire.script:176`: exactly **one** call of 705 / 716 ms per capture, every other call ≤ 0.8 ms |
-| sound resources | each `sound_object(path)` path is cold once | construct all ~160 at first update | **confirmed**: footstep row drops below the 0.1 ms floor entirely |
-| encyclopedia tab | `get_ui()` lazy singleton | call it at first update | 7.4 / 7.1 → 1.9 ms |
-| inventory **object** | `UIInventory()` | build it if nil | **no-op on GAMMA** — two other mods already do it |
+| target | what it does | verdict |
+|---|---|---|
+| **tutorial sequencer** | start + immediately stop a no-op tutorial at first update | **CONFIRMED.** The campfire freeze is gone. |
+| sound resources | construct all ~160 `sound_object` paths at first update | **CONFIRMED.** The footstep row drops below the 0.1 ms floor entirely. |
+| encyclopedia tab | call the `get_ui()` lazy singleton at first update | **CONFIRMED**, 7.4 / 7.1 → 1.9 ms (one run). |
+| inventory **cell pool + grid** | pre-build `CC["actor_bag"]`'s cells and grid rows | **under the bar.** Real, measurable, ~2.5 ms — and the first-open *frame* is mostly engine, so the player may not feel it. See below. |
+| inventory **object** | build `UIInventory()` if nil | **no-op on GAMMA** — two other mods already do it. Kept for installs without them. |
+
+### Tutorial sequencer: confirmed in game
+
+Run `20260920-194429-I-063-d9e519`, v1.2, four captures.
+
+| | baseline (1 / 3) | variant (2 / 4) |
+|---|---|---|
+| campfire walk-up frame | **755 / 771 ms** (724.7 / 736.4 ms of script under `bind_stalker.actor_binder.update`) | **no such frame at all** |
+| engine log | — | `tutorial: alao_prewarm_noop started=true stopped=true` |
+| player report | "the large stutter with the campfire" | *"the large stutter with the campfire is gone"*, no UI flash, no stuck input |
+
+So all three of the things this README listed as unverifiable are answered:
+**the injected DXML node parses**, a start immediately followed by a stop is
+invisible and leaves no input capture, and the second `start_tutorial` is cheap.
+That is the biggest single hitch this mod removes, and it was found by accident
+while chasing the inventory.
 
 ## The measurement it is built on
 
@@ -89,8 +105,10 @@ loading screen still up (`on_loading_screen_key_prompt` is at frame ~62 in every
 capture, so there are ~55 frames of screen left), synchronously, in one go:
 
 1. `ui_inventory.GUI = ui_inventory.UIInventory()` if `GUI` is nil.
-2. `ui_pda_encyclopedia_tab.get_ui()`.
-3. Construct every sound path the three sound scripts can ask for (~160).
+2. Grow `GUI.CC["actor_bag"]`'s cell pool and grid rows to cover the ruck.
+3. `ui_pda_encyclopedia_tab.get_ui()`.
+4. Start and immediately stop a no-op tutorial, to warm the engine sequencer.
+5. Construct every sound path the three sound scripts can ask for (~160).
 
 Every construction is `pcall`ed, so a path that does not exist on someone's
 install costs one failed call and is counted. There is a once-per-session latch
@@ -348,9 +366,76 @@ Three details that matter:
   `UIInventory.ParseInventory` (`liz_fdda_redone_consumables.script:143`) to drop
   `items_anm_dummy`; the override forwards all four arguments, so this still
   works and returns exactly what the real open would get.
-* **`cc:Reset()` afterwards** leaves the pool and the grid but clears the index
-  tables, frees the grid and hides every cell — which is exactly what the real
-  open's `Reinit` does to them first anyway. `idxer` goes back to 0.
+* **`cc:Reset()` afterwards** leaves the pool and the grid rows but clears the
+  index tables, marks every grid square free and hides every cell — which is
+  exactly what the real open's `Reinit` does to them first anyway. `idxer` goes
+  back to 0.
+* **v1.3: then over-provision the grid.** Cell placement depends on the sort
+  method, and `GetSortMethod` falls back to `sort_by_sizekind` when
+  `sort_method` is nil. SortingPlus sets it in *its*
+  `actor_on_first_update` (`zzz_rax_sortingplus_mcm.script:115`), and
+  `zzz_alao_prewarm` sorts **before** `zzz_rax_sortingplus_mcm` alphabetically,
+  so this mod lays the pool out under a different sort than the real open then
+  uses — under `sort_by_kind` every kind group starts a fresh row
+  (`FindFreeCell`: `self.rKind.row = self.row_end + 1`), so the real open needed
+  7 rows where the prewarm had made 3. Rather than chase the sort order, v1.3
+  grows the grid to `max(GRID_MIN_ROWS, cells)` rows after the reset. Rows are
+  free — see the `Grow()` listing above — so being generous costs nothing.
+
+### What the pool prewarm actually bought, honestly
+
+v1.2 was measured in `20260920-194429-I-063-d9e519` and **did not clear the
+5 ms bar.** The trace, first open of each capture:
+
+| arm | capture | ms | pre | post |
+|---|---|---:|---|---|
+| baseline | 1 (cold) | 14.76 | `cells=0,grid=0` | `cells=19,grid=7` |
+| baseline | 3 (warm) | 9.26 | `cells=0,grid=0` | `cells=19,grid=7` |
+| variant | 2 (cold) | 17.03 | `cells=31,grid=3` | `cells=31,grid=7` |
+| variant | 4 (warm) | 6.75 | `cells=31,grid=3` | `cells=31,grid=7` |
+
+Two things follow, and neither is flattering.
+
+**1. v1.2 left the grid short** — `grid 3 -> 7` on every variant open. The cells
+were pre-built (31 = 19 + 12) but the grid still had to grow. v1.3 fixes that
+(below), but it is not where the milliseconds are, because
+`UICellContainer:Grow` is
+
+```lua
+local rows = #self.grid + 1
+self.grid[rows] = {}
+for i = 1, self.cols do self.grid[rows][i] = true end
+```
+
+— one Lua table and `cols` booleans. **No static, no texture, no engine call.**
+Four of those cannot cost 17 ms.
+
+**2. So cell construction was never the dominant cost.** The variant's cold
+capture spent 17.03 ms building *zero* cells and growing four free rows. What is
+left in the first open is: the `spairs`/`hspairs` sort, one
+`FindFreeCell` grid scan per item (three uncached `SYS_GetParam` each),
+`UICellItem:Set` → `Update` → `InitTexture` per item, one real
+`Scroll_Reinit` (`scroll:Clear`, `SetWndSize`, `AddWindow`), `UpdateInfo(true)`,
+`Picker_Toggle` and `ShowDialog(true)`. Most of that is engine-side and
+first-time *per session*, not per cell — and the arm-to-arm difference
+(17.03 vs 14.76 cold, 6.75 vs 9.26 warm) is inside the cold/warm spread of a
+single arm. The honest reading is **~2.5 ms in the warm captures and nothing
+resolvable in the cold ones**.
+
+**3. And the frame is mostly not script anyway.** Variant capture 4's first-open
+frame was **37 ms with only 8.5 ms of script — 28 ms of engine**, the UI show
+itself. Baseline capture 1 was a 21 ms frame with 15.6 ms of script. So a
+*perfect* script-side prewarm still leaves the player a ~30 ms frame, and
+script-ms is the wrong instrument for the question "does the first inventory
+open still feel bad".
+
+**How to settle it:** measure the **frame** of the first-open frame, not the
+listener. The profiler already logs per-frame `frm` lines, so the procedure is:
+take the `t` of the first `ActorMenu_on_before_init_mode#ui_inventory.script:93`
+trace line, find the frames spanning it, and record total frame ms — **≥ 4
+captures per arm**, because two is not enough to separate this from the
+cold/warm spread that dominates everything here. Until that exists, this target
+should not be scored either way.
 
 **Headroom.** `POOL_HEADROOM = 12` spare empty cells, constructed the way
 `AddItemInCell` constructs them (non-manual, so they use the container's own xml
@@ -418,23 +503,29 @@ is the protocol that script documents for modpack authors, so Catspaw's hook
 pass skips a node that deliberately has no `guard_key` instead of logging about
 it.
 
-### What cannot be verified offline — and this target is mostly that
+### What could not be verified offline — all three now answered
+
+These were written before the run and are kept as written, with the answers:
 
 * **The schema `game_tutorials.xml` requires.** It ships inside the `.db`
   archives: no enabled mod ships a copy and there is none loose in
   `Anomaly/gamedata/configs`, so it could not be read. The node is modelled on
   the structure `modxml_tutorial_hooks` navigates (`<name> / item / main_wnd`,
-  with `guard_key` optional). It may simply not parse.
+  with `guard_key` optional). It may simply not parse. → **It parses.**
+  `tutorial: alao_prewarm_noop started=true stopped=true` in both variant
+  captures.
 * **Whether a start immediately followed by a stop is invisible**, leaves no
-  input capture and no lingering static.
-* **Whether the second `start_tutorial` is then cheap** — which is the whole
-  point, and the only thing the in-game run actually decides.
+  input capture and no lingering static. → **Yes.** The player reported no UI
+  flash and no stuck input.
+* **Whether the second `start_tutorial` is then cheap** — the whole point.
+  → **Yes.** The baseline's 755 / 771 ms campfire frame has no counterpart in
+  either variant capture.
 
-None of it is dangerous if wrong: `start_tutorial` on an unknown name is a no-op
-plus an engine log line. The prewarm prints
-`tutorial: alao_prewarm_noop started=<bool> stopped=<bool>`, so the log says
+It was also not dangerous if wrong: `start_tutorial` on an unknown name is a
+no-op plus an engine log line, the prewarm prints
+`tutorial: alao_prewarm_noop started=<bool> stopped=<bool>` so the log says
 whether the node parsed, and `TUTORIAL_NAME` can be pointed at an existing
-tutorial if it did not.
+tutorial if it ever stops working.
 
 ## What could not be verified offline (and how it turned out)
 
@@ -523,7 +614,7 @@ so a traced log parses exactly as before; read the trace lines by grepping.
 
 ## Tests
 
-`lab/tests/test_i063_prewarm.py` (33), stub engine under `lupa.luajit20`
+`lab/tests/test_i063_prewarm.py` (37), stub engine under `lupa.luajit20`
 (`lab/tests/i063_prewarm_harness.py`): differential arms with and without the
 mod over the real `eft_jump_sounds.script` and `footstep_sounds.script`, the
 GUI-nil assumption, the twelve-listener non-identity pinned, "the whole queue is
