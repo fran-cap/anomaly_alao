@@ -1,0 +1,1661 @@
+-- ALAO script-side profiler (idea I-048). Measurement only - this never ships
+-- with a rewrite, it is its own overlay mod that goes on TOP of both arms.
+--
+-- Why: fps measures the whole frame and ALAO only ever moves the script slice of
+-- it, so every per-frame delta we queued came back null inside the +-2% noise.
+-- The engine hands Lua a profile_timer (lua_help.script:1200, start/stop/time),
+-- so we can time the script slice directly instead.
+--
+-- What it hooks: axr_main.make_callback. _g.SendScriptCallback funnels every
+-- scripted callback in the game through that one function, so wrapping it gets
+-- actor_on_update / npc_on_update / monster_on_update / on_key_press / ... in
+-- one place, with no edit to any winner file. Optionally (off by default, see
+-- WRAP_BINDERS) the three binder :update methods too.
+--
+-- Which copy of axr_main is live does not matter to us, and that is the point
+-- of patching the table instead of editing a file: priority in this install is
+-- highest-priority enabled mod, then GAMMA's loose in-place patches in
+-- Anomaly/gamedata/scripts, then the .db archives, and for axr_main.script the
+-- loose GAMMA copy wins - its make_callback dispatches through
+-- spairs(intercepts[name], sort_func_values_ascend), i.e. the hspairs min-heap
+-- from _g_patches.script, not the db copy's bare pairs. Nothing in the install
+-- caches axr_main.make_callback into a local, so one assignment catches every
+-- caller. Binder wrapping is the part that DOES care: bind_monster.script is
+-- loose-patched by GAMMA while bind_stalker.script comes from the db.
+--
+-- Attribution is INCLUSIVE and top-level only: a make_callback that happens
+-- while another one is already being timed is counted (as `nested`) but not
+-- timed, because one shared timer cannot be nested. So the per-name numbers add
+-- up to the total without double counting, and that total is the thing we are
+-- actually after: script ms per frame.
+--
+-- Output: one block of ALAOPROF| lines in the engine log every DUMP_EVERY_MS.
+-- lab/framework/aalo/profiler.py parses it back. Units are established at
+-- startup against os.clock, not assumed - see calibrate().
+
+local DUMP_EVERY_MS   = 30000   -- dump window length, engine ms
+local CALIB_MS        = 250     -- busy-loop length used to establish timer units
+local OVERHEAD_ITERS  = 20000   -- iterations used to price our own instrumentation
+local WRAP_BINDERS    = false   -- see the header comment: binder wrapping swallows
+                                -- the callbacks fired inside the binder bodies
+local WRAP_LISTENERS  = false   -- v2, see "per-listener attribution" below
+
+-- --- hitch attribution (I-058) ----------------------------------------------
+-- The mean hides what the player feels. ActorMenu_on_before_init_mode is ~10 ms
+-- per inventory open; at 215 fps that is two whole frames gone. So on top of
+-- sum/count, record for every callback and every listener: the biggest single
+-- call, when the first slow call happened, and a coarse log2 histogram so a p99
+-- can be read off without keeping a sample list.
+--
+-- The hot path must not get more expensive - drx_da_main alone is 353 listener
+-- calls per frame - so ALL of this is behind one numeric compare: a call that
+-- costs less than HITCH_FLOOR_MS pays exactly `if d >= hfloor then` and nothing
+-- else, no table lookup, no allocation. Above the floor we do one hash lookup,
+-- a doubling loop of at most HITCH_BUCKETS steps, and one array increment; the
+-- bucket array is allocated once per name, the first time that name goes slow.
+--
+-- Consequence, and it is deliberate: the hitch numbers only describe calls at
+-- or above the floor. Everything below is "fast", counted by `calls` on the cb
+-- line, and the parser reconstructs bucket 0 as calls - sum(buckets). "First
+-- call" therefore means first call ABOVE THE FLOOR, which for an inventory open
+-- (every one of them is milliseconds) is the first open of the session.
+local HITCH             = true
+local HITCH_FLOOR_MS    = 0.1   -- bucket 1 is [floor, 2*floor)
+local HITCH_BUCKETS     = 14    -- 0.1 ms .. 819 ms, last bucket is open-ended
+
+-- --- per-call trace for a named listener (I-063) -----------------------------
+-- max / first / histogram is the right summary for "is this listener a hitch",
+-- and the wrong one for "WHY is this one call 19 ms and that one 4". For
+-- ui_inventory's open the answer is suspected to be state that grows between
+-- opens (the cell pool, the grid), and a summary cannot show a correlation.
+--
+-- So: name a listener (or a prefix of its label) here and every one of its
+-- calls gets one `ALAOPROF|1|trace|` line with its duration, the frame, and a
+-- pair of cheap covariates sampled immediately BEFORE and AFTER the call - both
+-- outside the timer, so the trace never inflates the number it is reporting.
+--
+-- This is deliberately NOT general. It is for listeners that fire a handful of
+-- times a session. Point it at actor_on_update and it will write a line per
+-- frame until it hits TRACE_MAX_LINES and stops.
+--
+-- nil (the default) means the whole thing costs one upvalue read and one `if`
+-- per wrapped call - the same class of cost as the hitch floor compare, and the
+-- default overlays keep that cost whether or not they use the feature.
+local TRACE_LISTENERS   = nil   -- e.g. {"ActorMenu_on_before_init_mode#ui_inventory.script"}
+local TRACE_MAX_LINES   = 400   -- hard cap, so a bad pattern cannot flood the log
+
+-- =========================================================================
+-- I-062 WALKOUT ADDITIONS start here. Everything below this banner is new;
+-- everything above it is the I-048 + I-058 build, byte for byte, so a merge
+-- with another agent's profiler change only ever conflicts inside a block
+-- that is marked I-062.
+--
+-- The question: walking out of the gammabaseline start area produces 1-4
+-- frames of 25-44 ms, CPU bound, and the hitch profiler shows NO listener
+-- above ~12 ms in them. make_callback is one door into Lua and the engine has
+-- several others, so the instrument is looking through a keyhole. This build
+-- opens the other doors and, more importantly, adds a FRAME-level line that
+-- says how much of a slow frame was script at all.
+--
+-- Three new wrap families, each on its own timer and its own depth guard:
+--
+--   bnd  object binders and se_* server objects, per CLASS and METHOD
+--        (`bind_stalker.actor_binder.net_spawn`). The existing WRAP_BINDERS
+--        mode is left switched off and untouched: it shares `depth` and the
+--        main timer with make_callback, so a wrapped binder :update makes
+--        every callback inside it `nested` and the I-048 ranking collapses.
+--        That is why it was never usable, and the fix is a separate axis,
+--        not a separate flag.
+--   eng  functions the engine calls by name, never through make_callback:
+--        visual_memory_manager.get_visible_value, ProcessEventQueue,
+--        xr_logic.issue_event, ...
+--   evt  CreateTimeEvent / AddUniqueCall / level.add_call bodies, wrapped at
+--        REGISTRATION so each one is labelled with its registration site
+--        (file:line from debug.getinfo).
+--
+-- Double counting is handled by ONE shared counter, `active`: a timed region
+-- entered while nothing else is timed is "top level", and only top-level
+-- durations go into the per-frame union. So bnd time that contains cb time is
+-- counted once, on the outer axis, while both axes still get their own
+-- attribution. That is the whole trick, and it is why the per-callback
+-- ranking of this build is still comparable with every I-048 number.
+--
+-- Return values: the wrappers propagate at most THREE. net_spawn returns a
+-- boolean and the engine believes it, so a wrapper that dropped returns would
+-- break the game rather than mismeasure it. Nothing on the wrap lists returns
+-- more than one value; do not add a variadic-return function to them.
+--
+-- Errors: a wrapper does not pcall. If the wrapped body throws, the timer
+-- stays started and the axis wedges - same as the I-048 build, deliberately,
+-- because pcall changes error semantics in a game that relies on them.
+-- =========================================================================
+
+-- Bumped whenever the instrument changes in a way that makes two runs
+-- non-comparable. v2 = the first in-game run's two faults fixed: luabind class
+-- objects are userdata so nothing was wrapped, and deferred functors were
+-- labelled by _g.script's plumbing instead of their owner.
+-- v3 = the second in-game run's findings:
+--   * the deferred functor the log blamed for a 26 ms frame at t~54 s was MY
+--     OWN eng wrapper around ProcessEventQueue, wrapped a second time by the
+--     evt hook. Never double-wrap our own wrappers.
+--   * the `@caller` half of a functor label pointed at this file, because the
+--     debug.getinfo level was counted from inside two helper frames and a
+--     pcall. Capture the caller in the outer wrapper, where the depth is known.
+--   * a new `sub` axis and `nst` lines, to get inside
+--     bind_smart_terrain.smart_terrain_binder.update, which is 440-457 ms in
+--     ONE call in all four captures with only 6 ms of callbacks in it.
+-- v4 = what the hamlet run (20260920-201819-I-062-a83793) answered and asked:
+--   * the 440 ms IS se_smart_terrain:try_respawn, 99.97% of the call, in all
+--     four captures. update_jobs never appears and smr_pop.smart_can_respawn
+--     (the gate) is 3 ms across 750 calls, so the cost is entirely AFTER the
+--     gate: one squad being created on the frame the actor arrives.
+--   * so v4 follows the spawn path down, and every level of it gets its OWN
+--     axis, because two functions on one axis mean the inner one is `nested`
+--     and invisible - which is how a 440 ms call had nothing in it to look at
+--     for two runs. bnd -> sub -> spn -> mem -> acr is five independent
+--     timers for five levels of one call stack.
+--   * per-axis nst floors, so a 27 ms evt body gets a breakdown too.
+local WALKOUT_VER       = 4
+
+local WRAP_BINDERS_I062 = true  -- the bnd axis (see above); independent of the
+                                -- old WRAP_BINDERS, which stays off
+local WRAP_BINDER_UPDATE = true -- :update is the only per-object PER-FRAME
+                                -- method. Off leaves the rare-but-expensive
+                                -- lifecycle methods wrapped for ~free.
+local WRAP_GLOBALS      = true  -- the eng axis
+local WRAP_TIME_EVENTS  = true  -- the evt axis
+local RESCAN_EVERY      = 600   -- frames between re-attempts at wrap targets
+                                -- that were not loaded yet. A module can be
+                                -- pulled in lazily by the first _G reference
+                                -- to it, so "not there at on_game_start" is
+                                -- not "not there".
+local RESCAN_ROUNDS     = 20    -- give up re-scanning after this many
+
+-- the frame recorder
+local FRAMES            = true
+local FRM_FLOOR_MS      = 12    -- emit a line only for frames at least this long
+local FRM_MAX_LINES     = 400   -- hard cap: a bad scene must not flood the log
+
+-- --- v3: getting inside one very slow call --------------------------------
+-- Run 2 found `bind_smart_terrain.smart_terrain_binder.update` at 440-457 ms
+-- in ONE call, in all four captures, with u_cb of 6 ms for the whole frame -
+-- so it is not a callback, not a listener, and the frame recorder's top-3 just
+-- says "that binder". Two additions to get further:
+--
+--   * a `sub` axis for the se_smart_terrain methods that update() calls. It is
+--     its own axis for the same reason bnd is: a sub region nested inside the
+--     bnd region has to be timed, not counted as `nested`. The LEAF functions
+--     go on the existing `eng` axis instead of on `sub`, so one level of
+--     nesting inside sub is timed too, without a fifth axis.
+--   * an `nst` line: when a TOP-LEVEL region takes at least NST_FLOOR_MS, dump
+--     the five most expensive regions that completed inside it, whatever axis
+--     they were on. That is the actual breakdown of one bad call.
+local NST               = true
+local NST_FLOOR_MS      = 50
+-- v4: per axis, because what counts as "worth a breakdown" is not the same
+-- everywhere. The t~54 s frame is a 27 ms time-event body (it turned out to be
+-- DynamicNewsManager.TickNews) and sat under a 50 ms floor for two runs.
+local NST_FLOOR_BY_AXIS = { cb = 20, evt = 20, lst = 20 }
+local NST_MAX_LINES     = 120
+local NST_SLOTS         = 5
+
+-- What to wrap. Generated from lab/tools/i062_engine_entry_census.py over the
+-- live winner tree (1350 scripts, 38 object_binder classes, 36 cse_/se_ server
+-- classes), ranked by how likely a thing is to run when objects switch online.
+-- Each entry is {module (the .script name), class, ...}; a class that is not
+-- there at install time is reported as missing in the hdr line and re-tried.
+local BINDER_TARGETS = {
+	-- NPCs and monsters first: these are what goes online when you walk out
+	{ "xr_motivator",          "motivator_binder"        },
+	{ "bind_monster",          "generic_object_binder"   },
+	{ "bind_stalker",          "actor_binder"            },
+	{ "bind_item",             "item_binder"             },
+	{ "bind_physic_object",    "generic_physics_binder"  },
+	{ "bind_restrictor",       "restrictor_binder"       },
+	{ "bind_anomaly_zone",     "anomaly_zone_binder"     },
+	{ "bind_anomaly_field",    "anomaly_field_binder"    },
+	{ "bind_campfire",         "campfire_binder"         },
+	{ "bind_smart_terrain",    "smart_terrain_binder"    },
+	{ "bind_smart_cover",      "smart_cover_binder"      },
+	{ "bind_camp",             "camp_binder"             },
+	{ "bind_crow",             "crow_binder"             },
+	{ "bind_car",              "car_binder"              },
+	{ "bind_heli",             "heli_binder"             },
+	{ "bind_dynamic_light",    "generic_light_binder"    },
+	{ "bind_signal_light",     "signal_light_binder"     },
+	{ "bind_level_changer",    "lchanger_binder"         },
+	{ "bind_container",        "container_binder"        },
+	{ "bind_trader",           "trader_object_binder"    },
+	{ "item_artefact",         "artefact_binder"         },
+	{ "item_device",           "device_binder"           },
+	-- server objects: the alife side of switching online
+	{ "se_stalker",            "se_stalker"              },
+	{ "se_monster",            "se_monster"              },
+	{ "sim_squad_scripted",    "sim_squad_scripted"      },
+	{ "smart_terrain",         "se_smart_terrain"        },
+	{ "se_item",               "se_item"                 },
+	{ "se_zones",              "se_zone_anom"            },
+	{ "se_zones",              "se_restrictor"           },
+	{ "se_smart_cover",        "se_smart_cover"          },
+	{ "se_artefact",           "se_artefact"             },
+	{ "se_level_changer",      "se_level_changer"        },
+}
+
+-- Methods the engine calls on those classes directly. `update` is separated
+-- out because it is the only per-frame one and therefore the only one with a
+-- steady-state price.
+local BINDER_METHODS = {
+	"net_spawn", "net_destroy", "reinit", "load", "save",
+	"net_save", "net_import", "net_export", "net_Relcase",
+	"on_register", "on_unregister", "switch_online", "switch_offline",
+	"can_switch_online", "can_switch_offline", "STATE_Write", "STATE_Read",
+	"shedule_update",
+}
+local BINDER_UPDATE_METHODS = { "update" }
+
+-- Engine-called globals. {module, function}; module "" means a bare global
+-- (everything _g.script defines lands in _G, which is why ProcessEventQueue
+-- and CreateTimeEvent are addressed with no module).
+local GLOBAL_TARGETS = {
+	{ "visual_memory_manager", "get_visible_value" },
+	{ "",                      "ProcessEventQueue" },
+	{ "xr_logic",              "issue_event" },
+	{ "xr_logic",              "try_switch_to_another_section" },
+	{ "game_relations",        "get_npcs_relation" },
+	{ "xr_logic",              "pstor_retrieve" },
+	{ "xr_logic",              "pstor_store" },
+	{ "xr_gulag",              "setup_gulag_and_logic_on_spawn" },
+	{ "sim_board",             "get_sim_board" },
+	{ "simulation_objects",    "get_sim_obj_registry" },
+	{ "xr_combat_ignore",      "fighting_with_actor_npcs" },
+	{ "state_mgr",             "set_state" },
+	{ "db",                    "add_obj" },
+	{ "db",                    "del_obj" },
+	{ "level_weathers",        "get_weather_manager" },
+	{ "smart_terrain",         "setup_gulag_and_logic_on_spawn" },
+	{ "task_manager",          "get_task_manager" },
+	{ "ui_pda",                "on_show" },
+	{ "actor_menu",            "on_item_focus_receive" },
+	{ "axr_task_manager",      "on_task_callback" },
+	-- v3: the LEAVES of se_smart_terrain:update(). On the eng axis rather than
+	-- on `sub` precisely so they are a different axis from their callers and
+	-- therefore get timed instead of being counted as nested.
+	{ "smart_terrain",         "arrived_to_smart" },
+	{ "smart_terrain",         "job_avail_to_npc" },
+	{ "smart_terrain",         "validate_patrol_path" },
+	{ "gulag_general",         "load_job" },
+	{ "gulag_general",         "get_job_prior" },
+	{ "gulag_general",         "get_job_type" },
+	{ "smr_pop",               "smart_can_respawn" },
+	{ "bind_campfire",         "turn_off_campfires_by_smart_name" },
+	-- v4: the leaf of the whole respawn path. alife_create is the engine
+	-- allocating a server object; if the 440 ms is N of these then the only
+	-- lever is WHEN they happen, not how fast. Its own axis (`acr`) so nothing
+	-- else can be holding the timer when it runs.
+	{ "",                      "alife_create",      "acr" },
+	{ "",                      "alife_create_item", "acr" },
+	{ "smr_pop",               "get_unused_mutant_spawn_table" },
+	{ "smr_pop",               "get_faction_spawn_table" },
+	{ "smr_pop",               "get_mutant_spawn_table" },
+	{ "smr_civil_war",         "setup_factions_relation" },
+	{ "smr_civil_war",         "smart_is_base" },
+}
+
+-- v3: methods that se_smart_terrain:update() calls, on their own axis so the
+-- binder's 450 ms breaks down instead of swallowing them. {module, class,
+-- method}; the class is resolved exactly like a binder target.
+local SUB_TARGETS = {
+	{ "smart_terrain", "se_smart_terrain", "update_jobs" },
+	{ "smart_terrain", "se_smart_terrain", "try_respawn" },
+	{ "smart_terrain", "se_smart_terrain", "check_smart_faction" },
+	{ "smart_terrain", "se_smart_terrain", "load_jobs" },
+	{ "smart_terrain", "se_smart_terrain", "show" },
+	{ "smart_terrain", "se_smart_terrain", "select_npc_job" },
+	{ "smart_terrain", "se_smart_terrain", "fill_npc_info" },
+	{ "smart_terrain", "se_smart_terrain", "register_npc" },
+	{ "smart_terrain", "se_smart_terrain", "clear_job" },
+	{ "smart_terrain", "se_smart_terrain", "check_alarm" },
+	-- the bursts of 30-40 ms frames in the first ~25 s after every load, each
+	-- one many sim_squad_scripted.update calls at 2-3.5 ms with +1.5-4 MB of
+	-- GC. update itself is already on the bnd axis (it is in BINDER_TARGETS),
+	-- so its parts go on `sub`.
+	{ "sim_squad_scripted", "sim_squad_scripted", "specific_update" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "generic_update" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "refresh" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "check_online_status" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "get_script_target" },
+
+	-- --- v4: the respawn path, one axis per level ------------------------
+	-- try_respawn (sub) -> SIMBOARD:create_squad (spn) -> the per-squad and
+	-- per-member work (mem) -> alife_create (acr). smr_pop.smr_handle_spawn is
+	-- deliberately NOT wrapped: it is a dispatcher that returns create_squad's
+	-- result, and wrapping both on one axis would hide create_squad.
+	{ "sim_board", "simulation_board", "create_squad", "spn" },
+
+	{ "sim_squad_scripted", "sim_squad_scripted", "create_npc",   "mem" },
+	{ "sim_squad_scripted", "sim_squad_scripted", "init_squad",   "mem" },
+	{ "sim_board", "simulation_board", "setup_squad_and_group",   "mem" },
+	{ "sim_board", "simulation_board", "assign_squad_to_smart",   "mem" },
+}
+
+-- v4: module-level functions that belong on one of the spawn axes. Same shape
+-- as GLOBAL_TARGETS, kept separate only so the spawn path reads as one block.
+local SPAWN_GLOBALS = {
+	{ "smr_pop",       "remove_disabled_mutants_from_squad", "mem" },
+	{ "smr_pop",       "adjust_squad_size",                  "mem" },
+	{ "smr_pop",       "replace_mutant_variants_in_squad",   "mem" },
+	{ "smr_civil_war", "setup_civil_war_squad",              "mem" },
+}
+
+-- ---------------------------------------------------------------------------
+-- state (all local and flat: this runs a few thousand times a second and I do
+-- not want the instrument to become the thing I am measuring)
+-- ---------------------------------------------------------------------------
+local installed      = false
+local dev            = nil
+local timer          = nil
+local timer_kind     = "none"
+local units_per_ms   = nil
+
+local depth          = 0
+local last           = 0        -- last reading of timer:time(), monotonic
+
+local units, calls, nested = {}, {}, {}
+local seq            = 0
+local frames_total   = 0
+local win_frames     = 0
+local win_calls      = 0
+local win_nested     = 0
+local win_t0         = 0
+local next_dump      = 0
+local last_frame     = -1
+
+-- per-listener accounting (WRAP_LISTENERS). Its own timer and its own depth
+-- guard, because it nests INSIDE the make_callback timing region and one
+-- profile_timer cannot be nested - two independent accumulators can.
+local ltimer         = nil
+local ldepth         = 0
+local llast          = 0
+local lunits, lcalls = {}, {}
+local wrapped_by     = {}       -- original listener -> our wrapper
+local orig_by        = {}       -- our wrapper -> original listener
+local listeners_wrapped = 0
+
+-- hitch accounting. All of these are RUN-scoped (never reset by a dump): a
+-- hitch is a rare event and the interesting one is usually in the very first
+-- window, which every report drops. Each dump prints the running totals, so the
+-- last window of a run carries the whole-run answer and a diff of two windows
+-- carries a single window's.
+-- math.huge, not nil: every wrapper compares against it on every call, and an
+-- always-false compare is how the feature switches off without a branch.
+local hfloor         = math.huge  -- HITCH_FLOOR_MS in timer units, set at install
+local hmax, hfirst_t, hfirst_f, hfirst_u = {}, {}, {}, {}
+local hbuckets       = {}       -- name -> array of HITCH_BUCKETS counts
+local lhmax, lhfirst_t, lhfirst_f, lhfirst_u = {}, {}, {}, {}
+local lhbuckets      = {}
+local now_ms         = 0        -- time_global() as of the last frame boundary
+
+local orig_make_callback = nil
+local orig_callback_set, orig_callback_unset = nil, nil
+local dump = nil                -- forward declaration, defined below
+
+-- --- I-062 state -----------------------------------------------------------
+-- `active` is the shared nesting counter across ALL axes. A region entered at
+-- active == 0 is top level and its duration is the one that goes into the
+-- per-frame union; a region entered deeper is still timed on its own axis for
+-- attribution, but never added to the union. That is how bnd time that
+-- contains cb time is counted once.
+local active         = 0
+local axes           = {}       -- tag -> axis table (see new_axis)
+local axis_order     = {}
+local tick           = nil      -- forward declaration (the wrappers need it)
+local retry_pending  = nil      -- forward declaration (tick calls it)
+
+-- the frame recorder's per-frame accumulators
+local fr_t0          = 0        -- time_global() at the start of the open frame
+local fr_top, fr_ntop = 0, 0    -- union units / count of top-level regions
+local fr_cb          = 0        -- make_callback units in the open frame
+local fr_spawn, fr_destroy = 0, 0
+local fr_gc0         = 0
+local fr_after_log   = 0        -- the previous boundary wrote a line, so this
+                                -- frame paid for a log write
+local fr_t1n, fr_t1u = "-", 0   -- the three most expensive single regions of
+local fr_t2n, fr_t2u = "-", 0   -- the frame, whatever axis they are on
+local fr_t3n, fr_t3u = "-", 0
+-- ... but only regions worth naming. The slots are reset to this floor rather
+-- than to zero, so a cheap call pays ONE compare against a number instead of a
+-- three-way insert. Nothing under 10 us can be the biggest call of a 25 ms
+-- frame, which is the only question the top-3 exists to answer.
+local ftop_floor     = 0
+-- v3: NST_FLOOR_MS in timer units. math.huge until calibration succeeds, so an
+-- uncalibrated run cannot emit made-up breakdowns.
+local nfloor         = math.huge
+local nfloor_cb      = math.huge   -- v4: the make_callback axis has its own
+local frm_lines      = 0
+local frames_seen_at_floor = 0  -- slow frames the cap suppressed
+
+-- v3: the five most expensive regions inside the CURRENT top-level region.
+-- Epoch-stamped rather than cleared, so entering a top-level region costs one
+-- increment instead of ten assignments - and binder updates enter one per
+-- bound object per frame, so that difference is the whole design.
+local ns_epoch       = 0
+local nsn, nsu, nse  = {}, {}, {}
+local nst_lines      = 0
+
+-- lazily-loaded wrap targets we have not managed to reach yet
+local pending        = {}
+local pending_n      = 0
+local rescan_rounds  = 0
+local next_rescan    = 0
+local wrap_counts    = { bnd = 0, eng = 0, evt = 0, sub = 0 }
+local wrap_misses    = {}
+
+-- Record one slow call. Only ever called with d >= hfloor, so the common case
+-- never gets here. Allocates exactly one table per name, on that name's first
+-- slow call; after that it is a hash lookup, a compare, a short doubling loop
+-- and an array increment.
+local function hitch_hit(mx, ft, ff, fu, hb, name, d)
+	local h = hb[name]
+	if h == nil then
+		h = {}
+		for i = 1, HITCH_BUCKETS do h[i] = 0 end
+		hb[name] = h
+		mx[name] = d
+		ft[name] = now_ms
+		ff[name] = frames_total
+		fu[name] = d
+	elseif d > mx[name] then
+		mx[name] = d
+	end
+	local i, lim = 1, hfloor + hfloor
+	while i < HITCH_BUCKETS and d >= lim do
+		i = i + 1
+		lim = lim + lim
+	end
+	h[i] = h[i] + 1
+end
+
+-- --- I-062: the frame's three most expensive single regions -----------------
+-- A fixed six-slot running top-3, not a per-frame table: a table per frame
+-- would allocate 200+ times a second for a line we print at most 400 times a
+-- run. Candidates are regions from EVERY axis, nested ones included - in a
+-- 40 ms frame the useful answer is "which single call was big", and a listener
+-- inside its callback showing up next to it is information, not a bug.
+-- v3: one region into the current top-level region's five slots. Only reached
+-- for regions above ftop_floor, so the cost sits on the handful of calls a
+-- frame that are big enough to be worth naming.
+local function note_nest(label, d)
+	local w, wu = 1, nil
+	for i = 1, NST_SLOTS do
+		local u = (nse[i] == ns_epoch) and nsu[i] or -1
+		if wu == nil or u < wu then w, wu = i, u end
+	end
+	if d > wu then
+		nsn[w], nsu[w], nse[w] = label, d, ns_epoch
+	end
+end
+
+-- Dump them, worst first. Called only when a top-level region crossed the
+-- floor, so at most NST_MAX_LINES times in a run.
+-- `istop` is false for a region that ran INSIDE another timed region. Its
+-- breakdown would be the enclosing region's slots - siblings included - so we
+-- print no breakdown at all and say so with top=0. Naming the owner is still
+-- worth a line: the 27 ms body at t~54 s went two runs without a name.
+local function dump_nest(label, d, axis, istop)
+	if nst_lines >= NST_MAX_LINES then return end
+	nst_lines = nst_lines + 1
+	local parts = {}
+	local used = {}
+	if istop then
+	for _ = 1, NST_SLOTS do
+		local best, bu = nil, -1
+		for i = 1, NST_SLOTS do
+			if not used[i] and nse[i] == ns_epoch and nsu[i] > bu then
+				best, bu = i, nsu[i]
+			end
+		end
+		if not best then break end
+		used[best] = true
+		parts[#parts + 1] = nsn[best] .. "~" .. string.format("%.3f", nsu[best])
+	end
+	end
+	printf("ALAOPROF|1|nst|n=%s|frame=%s|t=%s|axis=%s|top=%s|scope=%s|units=%s|in=%s",
+		nst_lines, frames_total, now_ms, axis, istop and 1 or 0, label,
+		string.format("%.3f", d),
+		(#parts > 0) and table.concat(parts, ",") or "-")
+end
+
+local function note_top(label, d)
+	if d > fr_t1u then
+		fr_t3n, fr_t3u = fr_t2n, fr_t2u
+		fr_t2n, fr_t2u = fr_t1n, fr_t1u
+		fr_t1n, fr_t1u = label, d
+	elseif d > fr_t2u then
+		fr_t3n, fr_t3u = fr_t2n, fr_t2u
+		fr_t2n, fr_t2u = label, d
+	else
+		fr_t3n, fr_t3u = label, d
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- timer plumbing
+-- ---------------------------------------------------------------------------
+
+-- os.clock-based stand-in, used only if the engine has no profile_timer. Its
+-- resolution on Windows is about a millisecond, which is far too coarse for a
+-- single callback - the dump says so in `timer=` so nobody quotes it by mistake.
+local function make_clock_shim()
+	local acc, t0 = 0, 0
+	local shim = {}
+	function shim:start() t0 = os.clock() end
+	function shim:stop()  acc = acc + (os.clock() - t0) end
+	function shim:time()  return acc * 1000000 end   -- microseconds
+	return shim
+end
+
+local function new_timer()
+	if timer_kind == "profile_timer" then
+		return profile_timer()
+	end
+	return make_clock_shim()
+end
+
+-- How many timer units are one millisecond? Busy-loop for CALIB_MS of wall time
+-- with the timer running and divide. os.clock is the reference because
+-- time_global() only advances once per frame and would never move inside a loop.
+local function calibrate()
+	local t = new_timer()
+	local c0 = os.clock()
+	local c1 = c0
+	t:start()
+	local spin = 0
+	while (c1 - c0) * 1000 < CALIB_MS do
+		spin = spin + 1
+		c1 = os.clock()
+	end
+	t:stop()
+	local ms = (c1 - c0) * 1000
+	local u = t:time()
+	if ms <= 0 or u <= 0 then
+		return nil, ms, u, spin
+	end
+	return u / ms, ms, u, spin
+end
+
+-- What one instrumented call costs us, in nanoseconds: exactly the work the
+-- wrapper does around the real call, nothing else.
+local function measure_overhead(iters)
+	local u, c = {}, {}
+	local l = 0
+	local c0 = os.clock()
+	for _ = 1, iters do
+		local _f = dev.frame
+		timer:start()
+		timer:stop()
+		local t = timer:time()
+		local d = t - l
+		l = t
+		u.probe = (u.probe or 0) + d
+		c.probe = (c.probe or 0) + 1
+		-- the hitch half's whole cost on a fast call, priced with everything else
+		if d >= hfloor then
+			hitch_hit(hmax, hfirst_t, hfirst_f, hfirst_u, hbuckets, "probe", d)
+		end
+	end
+	local c1 = os.clock()
+	last = timer:time()             -- the probe moved the accumulator; resync
+	return (c1 - c0) * 1000000000 / iters
+end
+
+-- ---------------------------------------------------------------------------
+-- per-frame bookkeeping
+-- ---------------------------------------------------------------------------
+-- --- I-062: the frame line -------------------------------------------------
+-- Closes the frame that just ended and, if it was slow, prints ONE line for
+-- it. This is the line that answers "script or engine": frame ms minus the
+-- union of top-level script regions in that frame is everything the instrument
+-- cannot see - engine work, and Lua the wrap lists do not reach.
+--
+-- Two clocks are printed, not one, because I do not know which is truthful at
+-- frame granularity and I am not going to assume: `ms` is the time_global()
+-- delta (engine milliseconds, integer, advanced once per frame) and `dt_dev`
+-- is device().time_delta exactly as the engine hands it over, unconverted. The
+-- first real run settles which to quote; until then the report prints both.
+--
+-- One honest artefact: the boundary is the first INSTRUMENTED call of a frame,
+-- not the frame's true start, so `ms` is first-call to first-call. And the
+-- printf itself lands in the frame that follows, so that frame carries
+-- `after_log=1` and its `ms` includes a log write.
+local function frame_boundary(now)
+	local gc1 = collectgarbage("count")
+	local emitted = 0
+	if fr_t0 > 0 and (now - fr_t0) >= FRM_FLOOR_MS then
+		if frm_lines < FRM_MAX_LINES then
+			frm_lines = frm_lines + 1
+			emitted = 1
+			local ub, ue, uv = 0, 0, 0
+			local ab, ae, av = axes.bnd, axes.eng, axes.evt
+			if ab then ub = ab.fr end
+			if ae then ue = ae.fr end
+			if av then uv = av.fr end
+			printf("ALAOPROF|1|frm|n=%s|frame=%s|t=%s|ms=%s|dt_dev=%s|u_top=%s|n_top=%s|u_cb=%s|u_bnd=%s|u_eng=%s|u_evt=%s|spawn=%s|destroy=%s|gc0=%s|gc1=%s|after_log=%s|top=%s~%s,%s~%s,%s~%s",
+				frm_lines, frames_total - 1, fr_t0, now - fr_t0,
+				string.format("%.4f", dev.time_delta or -1),
+				string.format("%.3f", fr_top), fr_ntop,
+				string.format("%.3f", fr_cb),
+				string.format("%.3f", ub), string.format("%.3f", ue),
+				string.format("%.3f", uv),
+				fr_spawn, fr_destroy,
+				string.format("%.1f", fr_gc0), string.format("%.1f", gc1),
+				fr_after_log,
+				fr_t1n, string.format("%.3f", fr_t1u),
+				fr_t2n, string.format("%.3f", fr_t2u),
+				fr_t3n, string.format("%.3f", fr_t3u))
+		else
+			frames_seen_at_floor = frames_seen_at_floor + 1
+		end
+	end
+	fr_t0 = now
+	fr_gc0 = gc1
+	fr_after_log = emitted
+	fr_top, fr_ntop = 0, 0
+	fr_cb = 0
+	fr_spawn, fr_destroy = 0, 0
+	fr_t1n, fr_t1u = "-", ftop_floor
+	fr_t2n, fr_t2u = "-", ftop_floor
+	fr_t3n, fr_t3u = "-", ftop_floor
+	for i = 1, #axis_order do axes[axis_order[i]].fr = 0 end
+end
+
+tick = function()
+	local f = dev.frame
+	if f ~= last_frame then
+		last_frame = f
+		frames_total = frames_total + 1
+		win_frames = win_frames + 1
+		local now = time_global()
+		if FRAMES then frame_boundary(now) end          -- I-062
+		if pending_n > 0 and frames_total >= next_rescan then
+			retry_pending()                             -- I-062, forward local
+		end
+		now_ms = now                    -- so a hitch record costs no engine call
+		if now >= next_dump then
+			dump(now)
+		end
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- the dump
+-- ---------------------------------------------------------------------------
+dump = function(now)
+	seq = seq + 1
+	local total, names = 0, 0
+	for _, v in pairs(units) do
+		total = total + v
+		names = names + 1
+	end
+	for k, _ in pairs(nested) do          -- names seen only nested still get a line
+		if units[k] == nil then names = names + 1 end
+	end
+	printf("ALAOPROF|1|win|seq=%s|t0=%s|t1=%s|span_ms=%s|frames=%s|total_units=%s|calls=%s|nested=%s|names=%s",
+		seq, win_t0, now, now - win_t0, win_frames, string.format("%.3f", total), win_calls, win_nested, names)
+	for k, v in pairs(units) do
+		printf("ALAOPROF|1|cb|seq=%s|name=%s|calls=%s|units=%s|nested=%s",
+			seq, k, calls[k] or 0, string.format("%.3f", v), nested[k] or 0)
+	end
+	for k, v in pairs(nested) do
+		if units[k] == nil then
+			printf("ALAOPROF|1|cb|seq=%s|name=%s|calls=0|units=0.000|nested=%s", seq, k, v)
+		end
+	end
+	for k, v in pairs(lunits) do
+		printf("ALAOPROF|1|lst|seq=%s|name=%s|calls=%s|units=%s",
+			seq, k, lcalls[k] or 0, string.format("%.3f", v))
+	end
+	-- hitch lines. Run-scoped cumulative, and only for names that have gone
+	-- slow at least once, so a quiet run costs nothing in log volume.
+	local function dump_hitch(scope, mx, ft, ff, fu, hb)
+		for k, h in pairs(hb) do
+			local parts, above = {}, 0
+			for i = 1, HITCH_BUCKETS do
+				parts[i] = tostring(h[i])
+				above = above + h[i]
+			end
+			printf("ALAOPROF|1|hit|seq=%s|scope=%s|name=%s|max=%s|above=%s|first_t=%s|first_frame=%s|first_units=%s|floor=%s|b=%s",
+				seq, scope, k, string.format("%.3f", mx[k] or 0), above,
+				ft[k] or 0, ff[k] or 0, string.format("%.3f", fu[k] or 0),
+				string.format("%.3f", hfloor), table.concat(parts, ","))
+		end
+	end
+	-- I-062: one `axs` line per name per extra axis, same shape as `cb` but
+	-- tagged with the axis, so an old parser ignores them and a new one keeps
+	-- the axes apart instead of mixing binder time into the callback ranking.
+	for i = 1, #axis_order do
+		local A = axes[axis_order[i]]
+		for k, v in pairs(A.units) do
+			printf("ALAOPROF|1|axs|seq=%s|axis=%s|name=%s|calls=%s|units=%s|nested=%s",
+				seq, A.tag, k, A.calls[k] or 0, string.format("%.3f", v), A.nested[k] or 0)
+		end
+		for k, v in pairs(A.nested) do
+			if A.units[k] == nil then
+				printf("ALAOPROF|1|axs|seq=%s|axis=%s|name=%s|calls=0|units=0.000|nested=%s",
+					seq, A.tag, k, v)
+			end
+		end
+	end
+	if hfloor < math.huge then
+		dump_hitch("cb", hmax, hfirst_t, hfirst_f, hfirst_u, hbuckets)
+		dump_hitch("lst", lhmax, lhfirst_t, lhfirst_f, lhfirst_u, lhbuckets)
+		for i = 1, #axis_order do                                    -- I-062
+			local A = axes[axis_order[i]]
+			dump_hitch(A.tag, A.hmax, A.hft, A.hff, A.hfu, A.hb)
+		end
+	end
+	-- I-062: what the frame recorder did with this run so far
+	if FRAMES then
+		printf("ALAOPROF|1|frs|seq=%s|lines=%s|suppressed=%s|floor_ms=%s|wrapped_bnd=%s|wrapped_eng=%s|wrapped_evt=%s|wrapped_sub=%s|nst_lines=%s|nst_floor_ms=%s|pending=%s",
+			seq, frm_lines, frames_seen_at_floor, FRM_FLOOR_MS,
+			wrap_counts.bnd, wrap_counts.eng, wrap_counts.evt, wrap_counts.sub,
+			nst_lines, NST_FLOOR_MS, pending_n)
+		local axs = {}
+		for i = 1, #axis_order do
+			local t = axis_order[i]
+			axs[#axs + 1] = t .. "=" .. tostring(wrap_counts[t] or 0)
+		end
+		printf("ALAOPROF|1|axw|seq=%s|axes=%s", seq, table.concat(axs, ","))
+	end
+	printf("ALAOPROF|1|eow|seq=%s|frames_total=%s", seq, frames_total)
+
+	-- I-062: the extra axes reset per window exactly like the cb axis, and get
+	-- a fresh accumulator for the same float-precision reason
+	for i = 1, #axis_order do
+		local A = axes[axis_order[i]]
+		A.units, A.calls, A.nested = {}, {}, {}
+		A.timer = new_timer()
+		A.last = A.timer:time()
+	end
+	lunits, lcalls = {}, {}
+	units, calls, nested = {}, {}, {}
+	win_frames, win_calls, win_nested = 0, 0, 0
+	win_t0 = now
+	next_dump = now + DUMP_EVERY_MS
+	-- Start each window on a fresh accumulator. I do not know whether the
+	-- engine's profile_timer accumulates in a float or a double, and over a
+	-- 300 s run a single accumulator would climb high enough that a float's
+	-- ulp would start eating the per-call deltas. One window can never hold
+	-- more than a second or so of script time, which is safe either way.
+	timer = new_timer()
+	last = timer:time()
+	if ltimer then
+		ltimer = new_timer()
+		llast = ltimer:time()
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- the wrappers
+-- ---------------------------------------------------------------------------
+local function profiled_make_callback(name, ...)
+	if depth > 0 then
+		nested[name] = (nested[name] or 0) + 1
+		win_nested = win_nested + 1
+		return orig_make_callback(name, ...)
+	end
+	tick()
+	local top = (active == 0)      -- I-062
+	active = active + 1            -- I-062
+	if top then ns_epoch = ns_epoch + 1 end   -- v3
+	depth = 1
+	timer:start()
+	orig_make_callback(name, ...)
+	timer:stop()
+	depth = 0
+	active = active - 1            -- I-062
+	local t = timer:time()
+	local d = t - last
+	last = t
+	units[name] = (units[name] or 0) + d
+	calls[name] = (calls[name] or 0) + 1
+	win_calls = win_calls + 1
+	-- I-062 frame bookkeeping
+	fr_cb = fr_cb + d
+	if top then
+		fr_top = fr_top + d
+		fr_ntop = fr_ntop + 1
+	end
+	if d > ftop_floor then                            -- v3
+		-- a top-level region is not INSIDE anything; its own epoch's slots
+		-- belong to it, so it must not appear in its own breakdown
+		if not top then note_nest(name, d) end
+		if d > fr_t3u then note_top(name, d) end
+	end
+	if d >= nfloor_cb then dump_nest(name, d, "cb", top) end
+	if d >= hfloor then
+		hitch_hit(hmax, hfirst_t, hfirst_f, hfirst_u, hbuckets, name, d)
+	end
+end
+
+-- Wrap one method on one lua-class table. Returns true only if the assignment
+-- actually took: these are luabind-backed classes and I am not assuming they
+-- accept a new method just because the table indexes like a table.
+local function wrap_method(cls, mname, label)
+	if type(cls) ~= "table" then return false, "class not a table" end
+	local orig = rawget(cls, mname)
+	if orig == nil then orig = cls[mname] end
+	if type(orig) ~= "function" then return false, "method not a function" end
+	local wrapper
+	wrapper = function(self, ...)
+		if depth > 0 then
+			nested[label] = (nested[label] or 0) + 1
+			win_nested = win_nested + 1
+			return orig(self, ...)
+		end
+		tick()
+		depth = 1
+		timer:start()
+		orig(self, ...)
+		timer:stop()
+		depth = 0
+		local t = timer:time()
+		local d = t - last
+		last = t
+		units[label] = (units[label] or 0) + d
+		calls[label] = (calls[label] or 0) + 1
+		win_calls = win_calls + 1
+		if d >= hfloor then
+			hitch_hit(hmax, hfirst_t, hfirst_f, hfirst_u, hbuckets, label, d)
+		end
+	end
+	cls[mname] = wrapper
+	return cls[mname] == wrapper, "ok"
+end
+
+-- ---------------------------------------------------------------------------
+-- per-listener attribution (WRAP_LISTENERS)
+--
+-- The first in-game run said 95% of all scripted per-frame time is a single
+-- callback NAME, actor_on_update, at ~850 us per frame. Which is useful and
+-- also useless: the name is a mailing list, and what anyone optimising wants is
+-- which subscriber costs what. So wrap the listeners themselves.
+--
+-- Getting at them is the trick. `intercepts` is a file-local in axr_main.script,
+-- not a field of the module table - but it is an upvalue of make_callback, and
+-- Lua 5.1's debug.getupvalue hands it over. That also means this does not care
+-- about load order: our on_game_start runs last, by which point every listener
+-- is registered, and we rewrite the table in place.
+--
+-- The table is keyed BY the listener (function or object) with the sort index as
+-- the value, so swapping in a wrapper changes the key. callback_unset is then
+-- passed the original and would not find it, so both callback_set and
+-- callback_unset are wrapped too and translate through wrapped_by/orig_by.
+-- ---------------------------------------------------------------------------
+
+local function listener_label(name, f)
+	local fn = f
+	if type(fn) ~= "function" then
+		fn = (type(f) == "table" or type(f) == "userdata") and f[name] or nil
+	end
+	local src, line = "?", 0
+	if debug and debug.getinfo and type(fn) == "function" then
+		local ok, info = pcall(debug.getinfo, fn, "S")
+		if ok and info then
+			src = tostring(info.short_src or info.source or "?")
+			src = string.match(src, "([^\\/]+)$") or src
+			line = info.linedefined or 0
+		end
+	end
+	return name .. "#" .. src .. ":" .. line
+end
+
+-- Does this label want a per-call trace line? Decided ONCE, at wrap time.
+local function trace_wanted(label)
+	if not TRACE_LISTENERS then return false end
+	for i = 1, #TRACE_LISTENERS do
+		if string.sub(label, 1, #TRACE_LISTENERS[i]) == TRACE_LISTENERS[i] then
+			return true
+		end
+	end
+	return false
+end
+
+-- Cheap covariates, sampled outside the timer. Whatever it returns is opaque to
+-- the parser: the trace line is read by grepping the engine log, not by
+-- aalo/profiler.py, which ignores `kind` values it does not know.
+--
+-- This one is aimed at the ui_inventory open: the hypothesis is that the cost
+-- tracks the size of the UICellContainer cell pool and its grid, both of which
+-- are high-water marks that only grow within a session (UICellContainer:Reset
+-- calls ci:Reset() on every cell but never removes one, and AddItemInCell only
+-- constructs a UICellItem when self.cell[indx] is nil).
+local function trace_probe()
+	local gui = ui_inventory and ui_inventory.GUI
+	local cc = gui and gui.CC and gui.CC["actor_bag"]
+	if not cc then return "na" end
+	local cells, grid = 0, 0
+	for _ in pairs(cc.cell or {}) do cells = cells + 1 end
+	for _ in pairs(cc.grid or {}) do grid = grid + 1 end
+	return "cells=" .. cells .. ",grid=" .. grid .. ",idxer=" .. tostring(cc.idxer)
+end
+
+local trace_lines = 0
+
+local function trace_emit(label, d, pre, post)
+	if trace_lines >= TRACE_MAX_LINES then return end
+	trace_lines = trace_lines + 1
+	printf("ALAOPROF|1|trace|n=%s|name=%s|units=%s|frame=%s|t=%s|pre=%s|post=%s",
+	       trace_lines, label, d, dev.frame, time_global(), pre, post)
+end
+
+local function wrap_listener(name, f)
+	if wrapped_by[f] then return wrapped_by[f] end
+	local label = listener_label(name, f)
+	local is_fn = (type(f) == "function")
+	local traced = trace_wanted(label)
+	local wrapper = function(...)
+		if ldepth > 0 then
+			if is_fn then return f(...) end
+			return f[name](f, ...)
+		end
+		-- sampled before the timer starts, so it cannot inflate `d`
+		local pre = traced and trace_probe() or nil
+		ldepth = 1
+		ltimer:start()
+		if is_fn then f(...) else f[name](f, ...) end
+		ltimer:stop()
+		ldepth = 0
+		local t = ltimer:time()
+		local d = t - llast
+		llast = t
+		lunits[label] = (lunits[label] or 0) + d
+		lcalls[label] = (lcalls[label] or 0) + 1
+		-- I-062: a listener always runs inside its callback's region, so it is
+		-- never top level and never enters the union - but it is exactly the
+		-- kind of thing that should show up as the biggest call of a bad frame,
+		-- and inside a bad call.
+		if d > ftop_floor then
+			note_nest(label, d)
+			if d > fr_t3u then note_top(label, d) end
+		end
+		if d >= hfloor then
+			hitch_hit(lhmax, lhfirst_t, lhfirst_f, lhfirst_u, lhbuckets, label, d)
+		end
+		if traced then trace_emit(label, d, pre, trace_probe()) end
+	end
+	wrapped_by[f] = wrapper
+	orig_by[wrapper] = f
+	return wrapper
+end
+
+-- `intercepts` out of make_callback's upvalues
+local function find_intercepts(fn)
+	if not (debug and debug.getupvalue) then return nil, "no debug library" end
+	for i = 1, 60 do
+		local ok, n, v = pcall(debug.getupvalue, fn, i)
+		if not ok or n == nil then break end
+		if n == "intercepts" and type(v) == "table" then return v end
+	end
+	return nil, "no `intercepts` upvalue on make_callback"
+end
+
+local function wrap_all_listeners()
+	local intercepts, why = find_intercepts(orig_make_callback)
+	if not intercepts then return 0, why end
+	local n = 0
+	for name, tbl in pairs(intercepts) do
+		if type(tbl) == "table" then
+			local swap = {}
+			for f, v in pairs(tbl) do
+				swap[#swap + 1] = { f, v }
+			end
+			for i = 1, #swap do
+				local f, v = swap[i][1], swap[i][2]
+				tbl[f] = nil
+				tbl[wrap_listener(name, f)] = v
+				n = n + 1
+			end
+		end
+	end
+	-- keep later registrations wrapped too, and keep unset working
+	orig_callback_set = axr_main.callback_set
+	orig_callback_unset = axr_main.callback_unset
+	axr_main.callback_set = function(name, f)
+		if f == nil then return orig_callback_set(name, f) end
+		return orig_callback_set(name, wrap_listener(name, f))
+	end
+	axr_main.callback_unset = function(name, f)
+		return orig_callback_unset(name, wrapped_by[f] or f)
+	end
+	return n, "ok"
+end
+
+-- ===========================================================================
+-- I-062: the extra axes (bnd / eng / evt)
+--
+-- One axis = one profile_timer, one depth guard, one set of accumulators. The
+-- axes are independent of each other and of the make_callback axis, which is
+-- the point: a binder :update that contains 30 make_callbacks is timed on the
+-- bnd axis AND decomposed on the cb axis, and the shared `active` counter
+-- stops the two from being added together.
+-- ===========================================================================
+
+local function new_axis(tag)
+	local A = {
+		-- v4: an axis may want its own nst floor. Converted to timer units
+		-- here, because units_per_ms is known by the time axes are created.
+		tag = tag,
+		nfl = (units_per_ms and units_per_ms > 0 and NST)
+			and ((NST_FLOOR_BY_AXIS[tag] or NST_FLOOR_MS) * units_per_ms)
+			or math.huge,
+		timer = nil, depth = 0, last = 0, fr = 0,
+		units = {}, calls = {}, nested = {},
+		hmax = {}, hft = {}, hff = {}, hfu = {}, hb = {},
+	}
+	axes[tag] = A
+	axis_order[#axis_order + 1] = tag
+	return A
+end
+
+-- The wrapper. `kind` is 1 for net_spawn and 2 for net_destroy, which the
+-- frame line counts separately - "how many objects came online in this frame"
+-- is half the walkout question. `is_method` picks the `self` calling
+-- convention; everything else is shared.
+-- Every wrapper we ever build, so we can recognise our own work. v3: run 2
+-- blamed a 26 ms frame on `uniq:zzz_alao_profiler.script:873`, which is this
+-- very closure - the evt hook had wrapped the eng wrapper around
+-- ProcessEventQueue a second time and then labelled it by OUR definition site.
+-- One registry look-up at registration time makes that impossible.
+local ours = {}
+
+local function axis_wrapper(A, label, orig, kind, is_method)
+	local w
+	w = function(...)
+		if A.depth > 0 then
+			A.nested[label] = (A.nested[label] or 0) + 1
+			return orig(...)
+		end
+		tick()
+		local top = (active == 0)
+		active = active + 1
+		if top then ns_epoch = ns_epoch + 1 end       -- v3
+		A.depth = 1
+		A.timer:start()
+		-- at most three return values; see the banner at the top of the file
+		local r1, r2, r3 = orig(...)
+		A.timer:stop()
+		A.depth = 0
+		active = active - 1
+		local t = A.timer:time()
+		local d = t - A.last
+		A.last = t
+		A.units[label] = (A.units[label] or 0) + d
+		A.calls[label] = (A.calls[label] or 0) + 1
+		A.fr = A.fr + d
+		if top then
+			fr_top = fr_top + d
+			fr_ntop = fr_ntop + 1
+		end
+		if d > ftop_floor then                        -- v3
+			if not top then note_nest(label, d) end
+			if d > fr_t3u then note_top(label, d) end
+		end
+		if d >= A.nfl then dump_nest(label, d, A.tag, top) end
+		if d >= hfloor then
+			hitch_hit(A.hmax, A.hft, A.hff, A.hfu, A.hb, label, d)
+		end
+		if kind == 1 then
+			fr_spawn = fr_spawn + 1
+		elseif kind == 2 then
+			fr_destroy = fr_destroy + 1
+		end
+		-- keep the arity at 1 in the overwhelmingly common case, so a caller
+		-- that counts its results with select('#') sees what it used to
+		if r2 == nil and r3 == nil then return r1 end
+		return r1, r2, r3
+	end
+	ours[w] = label
+	return w
+end
+
+-- Replace cls[mname] and verify the assignment took.
+--
+-- v2, after the first in-game run (20260920-185607-I-062-a1c78b) wrapped
+-- exactly ZERO of the 32 binder and server classes while the engine-called
+-- globals wrapped fine. `_G[module]` therefore works; what did not is
+-- everything this function used to assume:
+--
+--   * `type(cls) ~= "table"` bailed out. A `class "x" (object_binder)` in
+--     Anomaly is a luabind class object, which is USERDATA with an __index /
+--     __newindex metatable, not a table. Accept userdata.
+--   * `rawget(cls, mname)` cannot read a userdata at all, and on a class object
+--     it would skip exactly the methods we want. Index normally, under pcall.
+--   * the identity check `rawget(...) == wrapper` can be false on a class
+--     object that re-binds on access even though the write took, so a readback
+--     that is a function but not our object is reported as `unverified` rather
+--     than thrown away.
+--
+-- Indexing normally also means an INHERITED method gets wrapped when the class
+-- does not define its own. That is deliberate now: we assign into this class
+-- only, the parent is untouched, and an inherited net_spawn that the engine
+-- calls per object is exactly the cost this build is hunting.
+local function wrap_axis_method(A, cls, mname, label, kind)
+	local ct = type(cls)
+	if ct ~= "table" and ct ~= "userdata" then return false, "class is " .. ct end
+	local okr, orig = pcall(function() return cls[mname] end)
+	if not okr then return false, "read threw" end
+	if type(orig) ~= "function" then return false, "no method" end
+	local wrapper = axis_wrapper(A, label, orig, kind, true)
+	local okw = pcall(function() cls[mname] = wrapper end)
+	if not okw then return false, "write threw" end
+	local okb, back = pcall(function() return cls[mname] end)
+	if okb and back == wrapper then return true, "ok" end
+	if okb and type(back) == "function" then return true, "unverified" end
+	return false, "write refused"
+end
+
+-- Where does the class actually live? Two candidates, because the answer
+-- differs between Anomaly's own binders and mod ones: the module namespace
+-- (`bind_stalker.actor_binder`, which is the idiom every mod monkey-patches
+-- with) and the bare global that luabind's `class "..."` can leave behind.
+-- Try both and SAY which one hit - guessing is what produced bnd=0.
+local function resolve_class(modname, clsname)
+	local okm, mod = pcall(function() return _G[modname] end)
+	local modtype = okm and type(mod) or "error"
+	if okm and (type(mod) == "table" or type(mod) == "userdata") then
+		local ok, c = pcall(function() return mod[clsname] end)
+		if ok and c ~= nil then return c, "module", modtype end
+	end
+	local ok, c = pcall(function() return _G[clsname] end)
+	if ok and c ~= nil then return c, "global", modtype end
+	return nil, "none", modtype
+end
+
+-- One pass over a target list. Anything it cannot reach goes on `pending` and
+-- is re-tried every RESCAN_EVERY frames: a module can be pulled in lazily by
+-- the first reference to it, so "absent at on_game_start" is not "absent".
+-- One target. Returns how many methods were wrapped plus a diagnostic string
+-- that goes straight into a `bnx` line, so a zero can never again be a silent
+-- zero: it names the type of the module, the type of the class object, where
+-- the class was found, and what the first method attempt said.
+local function wrap_binder_one(A, modname, clsname)
+	local key = modname .. "." .. clsname
+	local ok, n, why = pcall(function()
+		local cls, via, modtype = resolve_class(modname, clsname)
+		if cls == nil then
+			return 0, "mod=" .. modtype .. "|cls=nil|via=none|why=class not found"
+		end
+		local count, first = 0, nil
+		local function try(m, kind)
+			local done, msg = wrap_axis_method(A, cls, m, key .. "." .. m, kind)
+			if first == nil or (done and first ~= "ok") then first = msg end
+			if done then count = count + 1 end
+		end
+		for j = 1, #BINDER_METHODS do
+			local m = BINDER_METHODS[j]
+			try(m, (m == "net_spawn") and 1 or (m == "net_destroy") and 2 or 0)
+		end
+		if WRAP_BINDER_UPDATE then
+			for j = 1, #BINDER_UPDATE_METHODS do
+				try(BINDER_UPDATE_METHODS[j], 0)
+			end
+		end
+		return count, "mod=" .. modtype .. "|cls=" .. type(cls) .. "|via=" .. via
+			.. "|why=" .. tostring(first)
+	end)
+	if not ok then return 0, key, "mod=?|cls=?|via=?|why=pcall: " .. tostring(n) end
+	return n or 0, key, why
+end
+
+local function wrap_binder_targets(A, targets, diag)
+	for i = 1, #targets do
+		local modname, clsname = targets[i][1], targets[i][2]
+		local n, key, why = wrap_binder_one(A, modname, clsname)
+		if diag then diag[#diag + 1] = { key, n, why } end
+		if n > 0 then
+			wrap_counts.bnd = wrap_counts.bnd + n
+		else
+			pending[#pending + 1] = { "bnd", modname, clsname }
+			wrap_misses[#wrap_misses + 1] = key
+		end
+	end
+end
+
+local function wrap_one_global(A, modname, fname)
+	local key = (modname == "" and fname or (modname .. "." .. fname))
+	local ok, done = pcall(function()
+		local holder = (modname == "") and _G or _G[modname]
+		if type(holder) ~= "table" then return false end
+		local orig = rawget(holder, fname)
+		if type(orig) ~= "function" then return false end
+		local wrapper = axis_wrapper(A, key, orig, 0, false)
+		holder[fname] = wrapper
+		return rawget(holder, fname) == wrapper
+	end)
+	return ok and done and true or false, key
+end
+
+-- v4: an entry may name its own axis. Two functions on one axis mean the
+-- inner one is `nested` and never timed, so a call chain needs one axis per
+-- level - that is the whole reason alife_create sits on `acr` of its own.
+local function wrap_globals(A, targets, mk)
+	for i = 1, #targets do
+		local modname, fname, tag = targets[i][1], targets[i][2], targets[i][3]
+		local B = A
+		if tag and mk then B = axes[tag] or mk(tag) end
+		local done, key = wrap_one_global(B, modname, fname)
+		if done then
+			local t = tag or "eng"
+			wrap_counts[t] = (wrap_counts[t] or 0) + 1
+		else
+			pending[#pending + 1] = { tag or "eng", modname, fname }
+			wrap_misses[#wrap_misses + 1] = key
+		end
+	end
+end
+
+-- --- deferred call bodies (evt) ---------------------------------------------
+-- CreateTimeEvent / AddUniqueCall / level.add_call take a functor and the
+-- engine (or _g.script's queue) calls it later, with no callback name attached
+-- to it anywhere. Wrapping at REGISTRATION is what buys the attribution: the
+-- label is the functor's own definition site, so `evt:drx_da_main.script:412`
+-- says which file's deferred body is eating the frame.
+--
+-- What it cannot see: anything registered BEFORE this installs, i.e. during
+-- module load. ProcessEventQueue is on the globals list precisely so those
+-- still show up in aggregate.
+-- A functor's OWN definition site, and optionally the site that registered it.
+--
+-- v2, after the first in-game run. Every capture's worst walk-era frame was
+-- 29 ms with 90% script and one scope on top: `call_cond:_g.script:456` at
+-- 25.8-26.3 ms. That label is a lie of omission - `_g.script:456` is the
+-- generic closure AddUniqueCall builds around level.add_call, so the label
+-- named the plumbing and not one of the 300+ owners whose body was actually
+-- running. Two things fix it, and both are at registration time so neither
+-- costs anything per call:
+--
+--   * label by the owner: the functor's own short_src:linedefined, plus the
+--     REGISTERING caller one level up (debug.getinfo(2)), plus - for a time
+--     event - its obj_id/ev_id strings, which in this codebase are usually
+--     the most informative thing about it;
+--   * attribute to the innermost: while our AddUniqueCall wrapper is running,
+--     level.add_call does NOT wrap what it is handed, because what it is
+--     handed is _g.script's bridge around a functor we have already wrapped.
+--     One outer region on the same axis would otherwise swallow the inner one
+--     as `nested`, which is exactly what happened.
+-- Where is the code that is calling me right now? Must be called DIRECTLY from
+-- the wrapper whose caller we want, because the level is counted from here:
+-- 1 is this function, 2 is the wrapper, 3 is the wrapper's caller. v2 passed a
+-- level down through two helpers and a pcall, which is why every label in run 2
+-- ended in `@zzz_alao_profiler.script:1115` - our own code, every time.
+-- No pcall: debug.getinfo simply returns nil for a level that does not exist,
+-- and pcall would insert a C frame and shift every level by one - which is
+-- half of how v2 got this wrong.
+local function caller_site()
+	if not (debug and debug.getinfo) then return nil end
+	local ci = debug.getinfo(3, "Sl")
+	if not ci then return nil end
+	local csrc = tostring(ci.short_src or "?")
+	csrc = string.match(csrc, "([^\\/]+)$") or csrc
+	return csrc .. ":" .. tostring(ci.currentline or 0)
+end
+
+local function functor_label(prefix, f, extra, site)
+	local src, line = "?", 0
+	if debug and debug.getinfo and type(f) == "function" then
+		local ok, info = pcall(debug.getinfo, f, "S")
+		if ok and info then
+			src = tostring(info.short_src or info.source or "?")
+			src = string.match(src, "([^\\/]+)$") or src
+			line = info.linedefined or 0
+		end
+	end
+	local label = prefix .. ":" .. src .. ":" .. line
+	if extra and extra ~= "" then label = label .. "#" .. extra end
+	if site and site ~= (src .. ":" .. line) then label = label .. "@" .. site end
+	return label
+end
+
+-- ev_id / obj_id come from the caller and end up in a pipe-separated log line,
+-- so strip anything that would break the grammar.
+local function evt_tag(a, b)
+	local s = tostring(a or "?") .. "." .. tostring(b or "?")
+	return (string.gsub(s, "[|,~=%s]", "_"))
+end
+
+local function wrap_time_events(A)
+	local evt_seen = {}
+	local in_auc = false
+	local function wrap_functor(prefix, f, extra, site)
+		if type(f) ~= "function" then return f end
+		-- v3: never wrap our own wrapper. In run 2 the game re-registered the
+		-- already-wrapped ProcessEventQueue through AddUniqueCall, so the evt
+		-- hook wrapped it a second time and labelled it by the wrapper's own
+		-- definition site - this file. It read as a 26 ms profiler job once per
+		-- capture; it was one frame of the game's event queue, and the second
+		-- wrapper's depth guard was hiding every real time-event body inside it
+		-- as `nested`, which is why every `evt:` row came out with calls=0.
+		if ours[f] then return f end
+		if evt_seen[f] then return evt_seen[f] end
+		-- keyed by the function, so a named functor registered twice keeps the
+		-- label of its FIRST registration. Anonymous closures - which is most
+		-- of the 508 CreateTimeEvent sites - get one label each.
+		local w = axis_wrapper(A, functor_label(prefix, f, extra, site), f, 0, false)
+		evt_seen[f] = w
+		wrap_counts.evt = wrap_counts.evt + 1
+		return w
+	end
+
+	local n = 0
+	local cte = rawget(_G, "CreateTimeEvent")
+	if type(cte) == "function" then
+		_G.CreateTimeEvent = function(a, b, c, f, ...)
+			return cte(a, b, c, wrap_functor("evt", f, evt_tag(a, b), caller_site()), ...)
+		end
+		n = n + 1
+	else
+		wrap_misses[#wrap_misses + 1] = "CreateTimeEvent"
+	end
+
+	local auc = rawget(_G, "AddUniqueCall")
+	if type(auc) == "function" then
+		_G.AddUniqueCall = function(f, ...)
+			local wrapped = wrap_functor("uniq", f, nil, caller_site())
+			in_auc = true
+			local ok, r = pcall(auc, wrapped, ...)
+			in_auc = false
+			if not ok then error(r, 0) end
+			return r
+		end
+		n = n + 1
+	else
+		wrap_misses[#wrap_misses + 1] = "AddUniqueCall"
+	end
+
+	-- `level` is an engine namespace, not a script table; the assignment may
+	-- simply be refused, so check instead of assuming.
+	local ok = pcall(function()
+		local lv = _G.level
+		if type(lv) ~= "table" then return end
+		local ac = rawget(lv, "add_call")
+		if type(ac) ~= "function" then return end
+		local wrapper = function(cond, act, ...)
+			if in_auc then
+				-- _g.script's own bridge; the owner inside it is already wrapped
+				return ac(cond, act, ...)
+			end
+			local site = caller_site()
+			return ac(wrap_functor("call_cond", cond, nil, site),
+			          wrap_functor("call_act", act, nil, site), ...)
+		end
+		lv.add_call = wrapper
+		if rawget(lv, "add_call") == wrapper then n = n + 1 end
+	end)
+	if not ok then wrap_misses[#wrap_misses + 1] = "level.add_call" end
+	return n
+end
+
+-- re-try the targets that were not loaded yet (assigns the forward local)
+retry_pending = function()
+	rescan_rounds = rescan_rounds + 1
+	next_rescan = frames_total + RESCAN_EVERY
+	if rescan_rounds > RESCAN_ROUNDS then
+		pending_n = 0
+		pending = {}
+		return
+	end
+	local still = {}
+	for i = 1, #pending do
+		local axis, a, b = pending[i][1], pending[i][2], pending[i][3]
+		local got = false
+		if axis == "bnd" then
+			local n = wrap_binder_one(axes.bnd, a, b)
+			if n > 0 then
+				wrap_counts.bnd = wrap_counts.bnd + n
+				got = true
+			end
+		else
+			local A = axes[axis] or axes.eng
+			got = A and wrap_one_global(A, a, b)
+			if got then wrap_counts[axis] = (wrap_counts[axis] or 0) + 1 end
+		end
+		if not got then still[#still + 1] = pending[i] end
+	end
+	pending = still
+	pending_n = #still
+end
+
+-- v3: the I-062 axes are set up in their OWN function, not inline in install().
+-- Lua 5.1 allows a function at most 60 upvalues and install() had quietly grown
+-- past it - `function at line ... has more than 60 upvalues` is a load-time
+-- error, so the overlay would simply not have loaded in the game. Splitting it
+-- is the fix, and it keeps the walkout block separable for merges besides.
+local function install_axes(bnd_diag)
+	for i = 1, NST_SLOTS do
+		nsn[i], nsu[i], nse[i] = "-", 0, -1
+	end
+	if not (WRAP_BINDERS_I062 or WRAP_GLOBALS or WRAP_TIME_EVENTS) then
+		return "off"
+	end
+	local parts = {}
+	local function fresh(tag)
+		local A = new_axis(tag)
+		A.timer = new_timer()
+		A.last = A.timer:time()
+		return A
+	end
+	if WRAP_BINDERS_I062 then
+		pcall(wrap_binder_targets, fresh("bnd"), BINDER_TARGETS, bnd_diag)
+		parts[#parts + 1] = "bnd=" .. wrap_counts.bnd
+			.. (WRAP_BINDER_UPDATE and "+update" or "")
+	end
+	if WRAP_GLOBALS then
+		pcall(wrap_globals, fresh("eng"), GLOBAL_TARGETS, fresh)
+		parts[#parts + 1] = "eng=" .. wrap_counts.eng
+	end
+	if WRAP_TIME_EVENTS then
+		local ok, n = pcall(wrap_time_events, fresh("evt"))
+		parts[#parts + 1] = "evt=" .. tostring(ok and n or "failed")
+	end
+	-- the drill-down axis. Its own axis so a region inside a bnd region is
+	-- timed rather than counted as nested; its leaves are on `eng` for exactly
+	-- the same reason one level further down.
+	if #SUB_TARGETS > 0 then
+		local n = 0
+		for i = 1, #SUB_TARGETS do
+			local t = SUB_TARGETS[i]
+			local modname, clsname, m, tag = t[1], t[2], t[3], t[4] or "sub"
+			local key = modname .. "." .. clsname .. "." .. m
+			local A = axes[tag] or fresh(tag)
+			local ok = pcall(function()
+				local cls = resolve_class(modname, clsname)
+				if cls == nil then return end
+				if wrap_axis_method(A, cls, m, key, 0) then
+					n = n + 1
+					wrap_counts[tag] = (wrap_counts[tag] or 0) + 1
+				end
+			end)
+			if not ok then wrap_misses[#wrap_misses + 1] = key end
+		end
+		for i = 1, #SPAWN_GLOBALS do
+			local t = SPAWN_GLOBALS[i]
+			local A = axes[t[3]] or fresh(t[3])
+			local done, key = wrap_one_global(A, t[1], t[2])
+			if done then
+				n = n + 1
+				wrap_counts[t[3]] = (wrap_counts[t[3]] or 0) + 1
+			else
+				wrap_misses[#wrap_misses + 1] = key
+			end
+		end
+		wrap_counts.sub = n
+		parts[#parts + 1] = "sub=" .. n
+	end
+	pending_n = #pending
+	next_rescan = RESCAN_EVERY
+	return table.concat(parts, ",")
+end
+
+-- ---------------------------------------------------------------------------
+-- install
+-- ---------------------------------------------------------------------------
+local function install()
+	if installed then return "already installed" end
+
+	timer_kind = (profile_timer ~= nil) and "profile_timer" or "os_clock_shim"
+	timer = new_timer()
+	dev = device()
+
+	local upm, calib_ms, calib_units, spin = calibrate()
+	units_per_ms = upm
+	local ns = measure_overhead(OVERHEAD_ITERS)
+	-- Without a units/ms ratio a millisecond floor is meaningless, so the hitch
+	-- half switches itself off rather than bucket made-up numbers. Armed AFTER
+	-- the overhead probe: the probe runs the same compare (so its price tag
+	-- includes the hitch half) but must not be able to log its own scheduler
+	-- hiccups as a `probe` hitch row.
+	if HITCH and upm and upm > 0 then
+		hfloor = HITCH_FLOOR_MS * upm
+	end
+	if upm and upm > 0 then                         -- I-062
+		ftop_floor = 0.01 * upm                     -- 10 us
+		fr_t1u, fr_t2u, fr_t3u = ftop_floor, ftop_floor, ftop_floor
+		if NST then                                 -- v3, per axis in v4
+			nfloor = NST_FLOOR_MS * upm
+			nfloor_cb = (NST_FLOOR_BY_AXIS.cb or NST_FLOOR_MS) * upm
+		end
+	end
+
+	orig_make_callback = axr_main.make_callback
+	axr_main.make_callback = profiled_make_callback
+	local ok_cb = (axr_main.make_callback == profiled_make_callback)
+
+	local listeners = "off"
+	if WRAP_LISTENERS then
+		ltimer = new_timer()
+		llast = ltimer:time()
+		local ok, n, why = pcall(wrap_all_listeners)
+		-- the I-051 dispatch mod caches sorted listener arrays; we just swapped the keys under it
+		if zzz_alao_callback_dispatch and zzz_alao_callback_dispatch.invalidate then
+			pcall(zzz_alao_callback_dispatch.invalidate)
+		end
+		if ok then
+			listeners_wrapped = n
+			listeners = tostring(n) .. ":" .. tostring(why)
+		else
+			ltimer = nil
+			listeners = "failed:" .. tostring(n)
+		end
+	end
+
+	local binders = {}
+	if WRAP_BINDERS then
+		local targets = {
+			{ "bind_stalker",        "actor_binder",            "binder:actor" },
+			{ "bind_monster",        "generic_object_binder",   "binder:monster" },
+			{ "bind_physic_object",  "generic_physics_binder",  "binder:physic" },
+		}
+		for i = 1, #targets do
+			local modname, clsname, label = targets[i][1], targets[i][2], targets[i][3]
+			local ok, why = pcall(function()
+				local mod = _G[modname]
+				local cls = mod and mod[clsname]
+				local done, msg = wrap_method(cls, "update", label)
+				return done and "ok" or msg
+			end)
+			binders[#binders + 1] = label .. "=" .. tostring(ok and why or "error")
+		end
+	end
+
+	-- --- I-062: the extra axes ---------------------------------------------
+	-- Order matters only for the hdr line. Each axis gets its own timer, so
+	-- the bnd axis running does not disturb the cb accumulator at all, which
+	-- is the whole reason the old WRAP_BINDERS mode was unusable.
+	local bnd_diag = {}
+	local walkout = install_axes(bnd_diag)
+
+	last = timer:time()
+	win_t0 = time_global()
+	next_dump = win_t0 + DUMP_EVERY_MS
+	fr_t0 = win_t0                                  -- I-062
+	fr_gc0 = collectgarbage("count")                -- I-062
+	installed = true
+
+	-- I-062: a second header line, so the original one keeps its exact shape
+	-- and every parser written against it still works.
+	--
+	-- `selfcheck` exists because the first run wrapped zero binder classes and
+	-- nothing said so: every frm line simply read u_bnd=0.000 and spawn=0,
+	-- which is indistinguishable from a quiet scene. A zero now announces
+	-- itself here AND as an `err` line, and profile_report refuses to be quiet
+	-- about it.
+	local selfcheck = "ok"
+	if WRAP_BINDERS_I062 and wrap_counts.bnd == 0 then selfcheck = "bnd-zero" end
+	if WRAP_GLOBALS and wrap_counts.eng == 0 then
+		selfcheck = (selfcheck == "ok") and "eng-zero" or (selfcheck .. ",eng-zero")
+	end
+	printf("ALAOPROF|1|wdr|ver=%s|ts=%s|walkout=%s|binder_update=%s|frames=%s|frame_floor_ms=%s|frame_max=%s|rescan_every=%s|pending=%s|selfcheck=%s|misses=%s",
+		WALKOUT_VER, win_t0, walkout, tostring(WRAP_BINDER_UPDATE),
+		FRAMES and "on" or "off", FRM_FLOOR_MS, FRM_MAX_LINES,
+		RESCAN_EVERY, pending_n, selfcheck,
+		(#wrap_misses > 0) and table.concat(wrap_misses, " ") or "none")
+	-- one line per binder target, hit or miss, with the types it actually saw.
+	-- 32 lines once per run; this is the line that would have made the first
+	-- run's bnd=0 a five-minute diagnosis instead of a wasted capture.
+	for i = 1, #bnd_diag do
+		printf("ALAOPROF|1|bnx|target=%s|wrapped=%s|%s",
+			bnd_diag[i][1], bnd_diag[i][2], bnd_diag[i][3])
+	end
+	if selfcheck ~= "ok" then
+		printf("ALAOPROF|1|err|I-062 self-check %s: bnd=%s eng=%s evt=%s - the axes that "
+			.. "read zero measured NOTHING, they did not measure nothing happening. "
+			.. "See the bnx lines.",
+			selfcheck, wrap_counts.bnd, wrap_counts.eng, wrap_counts.evt)
+	end
+
+	printf("ALAOPROF|1|hdr|ts=%s|timer=%s|units_per_ms=%s|calib_ms=%s|calib_units=%s|calib_spin=%s|overhead_ns=%s|make_callback=%s|binders=%s|listeners=%s|dump_ms=%s|hitch=%s|hitch_floor_ms=%s|hitch_buckets=%s",
+		win_t0, timer_kind,
+		upm and string.format("%.6f", upm) or "nil",
+		string.format("%.3f", calib_ms or 0),
+		string.format("%.3f", calib_units or 0),
+		spin or 0,
+		string.format("%.1f", ns),
+		tostring(ok_cb),
+		(#binders > 0) and table.concat(binders, ",") or "off",
+		listeners,
+		DUMP_EVERY_MS,
+		(hfloor < math.huge) and "on" or "off",
+		string.format("%.4f", HITCH_FLOOR_MS),
+		HITCH_BUCKETS)
+	return "installed"
+end
+
+-- Public entry points ---------------------------------------------------------
+
+-- axr_main.on_game_start() walks every *.script in the scripts root and calls
+-- this if it exists, so the overlay needs no registration anywhere else.
+function on_game_start()
+	local ok, err = pcall(install)
+	if not ok then
+		printf("ALAOPROF|1|err|install failed: %s", tostring(err))
+	end
+end
+
+-- for the offline test harness and for a console poke
+function alao_profiler_install() return install() end
+function alao_profiler_dump() if installed then dump(time_global()) end end
+function alao_profiler_state()
+	return { installed = installed, frames = frames_total, seq = seq,
+	         units_per_ms = units_per_ms, timer = timer_kind, depth = depth,
+	         -- I-062
+	         active = active, frm_lines = frm_lines,
+	         frm_suppressed = frames_seen_at_floor,
+	         wrapped_bnd = wrap_counts.bnd, wrapped_eng = wrap_counts.eng,
+	         wrapped_evt = wrap_counts.evt, wrapped_sub = wrap_counts.sub,
+	         nst_lines = nst_lines, pending = pending_n,
+	         hitch_floor_units = hfloor, hitch_names = (function()
+	             local n = 0
+	             for _ in pairs(hbuckets) do n = n + 1 end
+	             return n
+	         end)() }
+end

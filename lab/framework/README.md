@@ -290,6 +290,298 @@ number was taken with those.
 Hitches need someone to press the key: an unattended `gammabaseline` run never
 opens an inventory, so a hitch capture is an **attended** run.
 
+### The other doors into Lua (`lab/profiler-walkout`, idea I-062)
+
+`make_callback` is one door and the engine has several. Walking out of the
+`gammabaseline` start area produces 1-4 frames of 25-44 ms, CPU bound
+(`MsGPUBusy` ~5), and the hitch profiler shows **no listener above ~12 ms in
+them** - so the cost is either engine-side or Lua the instrument cannot see. A
+~31 ms frame also appears 8-9 s into every capture, standing still, with no
+callback to explain it.
+
+`lab/tools/i062_engine_entry_census.py` enumerates the doors over the live
+winner tree (1350 scripts): 38 `object_binder` classes, 36 `cse_`/`se_` server
+classes, 169 scheme action classes, 508 `CreateTimeEvent` sites, 17
+`AddUniqueCall`, 9 `level.add_call`, and the `.ltx` `functor` bindings.
+
+`lab/profiler-walkout` is the hitch build plus three extra timing axes and a
+frame recorder:
+
+| axis | what it wraps |
+|---|---|
+| `bnd` | object binders and `se_*` server objects, per class **and** method (`xr_motivator.motivator_binder.net_spawn`), lifecycle methods always, `:update` too |
+| `eng` | functions the engine calls by name: `visual_memory_manager.get_visible_value`, `ProcessEventQueue`, `xr_logic.issue_event`, ... |
+| `evt` | `CreateTimeEvent` / `AddUniqueCall` / `level.add_call` bodies, wrapped at registration so each is labelled with its own `file:line` |
+
+Each axis has **its own timer and its own depth guard**. That is the fix for
+the old `WRAP_BINDERS` mode, which shared `depth` and the main timer with
+`make_callback` and therefore turned every callback fired inside a binder body
+into an untimed `nested` - which is why it was never usable, not a matter of
+cost. A single shared `active` counter stops the axes from double counting:
+only a region entered with nothing else running enters the per-frame union.
+
+The line the build exists for is `frm`, one per frame over 12 ms (capped at 400
+a run):
+
+```
+ALAOPROF|1|frm|n=1|frame=8123|t=..|ms=43|dt_dev=..|u_top=..|n_top=..|u_cb=..|u_bnd=..|u_eng=..|u_evt=..|spawn=4|destroy=1|gc0=..|gc1=..|after_log=0|top=a~u,b~u,c~u
+```
+
+`ms` minus `u_top` converted to milliseconds is **engine plus everything the
+wrap lists do not reach** - the number that decides "script or engine" directly.
+Both clocks are printed (`ms` is the `time_global()` delta, `dt_dev` is
+`device().time_delta` raw) because which is truthful at frame granularity is a
+question the first run answers rather than one to assume.
+`collectgarbage("count")` is sampled at both boundaries, so a frame the
+collector ran in is identifiable rather than merely suspicious. The frame
+*after* a `frm` line paid for the log write and carries `after_log=1`; the
+report drops those.
+
+What it still cannot see: anything registered before `on_game_start` (hence
+`ProcessEventQueue` on the globals list), a wrapped function someone already
+cached into a local, `update()` on classes outside the target list, and every
+engine-side cost by construction. A wrapper propagates at most three return
+values and does not `pcall`.
+
+#### v2, after the first in-game run (`20260920-185607-I-062-a1c78b`)
+
+Two faults, both of which made a capture say less than it appeared to.
+
+1. **Zero binder classes were wrapped, silently.** `class "x" (object_binder)`
+   in Anomaly is a **luabind class object - userdata**, not a table, so
+   `type(cls) ~= "table"` bailed on all 32 targets and `rawget` could not have
+   read them anyway. Every `frm` line read `u_bnd=0.000, spawn=0`, which looks
+   exactly like a quiet scene. v2 indexes the class normally under `pcall`,
+   accepts userdata, looks in the module namespace **and** as a bare global,
+   prints one `bnx` line per target naming `type(mod)`, `type(cls)`, where the
+   class was found and what the first method attempt said, and sets
+   `selfcheck=bnd-zero` in `wdr` plus an `err` line. `profile_report --frames`
+   prints a `!!` banner for it. **An axis that wrapped nothing measured
+   NOTHING; it did not measure nothing happening.**
+2. **Deferred functors were labelled by the plumbing.** The worst walk-era
+   frame in all three captures was 29 ms, ~90% script, blamed on
+   `call_cond:_g.script:456` - the bridge closure `AddUniqueCall` builds
+   around somebody else's functor, with the real owner swallowed as `nested`
+   on the same axis. v2 labels by the functor's own `short_src:linedefined`
+   plus its registering caller (`@file:line`) and, for a time event, its
+   sanitised `obj_id.ev_id`; and `level.add_call` does not wrap what
+   `AddUniqueCall` hands it, so the innermost owner gets the time.
+
+Settled by that run and not worth re-asking: **`device().time_delta` equals the
+`time_global()` delta exactly**, frame for frame, so either clock is fine.
+Other things it did establish: `visual_memory_manager.get_visible_value` is
+20 µs per call at 1.7 calls/frame (the I-056 lead, now measured);
+`smart_terrain.setup_gulag_and_logic_on_spawn` is 16-19 ms per call during the
+level load; the walk-out frames themselves are 17-42 ms with **1-3% visible
+script and no GC drop**; and there is a one-off 786 ms frame, 707 ms of it in
+`actor_on_update#bind_campfire.script:176`
+(`game.start_tutorial("tutorial_campfire_*")`), the first time you approach a
+campfire in a session.
+
+#### v3, after the second in-game run (`20260920-194429-I-063-d9e519`)
+
+v2 works: `bnd=284+update, eng=12, evt=3` in all four captures, 32 of 32 wrap
+targets hit, every class resolved as `cls=userdata, via=module`.
+
+**The walk-out stutter is engine.** The 35-40 ms frames while walking out carry
+1-3% visible script with binders now visible (`u_bnd` 0.4-1.0 ms), and one
+111 ms frame had 5 `net_spawn` in it and 9.6 ms of script. That question is
+answered; the prediction held.
+
+**The 26 ms frame at t~54 s was NOT a profiler job**, and the label that said so
+was wrong twice over. `uniq:zzz_alao_profiler.script:873@zzz_alao_profiler.script:1115`
+has **3258 calls in a 3258-frame window - the same count as `ProcessEventQueue`**:
+the game re-registers `ProcessEventQueue` through `AddUniqueCall`, we had
+already wrapped it on the `eng` axis, and the `evt` hook wrapped our wrapper and
+named it after its own definition site. The `@caller` half was computed at the
+wrong `debug.getinfo` level and named this file every time. The work is one
+frame of the game's own event queue - which is also why the same ~30 ms frame at
+the same second appears in every listener-mode capture since I-058, none of
+which wrapped `AddUniqueCall` at all. It is one frame per capture, present in
+every arm, so it cancels in any delta; it does contaminate a p99 or a 1% low.
+The second wrapper also held the `evt` axis for the whole frame, so every real
+time-event body inside it was counted as `nested` - which is why every `evt:`
+row in that run reads `calls=0`. v3 refuses to wrap its own wrappers.
+
+**The big one, still open.** `bind_smart_terrain.smart_terrain_binder.update` is
+**440-457 ms in ONE call in all four captures**, ~100% script, +6.5-8.0 MB of GC
+in that frame, with only 6 ms of callbacks in the whole frame - so not a
+listener and not a `SendScriptCallback`. The binder is three lines
+(`bind_smart_terrain.script`, db copy) and forwards to
+`se_smart_terrain:update()` in `smart_terrain.script` (winner: *G.A.M.M.A. ZCP
+1.4 Balanced Spawns*). Ranked suspects inside it: `update_jobs()` on the smart's
+first online update, which runs `fill_npc_info` + `select_npc_job` for every NPC
+against every job; `try_respawn()`; `check_smart_faction()`. `load_jobs()` is
+called from `on_register()`, not from `update()`, so it should not appear.
+v3 adds a `sub` axis for those methods, with their leaves on `eng` so one level
+further down is timed instead of counted as nested, and an `nst` line that dumps
+the five most expensive regions inside any top-level call over 50 ms:
+
+```
+ALAOPROF|1|nst|n=1|frame=26447|t=138788|axis=bnd|scope=<the slow call>|units=..|in=a~u,b~u,c~u
+```
+
+`profile_report --frames`/`--axes` prints it with an `acct` column: how much of
+the slow call the five slots actually explain. `lab/coord/overlays/i062-smart-terrain-request.json`
+is the attended run that answers it.
+
+Also from that run: the campfire tutorial is
+`bind_stalker.actor_binder.update` at 724.7 / 736.4 ms inside 755 / 771 ms
+frames on the baseline captures and **absent from both `alao-prewarm` v1.2
+captures**; `npc_on_death_callback` 30.1 ms once; and capture 2 alone had a
+dozen 27-38 ms frames at t=34-41 s dominated by `sim_squad_scripted.update` with
++3.5-4 MB of GC per frame, inside the warm-up window.
+
+One Lua-5.1 trap worth recording: `install()` grew past the **60-upvalue limit**
+when the `sub` axis was added, which is a *load-time* error - the overlay would
+not have loaded in the game at all, and only the offline `loadstring` check
+caught it. The axis setup now lives in its own `install_axes()`.
+
+#### v4, after the hamlet run (`20260920-201819-I-062-a83793`)
+
+The `nst` line worked and **falsified the top suspect**. In all four captures
+`bind_smart_terrain.smart_terrain_binder.update` is 439.6 / 432.0 / 445.9 /
+431.7 ms and `in=` reads `smart_terrain.se_smart_terrain.try_respawn` at
+**99.97%** of it, then only `se_stalker_on_spawn` rows at 0.1-0.26 ms
+(`xrs_rnd_npc_loadout.script:136`). `update_jobs` never appears.
+`smr_pop.smart_can_respawn` - the gate - is **3 ms over 750 calls**, and
+`try_respawn` as a whole is **7.8 ms over 920 calls** apart from that one. So
+the cost is entirely *after* the gate, in one squad being created on the frame
+the actor arrives.
+
+The path, read out of the live winners (`smart_terrain.script`,
+`sim_board.script`, `smr_pop.script`, all from *G.A.M.M.A. ZCP 1.4 Balanced
+Spawns*):
+
+```
+se_smart_terrain:try_respawn()                       smart_terrain.script:1599
+  smr_pop.smr_handle_spawn(section, self)            smr_pop.script:1193
+    SIMBOARD:create_squad(smart, section)            sim_board.script:131
+      alife_create(squad_id, ...)                    engine
+      squad:create_npc(smart)                        sim_squad_scripted.script:629
+        alife_create per member                      engine
+      smr_pop.remove_disabled_mutants_from_squad
+      smr_pop.adjust_squad_size                      may create more members
+      smr_pop.replace_mutant_variants_in_squad
+      SIMBOARD:assign_squad_to_smart
+      per member: SIMBOARD:setup_squad_and_group + SendScriptCallback
+      smr_civil_war.setup_civil_war_squad
+  per member: SIMBOARD:setup_squad_and_group         smart_terrain.script:1730
+  smr_civil_war.setup_civil_war_squad                smart_terrain.script:1742
+```
+
+**Already visible from the static read:** the last two lines are *duplicates*.
+`create_squad` already ran `setup_squad_and_group` for every member and
+`setup_civil_war_squad` for the squad; `try_respawn` then does both again. That
+is not the 440 ms on its own, but it is free to delete and it is the kind of
+thing the next `nst` will size exactly.
+
+v4 follows the path down with **one axis per level**, because two functions on
+one axis mean the inner one is `nested` and invisible - which is how a 440 ms
+call had nothing in it to look at for two runs:
+
+| level | axis | what |
+|---|---|---|
+| 1 | `bnd` | `bind_smart_terrain.smart_terrain_binder.update` |
+| 2 | `sub` | `se_smart_terrain.try_respawn` |
+| 3 | `spn` | `simulation_board.create_squad` |
+| 4 | `mem` | `create_npc`, `init_squad`, `adjust_squad_size`, `remove_disabled_mutants_from_squad`, `replace_mutant_variants_in_squad`, `setup_squad_and_group`, `assign_squad_to_smart`, `setup_civil_war_squad` |
+| 5 | `acr` | `alife_create`, `alife_create_item` |
+
+`smr_pop.smr_handle_spawn` is deliberately **not** wrapped: it is a dispatcher
+that returns `create_squad`'s result, and wrapping both on one axis would hide
+`create_squad`. The next `nst` therefore answers the only question that decides
+what a fix can be: **is it N x `alife_create` (engine, so the only lever is
+*when*) or Lua around it (fixable outright)?**
+
+Also v4: per-axis `nst` floors (`cb`/`evt`/`lst` at 20 ms, everything else 50),
+and a region that ran *inside* another one now gets an `nst` line with
+`top=0` and no breakdown - named, but not decomposed, because the slots at that
+moment belong to whatever contained it.
+
+##### The t~54 s job finally has a name
+
+`ProcessEventQueue` reads 26.9-28.7 ms there again, and the frame line's own
+top-3 names the owner: **`evt:dynamic_news_manager.script:250#DynamicNewsManager.TickNews@dynamic_news_manager.script:220`,
+26.7 ms** (live winner: *116- Dialogues Expanded - indyora*). It is a time-event
+body, it is the game's, it fires once a session at that point, and it is in
+every arm.
+
+##### The `sim_squad_scripted.update` bursts
+
+Captures 1, 2 and 3 all show 10-24 frames of 30-40 ms in the first ~25 s after
+the load (t=30-41 s), each frame carrying many
+`sim_squad_scripted.sim_squad_scripted.update` calls at 2-3.5 ms with +1.5-4 MB
+of GC. Static read: `sim_squad_scripted:update` has a `first_update` branch that
+runs once per squad and, among other things, `alife_create_item`s the squad's
+`item_on_all` list for every member. So this is every squad on the level doing
+its one-off first update, spread over the frames after a load. v4 puts
+`specific_update` / `generic_update` / `refresh` / `check_online_status` /
+`get_script_target` on the `sub` axis to split it.
+
+##### Fix options for the 440 ms, with what each one breaks
+
+These are written before the measurement that chooses between them, so that the
+measurement can still say no.
+
+**(a) If it is `alife_create`-bound** (engine time, N members x ~tens of ms):
+nothing makes a member cheaper, so the only lever is *when*. Spread creation
+over frames - one member per frame from a `CreateTimeEvent`. Non-identities,
+all of them real: a squad exists **half-built for N frames**, and
+`squad:squad_members()` is iterated by `setup_squad_and_group`, by
+`smr_civil_war.setup_civil_war_squad` (relations are set per member, so a member
+added later gets none), by task targets and by the simulation's target
+selection, which can pick a one-member squad and then find it has five. A save
+taken mid-build stores a squad whose `already_spawned` count has already been
+incremented. And `create_squad` returns the squad to `try_respawn`, which
+immediately iterates its members - that loop would have to move too. This is the
+option with the worst blast radius and it should only be taken if the time is
+genuinely engine-side.
+
+**(b) Move the roll off the arrival frame.** The gate is `if
+(self.is_on_actor_level and self.dist_to_actor ~= nil) then if (self.dist_to_actor
+< self.respawn_radius) then return end end` - so a respawn fires only while the
+actor is **outside** the radius. It coincides with walking to the hamlet because
+`dist_to_actor` is `self.online and ...distance_to(actor) or math.huge`: while
+the smart is offline the distance is `math.huge`, the radius gate cannot stop
+it, and the very first `update()` after the smart comes online is the first one
+that both has `already_spawned` filled in and passes `smart_can_respawn`. (The
+30% first-spawn skip that would have damped this is commented out at
+`smart_terrain.script:1646-1651`.) If that reading is right - and the next run
+can confirm it by whether `try_respawn` is expensive exactly once per smart -
+then **every smart with `respawn_params` that the player approaches for the
+first time in a session pays one squad spawn**, and this is a whole-map pattern,
+not one hamlet. Sizing it is a config count: how many smarts on a level carry
+`respawn_params`. The fix is to make the first post-online roll happen off the
+arrival frame (defer it by a few seconds via a time event), which changes
+*nothing* about what spawns - only when - and is far cheaper in behaviour than
+(a). Non-identity: a player who runs through a smart and leaves within the
+deferral gets no spawn at all that visit.
+
+**(c) Anything quadratic in SMR.** `smr_civil_war.setup_civil_war_squad` and
+`smr_pop.*` take the squad and the smart's name and consult faction tables;
+`remove_disabled_mutants_from_squad` and `replace_mutant_variants_in_squad` each
+iterate `squad:squad_members()` separately, and `adjust_squad_size` can create
+more members after the first two have already walked the list. Three passes over
+the members plus a fourth in `create_squad` plus a fifth in `try_respawn` is
+five iterations of the same list, and the duplicate
+`setup_squad_and_group` / `setup_civil_war_squad` pair above is a sixth and
+seventh. If the `mem` axis shows these dominating rather than `acr`, this is
+ordinary Lua and fixable outright, with no behavioural change at all beyond
+deleting the duplicate work.
+
+`lab/coord/overlays/i062-smart-terrain-request.json` is the run that chooses.
+
+```
+py -3.12 lab/tools/i062_engine_entry_census.py --top 30
+py -3.12 lab/tools/i062_build_overlays.py      # alao-profiler-walkout[-listeners-inv]
+py -3.12 lab/tools/profile_report.py --queue <id> --frames --axes --hitch --listeners --trace
+```
+
+`alao-profiler-walkout-listeners-inv` also carries I-063's per-call inventory
+trace, because the user gets one attended session and both questions have to fit
+in it.
+
 ### Running an arm with it
 
 Add one key to the queue request. The profiler is the **instrument, not the

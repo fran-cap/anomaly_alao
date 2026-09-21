@@ -25,3 +25,24 @@ py -3.12 tools/seed_demo_runs.py [--count N] [--clean]
 Everything here is read-only against the game install except the profile copies
 the framework makes under `profiles/aalo-*`. See `../framework/README.md` for
 the elevation caveat that applies to real runs.
+
+## I-062: the other doors into Lua
+
+```
+py -3.12 tools/i062_engine_entry_census.py [--top N] [--json out.json] [--wrap-list]
+py -3.12 tools/i062_build_overlays.py [--out <overlays dir>]
+py -3.12 tools/profile_report.py <run> --frames --axes --trace
+```
+
+- **i062_engine_entry_census.py** enumerates every way the engine enters Lua
+  other than `axr_main.make_callback`, resolved over the live winner tree
+  (enabled mods in modlist order, then loose `Anomaly/gamedata`, then the db):
+  `object_binder` classes and their methods, `cse_`/`se_` server objects,
+  scheme action classes, `CreateTimeEvent` / `AddUniqueCall` / `level.add_call`
+  sites, `.ltx` `functor` bindings, and a curated list of engine-called globals
+  checked against the tree so nothing is wrapped that does not exist. Ranked by
+  how likely a door is to be used when objects switch online.
+- **i062_build_overlays.py** builds `alao-profiler-walkout` and
+  `alao-profiler-walkout-listeners-inv` out of `lab/profiler-walkout`, refusing
+  to write any of the locked `alao-profiler*` overlays. The listener build also
+  carries I-063's per-call inventory trace.

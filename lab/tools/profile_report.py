@@ -106,8 +106,178 @@ def _report_hitch(name, dirs, top, pct, scope=None):
     return ranked
 
 
+def _report_frames(name, dirs, top, min_ms=0.0):
+    """I-062: the slow-frame table, and how much of a slow frame was script.
+
+    The one number this exists for is `inv ms` - frame ms minus the union of
+    top-level script regions in that frame.  Big and flat across the slow
+    frames means the cost is engine side (or Lua nothing on the wrap lists
+    reaches); small means we are looking straight at it in the `top` column.
+    """
+    rows, summaries, wdr = [], [], None
+    for d in dirs:
+        log = _profiler.load_run(d) if Path(d).is_dir() else _profiler.load(d)
+        if not log or not log.frames:
+            continue
+        wdr = wdr or log.walkout
+        rows.extend(log.frame_rows(min_ms))
+        summaries.append(log.frame_summary(min_ms))
+    if not rows:
+        print(f"#### {name}: no `frm` lines - the overlay was not the walkout build\n")
+        return []
+    rows.sort(key=lambda r: r["ms"], reverse=True)
+    # An axis that wrapped nothing measured NOTHING. It did not measure nothing
+    # happening, and the first run proved how easy that is to miss.
+    if wdr:
+        for p in wdr.problems():
+            print(f"> **!! {p}**\n")
+        if wdr.probes and any(p.wrapped == 0 for p in wdr.probes):
+            bad = [p for p in wdr.probes if p.wrapped == 0]
+            print(f"> {len(bad)} of {len(wdr.probes)} binder targets wrapped nothing; "
+                  f"first few: "
+                  + "; ".join(f"`{p.target}` (mod={p.mod}, cls={p.cls}, via={p.via}, {p.why})"
+                              for p in bad[:3]) + "\n")
+    if wdr:
+        print(f"#### {name}: slow frames (floor {_fmt(wdr.frame_floor_ms, 0)} ms, "
+              f"wrapped {wdr.walkout}"
+              + (f", pending {wdr.pending}" if wdr.pending else "") + ")")
+    else:
+        print(f"#### {name}: slow frames")
+    n_sf = sum(s["n"] for s in summaries)
+    med = [s["median_script_pct"] for s in summaries if s["median_script_pct"] is not None]
+    print(f"- {n_sf} slow frame(s) over {len(summaries)} run(s); median script share "
+          + (f"{min(med):.0f}-{max(med):.0f}%" if med else "-")
+          + f"; {sum(s['spawns'] for s in summaries)} net_spawn / "
+          f"{sum(s['destroys'] for s in summaries)} net_destroy in them; "
+          f"{sum(s['gc_frames'] for s in summaries)} with a GC drop > 64 KB")
+    print("| # | frame | t | ms | dt_dev | script ms | script % | inv ms | cb | bnd | eng | evt | sp/de | dGC kB | biggest call |")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|")
+    for i, r in enumerate(rows[:top], 1):
+        biggest = "-"
+        if r["top"] and r["top"][0][0] not in ("-", ""):
+            biggest = f"`{r['top'][0][0]}` {_fmt(r['top'][0][1], 2)}"
+        print(f"| {i} | {r['frame']} | {r['t']:.0f} | {r['ms']:.0f} | {_fmt(r['dt_dev'], 4)} | "
+              f"{_fmt(r['script_ms'], 2)} | {_fmt(r['script_pct'], 0)}% | "
+              f"{_fmt(r['invisible_ms'], 2)} | {_fmt(r['cb_ms'], 2)} | {_fmt(r['bnd_ms'], 2)} | "
+              f"{_fmt(r['eng_ms'], 2)} | {_fmt(r['evt_ms'], 2)} | {r['spawn']}/{r['destroy']} | "
+              f"{r['gc_delta_kb']:+.0f} | {biggest} |")
+    print()
+    agg = {}
+    for s in summaries:
+        for a in s["top_scopes"]:
+            m = agg.setdefault(a["name"], {"name": a["name"], "n": 0, "ms": 0.0, "max_ms": 0.0})
+            m["n"] += a["n"]
+            m["ms"] += a["ms"]
+            m["max_ms"] = max(m["max_ms"], a["max_ms"])
+    print(f"#### {name}: scopes on top of the slow frames")
+    print("| # | scope | frames | total ms | worst ms |")
+    print("|---|---|---:|---:|---:|")
+    for i, a in enumerate(sorted(agg.values(), key=lambda x: x["ms"], reverse=True)[:top], 1):
+        print(f"| {i} | `{a['name']}` | {a['n']} | {_fmt(a['ms'], 2)} | {_fmt(a['max_ms'], 2)} |")
+    print()
+    return rows
+
+
+def _report_nested(name, dirs, top):
+    """I-062 v3: what was inside the very slow single calls.
+
+    `acct` is a coverage hint, not a decomposition: the slots can nest inside
+    each other (a listener and its callback both qualify), so it can read over
+    100%.  Near or above 100 means the slots reach the bottom of the call; low
+    means the cost is spread thin or sits in code nothing on the wrap lists
+    reaches, which is an answer too.  `nested` in that column means the region
+    itself ran inside another one and is named but not broken down.
+    """
+    rows = []
+    for d in dirs:
+        log = _profiler.load_run(d) if Path(d).is_dir() else _profiler.load(d)
+        if not log or not log.nested:
+            continue
+        rows.extend(log.nested_rows())
+    if not rows:
+        print(f"#### {name}: no `nst` lines - no single call crossed the floor\n")
+        return []
+    rows.sort(key=lambda r: (r["ms"] or 0.0), reverse=True)
+    print(f"#### {name}: inside the slowest single calls")
+    print("| # | t | frame | axis | scope | ms | acct | inside (worst first) |")
+    print("|---|---:|---:|---|---|---:|---:|---|")
+    for i, r in enumerate(rows[:top], 1):
+        inside = ", ".join(f"`{n}` {_fmt(ms, 1)}" for n, ms in r["in"][:4]) or "-"
+        # a nested region is named but never broken down: the slots at that
+        # moment belong to whatever region contained it
+        acct = f"{_fmt(r['accounted_pct'], 0)}%" if r["top"] else "nested"
+        print(f"| {i} | {r['t']:.0f} | {r['frame']} | {r['axis']} | `{r['scope']}` | "
+              f"{_fmt(r['ms'], 1)} | {acct} | {inside} |")
+    print()
+    return rows
+
+
+def _report_axes(name, dirs, top, drop_first):
+    """I-062: the bnd / eng / evt / sub rankings, kept apart from the cb ranking."""
+    out = {}
+    for tag, title in (("bnd", "object binders and se_* server objects"),
+                       ("eng", "engine-called globals"),
+                       ("evt", "time-event / deferred bodies"),
+                       ("sub", "drill-down into a known-slow scope")):
+        rows = []
+        for d in dirs:
+            log = _profiler.load_run(d) if Path(d).is_dir() else _profiler.load(d)
+            if not log:
+                continue
+            rows = log.axis_ranking(tag, top=top, drop_first=drop_first)
+            if rows:
+                break
+        if not rows:
+            continue
+        out[tag] = rows
+        print(f"#### {name}: axis `{tag}` - {title}")
+        print("| # | scope | ms/frame | calls/frame | us/call |")
+        print("|---|---|---:|---:|---:|")
+        for i, r in enumerate(rows, 1):
+            print(f"| {i} | `{r['name']}` | {_fmt(r['ms_per_frame'], 4)} | "
+                  f"{_fmt(r['calls_per_frame'], 2)} | {_fmt(r['us_per_call'], 1)} |")
+        print()
+    if not out:
+        print(f"(no `axs` rows: the overlay was not the walkout build)\n")
+    return out
+
+
+def _report_trace(name, dirs, top, prefix=None):
+    """I-063: one row per call of the traced listener, in call order."""
+    rows = []
+    for d in dirs:
+        log = _profiler.load_run(d) if Path(d).is_dir() else _profiler.load(d)
+        if not log or not log.traces:
+            continue
+        rows.extend(log.trace_rows(prefix))
+    if not rows:
+        print(f"#### {name}: no `trace` lines - the overlay had TRACE_LISTENERS off\n")
+        return []
+    print(f"#### {name}: per-call trace ({len(rows)} call(s))")
+    print("| # | t | frame | ms | cells pre->post | grid pre->post | idxer |")
+    print("|---|---:|---:|---:|---|---|---:|")
+    for i, r in enumerate(rows[:top], 1):
+        pre, post = r["pre"], r["post"]
+        cells = f"{pre.get('cells', '-')} -> {post.get('cells', '-')}"
+        grid = f"{pre.get('grid', '-')} -> {post.get('grid', '-')}"
+        grew = r["grew"]
+        mark = " **+**" if any(v for v in grew.values()) else ""
+        print(f"| {i} | {r['t']:.0f} | {r['frame']} | {_fmt(r['ms'], 2)} | {cells}{mark} | "
+              f"{grid} | {post.get('idxer', '-')} |")
+    grown = [r for r in rows if any(v for v in r["grew"].values())]
+    flat = [r for r in rows if r not in grown]
+    def _mean(rs):
+        vals = [r["ms"] for r in rs if r["ms"] is not None]
+        return sum(vals) / len(vals) if vals else None
+    print(f"\n- calls where the cell pool or grid grew: {len(grown)}, mean "
+          f"{_fmt(_mean(grown), 2)} ms; calls with no growth: {len(flat)}, mean "
+          f"{_fmt(_mean(flat), 2)} ms\n")
+    return rows
+
+
 def _report_arm(name, dirs, top, drop_first, listeners=False, drop_rounds=0,
-                hitch=False, hitch_pct=99.0):
+                hitch=False, hitch_pct=99.0, frames=False, axes=False,
+                trace=False, frame_min_ms=0.0, trace_prefix=None):
     logs = []
     for d in dirs:
         log = _profiler.load_run(d) if d.is_dir() else _profiler.load(d)
@@ -158,6 +328,14 @@ def _report_arm(name, dirs, top, drop_first, listeners=False, drop_rounds=0,
             print()
     if hitch:
         rep["hitch"] = _report_hitch(name, [d for d, _ in logs], top, hitch_pct)
+    if frames:
+        rep["frames"] = _report_frames(name, [d for d, _ in logs], top, frame_min_ms)
+    if axes:
+        rep["axes"] = _report_axes(name, [d for d, _ in logs], top, drop_first)
+    if frames or axes:
+        rep["nested"] = _report_nested(name, [d for d, _ in logs], top)
+    if trace:
+        rep["trace"] = _report_trace(name, [d for d, _ in logs], top, trace_prefix)
     return rep
 
 
@@ -180,6 +358,16 @@ def main(argv=None) -> int:
                          "Needs the hitch build of the overlay (alao-profiler-hitch*)")
     ap.add_argument("--hitch-pct", type=float, default=99.0,
                     help="percentile for --hitch (default 99)")
+    ap.add_argument("--frames", action="store_true",
+                    help="I-062: the slow-frame table - frame ms, script ms and what is "
+                         "left over. Needs the walkout build (alao-profiler-walkout*)")
+    ap.add_argument("--frame-min-ms", type=float, default=0.0,
+                    help="only report frames at least this long (on top of the overlay's floor)")
+    ap.add_argument("--axes", action="store_true",
+                    help="I-062: rank the binder / engine-global / time-event axes")
+    ap.add_argument("--trace", action="store_true",
+                    help="I-063: one row per call of the traced listener")
+    ap.add_argument("--trace-prefix", help="only trace rows whose name starts with this")
     ap.add_argument("--json", type=Path, help="also write the aggregate here")
     a = ap.parse_args(argv)
 
@@ -210,7 +398,8 @@ def main(argv=None) -> int:
     out = {}
     for name, dirs in arms.items():
         rep = _report_arm(name, dirs, a.top, a.drop_first, a.listeners, a.drop_rounds,
-                          a.hitch, a.hitch_pct)
+                          a.hitch, a.hitch_pct, a.frames, a.axes, a.trace,
+                          a.frame_min_ms, a.trace_prefix)
         if rep:
             out[name] = rep
     b = (out.get("baseline") or {}).get("script_ms_per_frame") or {}
