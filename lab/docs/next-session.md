@@ -1,4 +1,29 @@
-# Next session: generation 6 (the runs that need the user, then hitches)
+# Next session: generation 8
+
+## UPDATE 2026-09-20 late: generation 7 ran (hitches, round two). Start here.
+
+`beam-ideas.md` section 14 has the numbers. `integrate/gen7` = main + `agent/gen7-I064` / `-I065` / `-I066` / `-I067` + the organizer's
+`lab/coord/gen7_attended_build.py`: 711p/7s/4xf, lab 454p. Hamlet 440 ms frame (I-064), post-load squad burst (I-065), first animated
+item use (I-067) are FIXED in game; I-066 measured -8.9 us per `get_visible_value` call. Four standalone mods under `lab/mods`:
+`alao-spawn-prewarm`, `alao-squad-stagger`, `alao-vmm-cache`, `alao-prewarm` v1.4.
+
+Open, in order:
+
+1. **All-gen-7 stacked arm.** Nobody has run the four mods together. Build `agent-I063-b` + spawn-prewarm 1.1 + squad-stagger 1.1 +
+   vmm-cache + prewarm 1.4, one attended run with the gen-7 routine (inventory, one consumable, hamlet walk), and ask the user how it feels.
+2. **The inventory first-open row** (5.5 -> 8-15 ms under v1.4?): `lab/coord/i067-request.json`, attended, >= 4 captures per arm.
+3. **I-068** fresh squads online at spawn (61-103 ms engine frames, by NPC count). Size it before touching it.
+4. `surge_manager.lua:146` 640-660 ms and `zzz_alao_prewarm.script:564` ~780 ms inside the 2-2.8 s `actor_on_first_update` frame: load
+   time, not a stutter, but it is now the biggest thing we put there ourselves.
+5. I-061 arm drift A/A, I-060 orphaned cache refs, I-053 locked moving save (still needs the user) - unchanged.
+
+Habits that worked this round: one attended session for two ideas (baseline arm doubled as the I-064 diagnosis); submit attended items
+and `coord queue hold` them until the user says go; decode nothing by hand - make the mod print it right (`%s` only).
+Publishing: still the user's call, they said not now.
+
+---
+
+# Previous plan (generation 6), kept for the locked numbers and rules below
 
 Written 2026-09-20 at the end of the gen-5 run. Read this, `lab/coord/README.md`,
 `lab/framework/README.md` ("Measuring a rewrite in script-ms", "The tail, not the mean") and `beam-ideas.md` section 12 first.

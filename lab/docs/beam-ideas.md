@@ -1030,3 +1030,52 @@ inventory row was credited for two rounds while the log said 'GUI already built'
 Also measured: `visual_memory_manager.get_visible_value` 34 us/frame standing (I-066, over the per-frame bar);
 `smart_terrain.setup_gulag_and_logic_on_spawn` 16-19 ms per call at load; `actor_on_first_update` 1.3 s, of which
 `surge_manager.lua:146` 630-670 ms.
+
+## 14. Generation-7 results (2026-09-20, hitches: four agents, two unattended runs, one attended)
+
+Four agents off `main` d92c448 (`agent/gen7-I064`, `-I065`, `-I066`, `-I067`), merged conflict-free on `integrate/gen7`: 711 passed /
+7 skipped / 4 xfailed, lab 454 passed (box quiet; two `test_profiler_hitch.py` timing tests fail while the game is capturing, for
+three agents in a row). Shared baseline arm `agent-I063-b`. Every mod only ADDS files and prints what it did.
+
+| Item | Before | After | Run | State |
+|---|---:|---:|---|---|
+| I-064 hamlet arrival frame | 468 / 444 / 443 ms, 3 of 3 | none, 0 of 3; squad created in 4-5 ms | `20260920-212446-I-064-6fab64`, attended 3+3 | **kept**, `alao-spawn-prewarm` v1.1 |
+| I-065 squad first-update burst | 24-25 frames of 12-39 ms in 3 of 6 loads | 0 of 6 loads | `20260920-212232-I-065-5603b6`, 6+6 | **kept**, `alao-squad-stagger` v1.1 |
+| I-066 `get_visible_value` | 21.7 us/call, 32.4 us/frame | 12.8 us/call, 21.0 us/frame | `20260920-212022-I-066-51aec5`, 4x120 s | **kept** for crowds; -11.4 us/frame standing is under the bar |
+| I-067 first animated item use (`lam2.script:271`) | 29.3 / 4.2 / 4.3 ms | 0.54 / 0.47 / 0.52 ms | same attended run | **kept**, `alao-prewarm` v1.4; one open row below |
+
+What the causes turned out to be:
+
+- **I-064 is engine, once per session, and not about squads.** 438-462 ms of the frame is inside ONE `alife_create`: the first fresh
+  stalker whose `character_profile` is a class makes the engine walk ~5278 `<specific_character>` entries cold (*Dux's Innumerable
+  Characters Kit* ships 5098). The window holding the hitch has exactly 5251 `on_specific_character_init` callbacks, every other in-play
+  window 0. It lands on the hamlet walk because the respawn gate blocks inside 150 m of the smart next to the load point. Spreading
+  `create_npc` over frames would not have helped; the duplicated `setup_squad_and_group` passes are under 0.1 ms. The fix creates and
+  releases one offline `sim_default_stalker_0` at `actor_on_first_update` (413-450 ms behind the loading screen).
+- **I-065 is a coin flip the engine makes.** Every load does the same 523 first updates (~410-560 ms). In about half the loads the ALife
+  scheduler sweeps them all at frame 8 behind the loading screen; in the rest it starts ~10 s into play and visits ~20 squads per
+  455 ms tick. The cost is not item creation: `STATE_Write` does not save `assigned_target_id`, so each first update runs a full
+  `SIMBOARD:get_squad_target` search (by code reading; the profiler does not wrap it). The mod does the frame-8 sweep itself.
+- **I-066**: 7 MCM reads per call (8 crouched), each through Modded Exes' uncached ini path, 14 of 46 engine crossings. The patch
+  caches `stealth_mcm.get_config`, not `get_visible_value` (file-locals, three shipped copies). The engine resolves
+  `visual_memory_manager.get_visible_value` by name on every call, so monkey patches on it do take.
+- **I-067**: two events, not one: FDDA Redone's backpack-open animation ~1 s after the first inventory open (every session) and the
+  first consumable. `game.motion_exists` does the same `model_Create` as the real path without touching the hud.
+
+Cost at load: `actor_on_first_update` 2.03 s -> 2.78 s with I-064 + I-067 (fdda block 331 ms on the first launch of a sitting, 35 ms
+after), plus ~0.5 s for I-065 in the loads that would have had the burst. All behind the loading screen.
+
+Open from this round:
+
+- `ActorMenu_on_before_init_mode#ui_inventory.script:93` first open read 5.5 / 5.0 / 5.9 ms (v1.3) vs 15.4 / 8.8 / 7.8 ms (v1.4 + I-064).
+  No code path from either added file into the open was found, the 15.4 has a GC sweep in it, the engine share of that frame is bimodal in
+  both arms, and against the older v1.2 captures the ranges overlap (rank p ~0.14). Open + lam2 script ms per pair: -18.8, +0.1, -1.9.
+  `lab/coord/i067-request.json` (no I-064 file) with >= 4 captures per arm settles it, then `FDDA_MODELS` / `FDDA_SOUNDS` off.
+- **I-068 (new)**: with the 440 ms gone, a 3-NPC respawn still cost 103 / 87 / 61 ms frames ~170 ms later (1 % script, 4 net_spawns,
+  model and texture loads). `respawn_radius` 150 m is inside switch distance, so fresh squads go online at once. Engine; lever unknown.
+- I-066 per-round overlap between arms was not checked (arm means only), and its crowd number still needs the I-053 save.
+
+Instrument lesson, paid three times in one round: **Anomaly's `printf` only substitutes `%s`.** `%.0f` / `%d` print literally and shift
+every later argument, so a log line can look plausible and be wrong ('562 errors' was 562 ms). Build the line with `string.format`, hand
+it to `printf("%s", line)`, and make the test stub refuse anything but `%s`. Also: the profiler books a callback fired inside another
+callback as `nested`, not `calls` - `calls=0` is not 'did not run'.

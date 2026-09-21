@@ -936,14 +936,15 @@
       "category": "structural",
       "generation": 6,
       "parent": "I-062",
-      "status": "proposed",
+      "status": "kept",
       "score": 9.5,
       "risk": "medium",
       "expected_gain": "high",
       "hypothesis": "Walking to the hamlet near the gammabaseline start costs one 434-456 ms frame in EVERY capture (8 of 8), ~100 % script, +6.5-8 MB GC: bind_smart_terrain update -> try_respawn (99.97 %) -> smr_pop.smr_handle_spawn -> SIMBOARD:create_squad. The respawn gate returns while dist_to_actor < respawn_radius and dist is math.huge offline, and the 30 % first-spawn damper is commented out (ZCP smart_terrain.script:1646), so the first update after a smart comes online is the first that can pass: possibly every smart with respawn_params the player first approaches per session.",
       "change": "Decide with the v4 axes whether it is N x alife_create (engine: only deferrable, spread members over frames or move the roll off the arrival frame) or Lua around it (fixable outright: try_respawn repeats setup_squad_and_group per member and setup_civil_war_squad that create_squad already did, 5-7 squad_members() passes).",
       "measure": "walkout profiler nst/acr lines, attended hamlet walk; then per-call max before/after.",
-      "notes": "Live winner G.A.M.M.A. ZCP 1.4 Balanced Spawns. Request prepared: lab/coord/overlays/i062-smart-terrain-request.json. The user felt it ('larger stutter walking out to the hamlet that triggered the fast travel mod')."
+      "notes": "Live winner G.A.M.M.A. ZCP 1.4 Balanced Spawns. Request prepared: lab/coord/overlays/i062-smart-terrain-request.json. The user felt it ('larger stutter walking out to the hamlet that triggered the fast travel mod').",
+      "result": "Gen-7, queue 20260920-212446-I-064-6fab64 (attended, 3+3): baseline 468 / 444 / 443 ms frames in 3 of 3, 438-462 ms of it inside ONE alife_create = engine: the first fresh class-profile stalker of a session walks ~5278 specific_character entries cold (Dux's Innumerable Characters Kit ships 5098). Once per session, not per smart. lab/mods/alao-spawn-prewarm creates and releases one offline sim_default_stalker_0 at actor_on_first_update: variant 0 of 3, hamlet squad 4-5 ms with 0 cold loads, 413-450 ms moved behind the loading screen. Spreading create_npc would not have helped. v1.1 fixes the %s-only printf lines."
     },
     {
       "id": "I-065",
@@ -951,14 +952,15 @@
       "category": "structural",
       "generation": 6,
       "parent": "I-062",
-      "status": "proposed",
+      "status": "kept",
       "score": 7.5,
       "risk": "medium",
       "expected_gain": "medium",
       "hypothesis": "10+ frames of 30-40 ms, ~90 % script, +3-5 MB GC each, at t=34-41 s in most captures: every squad's one-off first_update alife_create_item's its item_on_all list per member.",
       "change": "Stagger or cheapen the first_update item creation.",
       "measure": "walkout profiler frm lines in the first 30 s after load.",
-      "notes": "Sits mostly inside the harness warm-up window, which is why no earlier run saw it."
+      "notes": "Sits mostly inside the harness warm-up window, which is why no earlier run saw it.",
+      "result": "Gen-7, queue 20260920-212232-I-065-5603b6 (unattended, 6+6): the burst is in about half the loads (9 of 16 old, 3 of 6 new), 24-25 frames of 12-39 ms on the 455 ms ALife tick, 88 % script; not item creation but SIMBOARD:get_squad_target on each squad's first update (assigned_target_id is not saved) - by code reading. In the other loads the engine sweeps all 523 squads at frame 8. lab/mods/alao-squad-stagger does that sweep itself at actor_on_first_update: variant 0 of 6 with the burst, 530-562 ms behind the loading screen, worst squad 17-47 ms, no pcall errors. v1.1 fixes the log lines."
     },
     {
       "id": "I-066",
@@ -966,14 +968,46 @@
       "category": "structural",
       "generation": 6,
       "parent": "I-056",
-      "status": "proposed",
+      "status": "kept",
       "score": 8.0,
       "risk": "low",
       "expected_gain": "medium",
       "hypothesis": "Engine-called, invisible to the callback profiler until I-062: 20.3 us/call at 1.68 calls/frame standing still; scales with NPCs in view.",
       "change": "Cache the stealth_mcm.get_config values with on_option_change invalidation (monkey patch).",
       "measure": "eng axis us/frame, standing and in a crowd (needs I-053).",
-      "notes": "Live winner is a mod copy (290- Atmospherics Shaders...). Found by I-056, measured by I-062."
+      "notes": "Live winner is a mod copy (290- Atmospherics Shaders...). Found by I-056, measured by I-062.",
+      "result": "Gen-7, queue 20260920-212022-I-066-51aec5 (4x120 s): eng row 21.7 -> 12.8 us/call, 32.4 -> 21.0 us/frame standing (-11.4, under the 25 us bar on this save; the case is per visible-NPC evaluation, -8.9 us each). 7 reads per call, not 8. lab/mods/alao-vmm-cache patches stealth_mcm.get_config (lazy cache, dropped on on_option_change / ui_mcm.set / load), log lines confirmed in 4 of 4 variant captures. Arm means only; per-round overlap not checked. Crowd number still needs I-053."
+    },
+    {
+      "id": "I-067",
+      "title": "FDDA first-use prewarm: lam2.script:271 9-30 ms on the first backpack animation / consumable",
+      "category": "structural",
+      "generation": 7,
+      "parent": "I-063",
+      "status": "kept",
+      "score": 7.0,
+      "risk": "low",
+      "expected_gain": "medium",
+      "hypothesis": "First animated item use is two events: FDDA Redone's backpack_open animation ~1 s after the first inventory open (every session) and the first consumable (13.5-30 ms). Cold hud motion container, model_Create, sound_object and cam .anm read.",
+      "change": "alao-prewarm v1.4 (zzz_alao_prewarm_fdda.script): game.get_motion_length / game.motion_exists / held sound_object / io.open read for the backpack sections and every animated section in the ruck, at actor_on_first_update; one step per frame on item take.",
+      "measure": "hit lines for actor_on_update#lam2.script:271, attended.",
+      "result": "Queue 20260920-212446-I-064-6fab64: worst call 29.3 / 4.2 / 4.3 ms -> 0.54 / 0.47 / 0.52 ms; fdda block 331 ms on the first launch of a sitting, 35 ms after. OPEN: ui_inventory.script:93 first open read 5.5 / 5.0 / 5.9 -> 15.4 / 8.8 / 7.8 ms; no code path from v1.4 into the open was found, one outlier is a GC sweep, ranges overlap with the v1.2 captures (rank p ~0.14). Clean request lab/coord/i067-request.json (no I-064 file, >= 4 captures per arm, then FDDA_MODELS / FDDA_SOUNDS off) settles it.",
+      "notes": "Inventory first open itself stays engine (ShowDialog + first draw); v1.3's grid fix confirmed in game (cells 31 -> 31)."
+    },
+    {
+      "id": "I-068",
+      "title": "Fresh squads go online the moment they spawn: respawn_radius 150 m is inside switch distance",
+      "category": "structural",
+      "generation": 7,
+      "parent": "I-064",
+      "status": "proposed",
+      "score": 5.0,
+      "risk": "medium",
+      "expected_gain": "medium",
+      "hypothesis": "With the 440 ms gone, a 3-NPC respawn still cost 103 / 87 / 61 ms frames ~170 ms later (1 % script, 4 net_spawns, model + texture loads): engine, sized by NPC count and whether their visuals are loaded.",
+      "change": "Unknown lever from Lua: spawn beyond switch distance, or prefetch the visuals of the squad about to spawn. Gameplay-visible, so size it first.",
+      "measure": "frm lines after [alao_spawn] squad lines, by npc count, over more captures.",
+      "notes": "Seen in 1 of 3 variant captures (the 3-NPC one) and at 24 ms after a 2-NPC baseline spawn."
     }
   ]
 }
