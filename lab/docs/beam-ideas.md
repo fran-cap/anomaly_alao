@@ -1079,3 +1079,31 @@ Instrument lesson, paid three times in one round: **Anomaly's `printf` only subs
 every later argument, so a log line can look plausible and be wrong ('562 errors' was 562 ms). Build the line with `string.format`, hand
 it to `printf("%s", line)`, and make the test stub refuse anything but `%s`. Also: the profiler books a callback fired inside another
 callback as `nested`, not `calls` - `calls=0` is not 'did not run'.
+
+### 14.1 All four stacked (2026-09-20, `20260920-231227-I-064-66b85b`, attended 2+2) and what is still there
+
+`gen7-all-b` = prewarm 1.4 + spawn-prewarm 1.1 + squad-stagger 1.1 + vmm-cache 1.0 on `agent-I063-b`. Log lines first, all four
+right in both variant captures now that they go through `%s`: prewarm 411 / 418 ms with 5278 cold character loads, load sweep 523
+updated in 532 / 528 ms with 0 errors and 0 left, vmm-cache patched + 8 keys cached, fdda 35 ms. `actor_on_first_update` is ~3.0-3.1 s
+with all four in it (baseline ~2.0 s), behind the loading screen.
+
+| in-play frames (frame > 300) | baseline | variant |
+|---|---:|---:|
+| >= 12 ms | 37 / 39 | 20 / 23 |
+| >= 20 ms | 23 / 23 | 7 / 9 |
+| >= 40 ms | 2 / 4 (444 and 453 ms among them) | 1 / 1 (42 and 40 ms, engine) |
+
+Both baseline loads happened to be burst loads (17 frames of 20-42 ms each); neither variant load has the train. The user still felt small
+stutters in the variant. Same run: `lam2.script:271` 4.4 / 4.1 -> 0.51 / 0.54 ms, `get_visible_value` 20.9 / 20.5 -> 11.8 / 14.3 us/call,
+first inventory open 13.0 / 5.7 vs 4.8 / 8.4 ms (the 14 open row is noise, closed). What is left in the variant, all of it:
+
+| When | Size | What | Whose |
+|---|---:|---|---|
+| t~54 s, every capture, both arms | 30-34 ms, 27-31 ms script | `DynamicNewsManager.TickNews` time event | Lua: **I-070** |
+| t=111-112 s, variant 2 only | 4 frames of 20-27 ms, 9-14 ms script over ~2000 tiny callbacks | `npc_on_hear_callback` storm, 34967 calls in the window vs 1-3 k normally, `xr_danger.lua:30` | Lua: **I-069** |
+| around the campfire walk-out, t~75-90 s, both arms | 34-42 ms, ~1 % script | engine, `bind_campfire.script:176` on top at 0.9 ms | engine, closed in gen-6 |
+| squad going online after a respawn | 28 ms (1 NPC) variant; 101 ms (2 NPCs) right after the baseline's 453 ms | `net_spawn` + model / texture load | engine: **I-068** |
+| t~27 s, both arms | 24-26 ms, 160 net_destroys | end of load | inside the warm-up |
+| 20 net_spawns in one frame, both arms | 20-21 ms, 5-7 ms script | `npc_on_item_take` on top | small |
+| baseline 2, t=46 s | 38 ms, 33 ms script | `monster_on_death_callback#dynamic_news_manager_patch_dmg.script:685` | Lua: with I-070 |
+| variant 1, t=215 s | 29 ms, 0.3 ms script | - | engine |

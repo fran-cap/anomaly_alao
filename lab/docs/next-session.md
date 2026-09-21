@@ -7,15 +7,22 @@
 item use (I-067) are FIXED in game; I-066 measured -8.9 us per `get_visible_value` call. Four standalone mods under `lab/mods`:
 `alao-spawn-prewarm`, `alao-squad-stagger`, `alao-vmm-cache`, `alao-prewarm` v1.4.
 
-Open, in order:
+Open, in order (the user's plan: pin down the last ~100 ms hitch, then that is it for hitches and we move on to upstream requests):
 
-1. **All-gen-7 stacked arm.** Nobody has run the four mods together. Build `agent-I063-b` + spawn-prewarm 1.1 + squad-stagger 1.1 +
-   vmm-cache + prewarm 1.4, one attended run with the gen-7 routine (inventory, one consumable, hamlet walk), and ask the user how it feels.
-2. **The inventory first-open row** (5.5 -> 8-15 ms under v1.4?): `lab/coord/i067-request.json`, attended, >= 4 captures per arm.
-3. **I-068** fresh squads online at spawn (61-103 ms engine frames, by NPC count). Size it before touching it.
-4. `surge_manager.lua:146` 640-660 ms and `zzz_alao_prewarm.script:564` ~780 ms inside the 2-2.8 s `actor_on_first_update` frame: load
-   time, not a stutter, but it is now the biggest thing we put there ourselves.
-5. I-061 arm drift A/A, I-060 orphaned cache refs, I-053 locked moving save (still needs the user) - unchanged.
+1. **I-068, the ~100 ms frame when a fresh squad goes online** (101 ms 0.5 s after the baseline's 453 ms hitch in the stacked run,
+   61-103 ms for a 3-NPC squad before). Engine `net_spawn` + model / texture load; `respawn_radius` 150 m is inside switch distance so
+   squads go online the moment they spawn. Levers to try: prefetch the visuals of the section about to spawn, or spawn beyond switch
+   distance. Size it by NPC count first.
+2. **The stacked run is done** (`20260920-231227-I-064-66b85b`, `beam-ideas.md` 14.1): all four mods hold together, in-play frames
+   >= 20 ms 23 -> 7-9, no 4xx ms frame, no burst train. The user still felt small stutters in the good build; the table in 14.1 lists
+   every one. Two are Lua and new: **I-070** `DynamicNewsManager.TickNews` 27-31 ms at t~54 s in every capture (unattended-measurable,
+   cheapest), **I-069** `npc_on_hear_callback` storm (~2000 calls a frame, `xr_danger.lua:30`, 9-14 ms script). The rest is engine.
+3. The inventory first-open row is **closed as noise**: stacked run read 13.0 / 5.7 ms baseline vs 4.8 / 8.4 ms variant, so over both
+   runs the arms overlap completely (baseline 5.0-13.0, variant 4.8-15.4). First opens are just 5-15 ms and mostly engine.
+4. Then **upstream requests** (publishing): the user's call on where; `lab/docs/upstream.md`, the four gen-7 mods, make_callback
+   dispatch, the I-049 / I-050a / I-057 patches to other people's mods.
+5. Parked: `surge_manager.lua:146` 600-650 ms and `zzz_alao_prewarm.script:564` ~810 ms inside the ~3 s first-update frame (load time);
+   I-061 arm drift, I-060 orphaned cache refs, I-053 locked moving save.
 
 Habits that worked this round: one attended session for two ideas (baseline arm doubled as the I-064 diagnosis); submit attended items
 and `coord queue hold` them until the user says go; decode nothing by hand - make the mod print it right (`%s` only).

@@ -1001,13 +1001,43 @@
       "generation": 7,
       "parent": "I-064",
       "status": "proposed",
-      "score": 5.0,
+      "score": 8.0,
       "risk": "medium",
       "expected_gain": "medium",
       "hypothesis": "With the 440 ms gone, a 3-NPC respawn still cost 103 / 87 / 61 ms frames ~170 ms later (1 % script, 4 net_spawns, model + texture loads): engine, sized by NPC count and whether their visuals are loaded.",
       "change": "Unknown lever from Lua: spawn beyond switch distance, or prefetch the visuals of the squad about to spawn. Gameplay-visible, so size it first.",
       "measure": "frm lines after [alao_spawn] squad lines, by npc count, over more captures.",
-      "notes": "Seen in 1 of 3 variant captures (the 3-NPC one) and at 24 ms after a 2-NPC baseline spawn."
+      "notes": "Seen in 1 of 3 variant captures (the 3-NPC one) and at 24 ms after a 2-NPC baseline spawn. Stacked run: 101 ms frame 0.5 s after the baseline's 453 ms hitch (2 net_spawns), 28 ms for a 1-NPC squad in the variant. The user's 'last ~110 ms hitch'; top of gen-8."
+    },
+    {
+      "id": "I-069",
+      "title": "npc_on_hear_callback storms: ~2000 calls in one frame, 9-14 ms script, xr_danger.lua:30",
+      "category": "structural",
+      "generation": 7,
+      "parent": "I-064",
+      "status": "proposed",
+      "score": 7.5,
+      "risk": "medium",
+      "expected_gain": "medium",
+      "hypothesis": "Stacked run 20260920-231227-I-064-66b85b, variant capture 232656: four frames of 20-27 ms at t=111-112 s with 8.8-13.8 ms of script spread over 1456-2338 tiny callbacks (no single scope over 0.3 ms) and +0.7-1.6 MB GC each. The window has 34967 npc_on_hear_callback calls against 1000-3000 in every other window of all four captures; npc_on_hear_callback#xr_danger.lua:30 is 105.9 ms of the window's 133 ms, combat.lua:331 6.7 ms. 'Spawning artefacts in 62303' is logged at t=111.0 s, the same 20 ms as the first frame: lead, not a cause.",
+      "change": "Find what emits the sounds (artefact spawn? a firefight at the hamlet?), then cut the per-call cost of xr_danger's listener (~3 us x 2000) with an early-out before any engine crossing, or rate-limit per NPC per frame. Patcher or monkey patch.",
+      "measure": "cb/lst lines for npc_on_hear_callback per window + frm lines with n_top > 1000; needs a way to trigger it on demand.",
+      "notes": "This is one of the 'small stutters still in the good build' the user reported after the stacked run."
+    },
+    {
+      "id": "I-070",
+      "title": "dynamic_news_manager: TickNews 27-31 ms at t~54 s in every capture, death news 32 ms",
+      "category": "structural",
+      "generation": 7,
+      "parent": "I-062",
+      "status": "proposed",
+      "score": 7.0,
+      "risk": "low",
+      "expected_gain": "medium",
+      "hypothesis": "evt:dynamic_news_manager.script:250#DynamicNewsManager.TickNews is a 26-31 ms all-script frame ~54 s after every load (4 of 4 captures again, both arms), written off so far as 'the game's own'. It is Lua, so it is ours to cut. Same family: npc_on_death_callback -> monster_on_death_callback#dynamic_news_manager_patch_dmg.script:685 = 32 ms (baseline capture 232215, t=46 s).",
+      "change": "Profile inside TickNews (sub axis), then spread the work over frames or cache whatever it rebuilds each tick.",
+      "measure": "evt axis worst call, unattended: it fires standing still.",
+      "notes": "Unattended-measurable, which makes it the cheapest of the remaining ones."
     }
   ]
 }
