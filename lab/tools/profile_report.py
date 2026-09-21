@@ -178,12 +178,41 @@ def _report_frames(name, dirs, top, min_ms=0.0):
     return rows
 
 
+def _report_nested(name, dirs, top):
+    """I-062 v3: what was inside the very slow single calls.
+
+    `acct` is the share of the call the five slots explain.  A low number is an
+    answer too - it means the cost is spread thin, or sits in code nothing on
+    the wrap lists reaches.
+    """
+    rows = []
+    for d in dirs:
+        log = _profiler.load_run(d) if Path(d).is_dir() else _profiler.load(d)
+        if not log or not log.nested:
+            continue
+        rows.extend(log.nested_rows())
+    if not rows:
+        print(f"#### {name}: no `nst` lines - no single call crossed the floor\n")
+        return []
+    rows.sort(key=lambda r: (r["ms"] or 0.0), reverse=True)
+    print(f"#### {name}: inside the slowest single calls")
+    print("| # | t | frame | axis | scope | ms | acct | inside (worst first) |")
+    print("|---|---:|---:|---|---|---:|---:|---|")
+    for i, r in enumerate(rows[:top], 1):
+        inside = ", ".join(f"`{n}` {_fmt(ms, 1)}" for n, ms in r["in"][:4]) or "-"
+        print(f"| {i} | {r['t']:.0f} | {r['frame']} | {r['axis']} | `{r['scope']}` | "
+              f"{_fmt(r['ms'], 1)} | {_fmt(r['accounted_pct'], 0)}% | {inside} |")
+    print()
+    return rows
+
+
 def _report_axes(name, dirs, top, drop_first):
-    """I-062: the bnd / eng / evt rankings, kept apart from the cb ranking."""
+    """I-062: the bnd / eng / evt / sub rankings, kept apart from the cb ranking."""
     out = {}
     for tag, title in (("bnd", "object binders and se_* server objects"),
                        ("eng", "engine-called globals"),
-                       ("evt", "time-event / deferred bodies")):
+                       ("evt", "time-event / deferred bodies"),
+                       ("sub", "drill-down into a known-slow scope")):
         rows = []
         for d in dirs:
             log = _profiler.load_run(d) if Path(d).is_dir() else _profiler.load(d)
@@ -297,6 +326,8 @@ def _report_arm(name, dirs, top, drop_first, listeners=False, drop_rounds=0,
         rep["frames"] = _report_frames(name, [d for d, _ in logs], top, frame_min_ms)
     if axes:
         rep["axes"] = _report_axes(name, [d for d, _ in logs], top, drop_first)
+    if frames or axes:
+        rep["nested"] = _report_nested(name, [d for d, _ in logs], top)
     if trace:
         rep["trace"] = _report_trace(name, [d for d, _ in logs], top, trace_prefix)
     return rep

@@ -884,7 +884,7 @@ def test_the_self_check_shouts_when_nothing_was_wrapped():
 
 
 def test_the_build_carries_a_version(luabind):
-    assert luabind["log"].walkout.ver == 2
+    assert luabind["log"].walkout.ver == 3
 
 
 def test_a_unique_call_is_labelled_by_its_owner_not_the_plumbing():
@@ -923,24 +923,24 @@ def test_a_plain_level_add_call_is_still_wrapped():
 
 
 def test_a_time_event_label_carries_its_ids_and_its_registration_site():
-    lua = _run(_src(), frames=10, extra=r"""
-        __te = 0
-        function __register()
-            CreateTimeEvent("squad_42", "regen|tick", 0, function()
-                __te = __te + 1
-                __extra = __extra + 700
-                return true
-            end)
-        end
-    """)
-    lua.eval("__register")()
+    lua = _run(_src(), frames=10)
+    # the body lives in one file, the registration happens in another - which is
+    # the normal case and the only one where the @site adds anything
+    lua.execute('__body = loadstring("return function() __te = __te + 1; '
+                '__extra = __extra + 700; return true end", "@owner_mod.script")()')
+    lua.execute('__te = 0')
+    lua.execute('loadstring(\'CreateTimeEvent("squad_42", "regen|tick", 0, __body)\', '
+                '"@registrar.script")()')
     lua.eval("__drive")(20)
     names = [r["name"] for r in _dump_and_parse(lua).axis_ranking("evt", top=None, drop_first=0)]
     tagged = [n for n in names if "squad_42.regen_tick" in n]
     assert tagged, names
     # the pipe in the ev_id must not have broken the line grammar
     assert "|" not in tagged[0]
-    assert "@" in tagged[0], "no registration site on the label"
+    assert tagged[0].startswith("evt:owner_mod.script:"), tagged[0]
+    assert "@registrar.script:" in tagged[0], (
+        "the registration site must name the REGISTRAR, not the profiler: " + tagged[0])
+    assert "zzz_alao_profiler" not in tagged[0]
     assert lua.eval("__te") > 0
 
 
@@ -964,3 +964,183 @@ def test_parser_surfaces_a_zero_axis_from_a_real_shaped_log():
     assert len(probs) == 2 and "structurally zero" in probs[0]
     assert w.probes[0].cls == "userdata" and w.probes[0].wrapped == 0
     assert log.errors and "self-check" in log.errors[0]
+
+# ---------------------------------------------------------------------------
+# v3: what the second in-game run (20260920-194429-I-063-d9e519) exposed
+# ---------------------------------------------------------------------------
+
+def test_we_never_wrap_our_own_wrapper():
+    """The 26 ms "profiler job" that was not one.
+
+    Run 2 blamed a 26 ms frame once per capture on
+    `uniq:zzz_alao_profiler.script:873@zzz_alao_profiler.script:1115`.  Both
+    halves of that label were ours: the game re-registers ProcessEventQueue
+    through AddUniqueCall, we had already wrapped it on the eng axis, and the
+    evt hook then wrapped our wrapper and named it after itself.  Worse, the
+    second wrapper held the evt axis for the whole frame, so every real
+    time-event body inside it was counted as `nested` and never timed - which
+    is why every `evt:` row in that run came out with calls=0.
+    """
+    lua = _run(_src(), frames=10)
+    lua.execute("AddUniqueCall(ProcessEventQueue)")   # exactly what the game does
+    lua.eval("__run_level_calls")()
+    lua.eval("__drive")(20)
+    log = _dump_and_parse(lua)
+    evt = {r["name"]: r for r in log.axis_ranking("evt", top=None, drop_first=0)}
+    assert not [n for n in evt if "zzz_alao_profiler" in n], sorted(evt)
+    # and ProcessEventQueue is still timed, once, on its own axis
+    eng = {r["name"]: r for r in log.axis_ranking("eng", top=None, drop_first=0)}
+    assert eng["ProcessEventQueue"]["calls_per_frame"] > 0
+
+
+def test_a_time_event_inside_the_queue_is_still_attributed():
+    """The consequence of the double wrap: the evt axis was permanently busy.
+
+    With it fixed, a body that runs inside ProcessEventQueue is on the evt axis
+    while the queue itself is on eng, so both are timed.
+    """
+    lua = _run(_src(), frames=5)
+    lua.execute('__body = loadstring("return function() __extra = __extra + 900; '
+                'return false end", "@owner_mod.script")()')
+    lua.execute('CreateTimeEvent("a", "b", 0, __body)')
+    lua.execute("AddUniqueCall(ProcessEventQueue)")
+    lua.eval("__drive")(30)
+    log = _dump_and_parse(lua)
+    evt = {r["name"]: r for r in log.axis_ranking("evt", top=None, drop_first=0)}
+    owner = [n for n in evt if n.startswith("evt:owner_mod.script:")]
+    assert owner, sorted(evt)
+    assert evt[owner[0]]["calls_per_frame"] > 0, "the body was counted as nested again"
+
+
+SUB_STUB = r"""
+-- a se_smart_terrain-shaped class: update() calls the methods the sub axis
+-- wraps, and those call leaves that live on the eng axis
+local st = {}
+__sub_calls = 0
+function st:show() __extra = __extra + 100 end
+function st:update_jobs()
+    __sub_calls = __sub_calls + 1
+    __extra = __extra + 30000
+    smart_terrain.arrived_to_smart(1)
+end
+function st:try_respawn() __extra = __extra + 20000 end
+function st:check_smart_faction() __extra = __extra + 500 end
+smart_terrain = {se_smart_terrain = st}
+function smart_terrain.arrived_to_smart(x) __extra = __extra + 8000 return true end
+
+local binder = {}
+function binder:update()
+    st:show()
+    st:update_jobs()
+    st:try_respawn()
+    st:check_smart_faction()
+end
+bind_smart_terrain = {smart_terrain_binder = binder}
+
+function __st_tick(ms)
+    __frame = __frame + 1
+    __dev.frame = __frame
+    __tg = __tg + 5
+    bind_smart_terrain.smart_terrain_binder:update()
+    __frame = __frame + 1
+    __dev.frame = __frame
+    __tg = __tg + ms
+    SendScriptCallback("actor_on_update")
+end
+"""
+
+
+@pytest.fixture(scope="module")
+def sub_axis():
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(ENGINE_STUB)
+    lua.execute(WIRING)
+    lua.execute(SUB_STUB)
+    lua.execute(_src())
+    lua.eval("on_game_start")()
+    lua.eval("__drive")(60)          # a window needs >= 30 frames to be kept
+    lua.eval("__st_tick")(80)
+    return {"lua": lua, "log": _dump_and_parse(lua)}
+
+
+def test_the_sub_axis_breaks_a_binder_update_down(sub_axis):
+    """The point of a fourth axis: a region inside a bnd region gets TIMED.
+
+    On one axis it would be `nested` and invisible, which is exactly how
+    bind_smart_terrain.smart_terrain_binder.update could be 450 ms in run 2 with
+    nothing inside it to look at.
+    """
+    log = sub_axis["log"]
+    bnd = {r["name"]: r for r in log.axis_ranking("bnd", top=None, drop_first=0)}
+    sub = {r["name"]: r for r in log.axis_ranking("sub", top=None, drop_first=0)}
+    assert "bind_smart_terrain.smart_terrain_binder.update" in bnd
+    assert "smart_terrain.se_smart_terrain.update_jobs" in sub, sorted(sub)
+    assert sub["smart_terrain.se_smart_terrain.update_jobs"]["us_per_call"] == pytest.approx(38000, rel=0.2)
+    assert sub["smart_terrain.se_smart_terrain.try_respawn"]["us_per_call"] == pytest.approx(20000, rel=0.2)
+    # and one level further down, on the eng axis so it is not nested in sub
+    eng = {r["name"]: r for r in log.axis_ranking("eng", top=None, drop_first=0)}
+    assert eng["smart_terrain.arrived_to_smart"]["us_per_call"] == pytest.approx(8000, rel=0.2)
+    assert sub_axis["lua"].eval("__sub_calls") == 1
+
+
+def test_an_nst_line_gives_the_breakdown_of_one_slow_call(sub_axis):
+    rows = sub_axis["log"].nested_rows()
+    assert rows, "no nst lines"
+    r = [x for x in rows if x["scope"].endswith("smart_terrain_binder.update")]
+    assert r, [x["scope"] for x in rows]
+    r = r[0]
+    assert r["axis"] == "bnd"
+    assert r["ms"] == pytest.approx(58.6, rel=0.25)
+    inside = dict(r["in"])
+    assert "smart_terrain.se_smart_terrain.update_jobs" in inside, inside
+    # worst first, and the leaf on its own axis is in there too
+    assert r["in"][0][0] == "smart_terrain.se_smart_terrain.update_jobs"
+    assert "smart_terrain.arrived_to_smart" in inside
+    # the call itself is not inside itself
+    assert r["scope"] not in inside
+
+
+def test_a_fast_call_never_emits_an_nst_line():
+    lua = _run(_src(), frames=200)
+    assert _dump_and_parse(lua).nested_rows() == []
+
+
+def test_the_nst_log_is_bounded():
+    src = _swap(_src(), "local NST_MAX_LINES     = 60", "local NST_MAX_LINES     = 3")
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(ENGINE_STUB)
+    lua.execute(WIRING)
+    lua.execute(SUB_STUB)
+    lua.execute(src)
+    lua.eval("on_game_start")()
+    for _ in range(10):
+        lua.eval("__st_tick")(80)
+    assert lua.eval("alao_profiler_state")()["nst_lines"] == 3
+    assert len(_dump_and_parse(lua).nested_rows()) == 3
+
+
+HAND_V3 = """
+ALAOPROF|1|hdr|ts=1|timer=profile_timer|units_per_ms=1000.000000|calib_ms=250|calib_units=250000|overhead_ns=200|make_callback=true|binders=off|listeners=off|dump_ms=30000|hitch=on|hitch_floor_ms=0.1000|hitch_buckets=14
+ALAOPROF|1|wdr|ver=3|ts=1|walkout=bnd=284+update,eng=12,evt=3,sub=10|binder_update=true|frames=on|frame_floor_ms=12|frame_max=400|rescan_every=600|pending=8|selfcheck=ok|misses=none
+ALAOPROF|1|nst|n=1|frame=26447|t=138788|axis=bnd|scope=bind_smart_terrain.smart_terrain_binder.update|units=454885.625|in=smart_terrain.se_smart_terrain.update_jobs~300000.000,smart_terrain.se_smart_terrain.try_respawn~120000.000,smart_terrain.arrived_to_smart~25000.000
+ALAOPROF|1|win|seq=1|t0=0|t1=30000|span_ms=30000|frames=6000|total_units=600000|calls=6000|nested=0|names=1
+ALAOPROF|1|cb|seq=1|name=thing|calls=6000|units=600000.000|nested=0
+ALAOPROF|1|eow|seq=1|frames_total=6000
+"""
+
+
+def test_parser_reads_an_nst_line():
+    log = _profiler.parse(HAND_V3)
+    assert log.walkout.wrapped["sub"] == 10
+    rows = log.nested_rows()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["scope"] == "bind_smart_terrain.smart_terrain_binder.update"
+    assert r["axis"] == "bnd" and r["frame"] == 26447
+    assert r["ms"] == pytest.approx(454.886, abs=0.01)
+    assert r["in"][0] == ("smart_terrain.se_smart_terrain.update_jobs", pytest.approx(300.0))
+    assert r["accounted_pct"] == pytest.approx(100.0 * 445 / 454.886, abs=1.0)
+
+
+def test_an_old_log_has_no_nst_rows():
+    assert _profiler.parse(HAND).nested_rows() == []

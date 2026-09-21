@@ -378,6 +378,65 @@ script and no GC drop**; and there is a one-off 786 ms frame, 707 ms of it in
 (`game.start_tutorial("tutorial_campfire_*")`), the first time you approach a
 campfire in a session.
 
+#### v3, after the second in-game run (`20260920-194429-I-063-d9e519`)
+
+v2 works: `bnd=284+update, eng=12, evt=3` in all four captures, 32 of 32 wrap
+targets hit, every class resolved as `cls=userdata, via=module`.
+
+**The walk-out stutter is engine.** The 35-40 ms frames while walking out carry
+1-3% visible script with binders now visible (`u_bnd` 0.4-1.0 ms), and one
+111 ms frame had 5 `net_spawn` in it and 9.6 ms of script. That question is
+answered; the prediction held.
+
+**The 26 ms frame at t~54 s was NOT a profiler job**, and the label that said so
+was wrong twice over. `uniq:zzz_alao_profiler.script:873@zzz_alao_profiler.script:1115`
+has **3258 calls in a 3258-frame window - the same count as `ProcessEventQueue`**:
+the game re-registers `ProcessEventQueue` through `AddUniqueCall`, we had
+already wrapped it on the `eng` axis, and the `evt` hook wrapped our wrapper and
+named it after its own definition site. The `@caller` half was computed at the
+wrong `debug.getinfo` level and named this file every time. The work is one
+frame of the game's own event queue - which is also why the same ~30 ms frame at
+the same second appears in every listener-mode capture since I-058, none of
+which wrapped `AddUniqueCall` at all. It is one frame per capture, present in
+every arm, so it cancels in any delta; it does contaminate a p99 or a 1% low.
+The second wrapper also held the `evt` axis for the whole frame, so every real
+time-event body inside it was counted as `nested` - which is why every `evt:`
+row in that run reads `calls=0`. v3 refuses to wrap its own wrappers.
+
+**The big one, still open.** `bind_smart_terrain.smart_terrain_binder.update` is
+**440-457 ms in ONE call in all four captures**, ~100% script, +6.5-8.0 MB of GC
+in that frame, with only 6 ms of callbacks in the whole frame - so not a
+listener and not a `SendScriptCallback`. The binder is three lines
+(`bind_smart_terrain.script`, db copy) and forwards to
+`se_smart_terrain:update()` in `smart_terrain.script` (winner: *G.A.M.M.A. ZCP
+1.4 Balanced Spawns*). Ranked suspects inside it: `update_jobs()` on the smart's
+first online update, which runs `fill_npc_info` + `select_npc_job` for every NPC
+against every job; `try_respawn()`; `check_smart_faction()`. `load_jobs()` is
+called from `on_register()`, not from `update()`, so it should not appear.
+v3 adds a `sub` axis for those methods, with their leaves on `eng` so one level
+further down is timed instead of counted as nested, and an `nst` line that dumps
+the five most expensive regions inside any top-level call over 50 ms:
+
+```
+ALAOPROF|1|nst|n=1|frame=26447|t=138788|axis=bnd|scope=<the slow call>|units=..|in=a~u,b~u,c~u
+```
+
+`profile_report --frames`/`--axes` prints it with an `acct` column: how much of
+the slow call the five slots actually explain. `lab/coord/overlays/i062-smart-terrain-request.json`
+is the attended run that answers it.
+
+Also from that run: the campfire tutorial is
+`bind_stalker.actor_binder.update` at 724.7 / 736.4 ms inside 755 / 771 ms
+frames on the baseline captures and **absent from both `alao-prewarm` v1.2
+captures**; `npc_on_death_callback` 30.1 ms once; and capture 2 alone had a
+dozen 27-38 ms frames at t=34-41 s dominated by `sim_squad_scripted.update` with
++3.5-4 MB of GC per frame, inside the warm-up window.
+
+One Lua-5.1 trap worth recording: `install()` grew past the **60-upvalue limit**
+when the `sub` axis was added, which is a *load-time* error - the overlay would
+not have loaded in the game at all, and only the offline `loadstring` check
+caught it. The axis setup now lives in its own `install_axes()`.
+
 ```
 py -3.12 lab/tools/i062_engine_entry_census.py --top 30
 py -3.12 lab/tools/i062_build_overlays.py      # alao-profiler-walkout[-listeners-inv]

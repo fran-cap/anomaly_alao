@@ -64,7 +64,7 @@ from pathlib import Path
 
 __all__ = [
     "Header", "CallbackWindow", "Window", "HitchStat", "ProfileLog",
-    "WalkoutHeader", "SlowFrame", "TraceCall", "BinderProbe",
+    "WalkoutHeader", "SlowFrame", "TraceCall", "BinderProbe", "NestedCall",
     "parse", "load", "load_run", "spread", "compare_runs",
 ]
 
@@ -270,6 +270,25 @@ class SlowFrame:
 
 
 @dataclass
+class NestedCall:
+    """One I-062 v3 ``nst`` line: the breakdown of a single very slow call.
+
+    Run 2 found ``bind_smart_terrain.smart_terrain_binder.update`` at 440-457 ms
+    in one call with only 6 ms of callbacks in the whole frame, so neither the
+    callback ranking nor the frame's top-3 could say anything about what was
+    inside it.  ``inside`` is the five most expensive regions that completed
+    during that call, from any axis.
+    """
+    n: int = 0
+    frame: int = 0
+    t: float = 0.0
+    axis: str = ""
+    scope: str = ""
+    units: float = 0.0
+    inside: list = field(default_factory=list)   # [(label, units), ...] worst first
+
+
+@dataclass
 class TraceCall:
     """One I-063 ``trace`` line: a single call of a named listener."""
     n: int = 0
@@ -344,6 +363,7 @@ class ProfileLog:
     walkout: WalkoutHeader | None = None
     frames: list = field(default_factory=list)
     traces: list = field(default_factory=list)
+    nested: list = field(default_factory=list)
 
     # -- conversions -------------------------------------------------------
     @property
@@ -554,6 +574,33 @@ class ProfileLog:
             "top_scopes": top[:10],
         }
 
+    def nested_rows(self, scope_prefix: str | None = None) -> list:
+        """I-062 v3 ``nst`` lines, worst call first.
+
+        ``accounted_pct`` is the honest part: how much of the slow call the five
+        slots actually explain.  A low number means the cost is spread across
+        many small regions, or sits in code nothing on the wrap lists reaches -
+        which is an answer too, and not one to read past.
+        """
+        rows = []
+        for nc in self.nested:
+            if scope_prefix and not nc.scope.startswith(scope_prefix):
+                continue
+            inside = [(label, self.to_ms(u)) for label, u in nc.inside]
+            acc = sum(u for _, u in nc.inside)
+            rows.append({
+                "n": nc.n,
+                "frame": nc.frame,
+                "t": nc.t,
+                "axis": nc.axis,
+                "scope": nc.scope,
+                "ms": self.to_ms(nc.units),
+                "in": inside,
+                "accounted_pct": (100.0 * acc / nc.units) if nc.units else None,
+            })
+        rows.sort(key=lambda r: (r["ms"] or 0.0), reverse=True)
+        return rows
+
     def trace_rows(self, name_prefix: str | None = None) -> list:
         """I-063 ``trace`` lines as a table, in call order."""
         rows = []
@@ -690,6 +737,25 @@ def parse(text: str, path=None) -> ProfileLog:
                 gc1=float(_num(d, "gc1", 0.0) or 0.0),
                 after_log=int(_num(d, "after_log", 0) or 0),
                 top=top,
+            ))
+            continue
+        if kind == "nst":               # I-062 v3, one slow call broken down
+            inside = []
+            for part in (d.get("in") or "").split(","):
+                if "~" in part:
+                    label, u = part.rsplit("~", 1)
+                    try:
+                        inside.append((label, float(u)))
+                    except ValueError:
+                        continue
+            log.nested.append(NestedCall(
+                n=int(_num(d, "n", 0) or 0),
+                frame=int(_num(d, "frame", 0) or 0),
+                t=float(_num(d, "t", 0.0) or 0.0),
+                axis=d.get("axis", ""),
+                scope=d.get("scope", "?"),
+                units=float(_num(d, "units", 0.0) or 0.0),
+                inside=inside,
             ))
             continue
         if kind == "trace":             # I-063, one call of a named listener
