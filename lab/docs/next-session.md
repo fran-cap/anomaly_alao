@@ -24,6 +24,13 @@ Open, in order (the user's plan: pin down the last ~100 ms hitch, then that is i
 5. Parked: `surge_manager.lua:146` 600-650 ms and `zzz_alao_prewarm.script:564` ~810 ms inside the ~3 s first-update frame (load time);
    I-061 arm drift, I-060 orphaned cache refs, I-053 locked moving save.
 
+6. **Campfire walk-out frames (34-42 ms, ~1 % script) have a script TRIGGER even though the cost is engine.** Same sequence in both
+   stacked variant captures: a frame with exactly 20 net_spawns and `npc_on_item_take` on top (20-21 ms, 5-7 ms script), next to
+   `! Trader has no supplies for this supply level [mar_base_owl_stalker_trader]` = the base trader restocking as the actor comes into
+   range; then +1.0-1.3 s a 34-36 ms frame and +0.7-1.2 s later a 40-42 ms frame, with `! Fallback to default bump map: item\...` lines
+   between them = the new items' textures loading on first use. Untested lever: restock at load (behind the loading screen) or a few
+   items per frame, and/or prefetch. Same family as I-068 (things going online pay model / texture loads in play).
+
 Habits that worked this round: one attended session for two ideas (baseline arm doubled as the I-064 diagnosis); submit attended items
 and `coord queue hold` them until the user says go; decode nothing by hand - make the mod print it right (`%s` only).
 Publishing: still the user's call, they said not now.
