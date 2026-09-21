@@ -15,6 +15,7 @@ it and nothing changes except *when* that work happens.
 | encyclopedia tab | call the `get_ui()` lazy singleton at first update | **CONFIRMED**, 7.4 / 7.1 → 1.9 ms (one run). |
 | inventory **cell pool + grid** | pre-build `CC["actor_bag"]`'s cells and grid rows | **under the bar.** Real, measurable, ~2.5 ms — and the first-open *frame* is mostly engine, so the player may not feel it. See below. |
 | inventory **object** | build `UIInventory()` if nil | **no-op on GAMMA** — two other mods already do it. Kept for installs without them. |
+| **FDDA first use** (v1.4, I-067) | warm the hud motion container, the item model, the sound and the cam file of the backpack animation and of every animated item in the ruck - without starting a hud motion | **UNMEASURED.** Built from the engine source; request `lab/coord/i067-request.json`. See "v1.4" below. |
 
 ### Tutorial sequencer: confirmed in game
 
@@ -561,6 +562,9 @@ construction (`actor_on_first_update`, `load_state`, `on_game_load`,
 
 ### lam2.script:271 in more detail, and a proposed cut
 
+*(Superseded by v1.4 above: the engine source shows both `get_motion_length` and
+`motion_exists` reach the cold resources without drawing anything.)*
+
 The 54 ms frame in capture 1 (frame 13033) and the 9-10 ms ones in the other
 three are the same event, not an outlier: it is the **first FDDA-animated use of
 a given item section in the session**. Capture 1 was the first game launch of
@@ -612,6 +616,119 @@ locked gen-3/gen-4/gen-5 measurement — and unlike `i058_build_overlays.py` it
 never rebuilds them. `aalo/profiler.py` ignores `kind` values it does not know,
 so a traced log parses exactly as before; read the trace lines by grepping.
 
+## v1.4 (I-067) - the FDDA first-use hitch, `zzz_alao_prewarm_fdda.script`
+
+A third script, new name, same rules: replaces nothing, wraps nothing, plays
+nothing. It closes the "lam2.script:271" item further down, which v1.1-v1.3 left
+open because `game.play_hud_motion` draws and `level.add_cam_effector` moves the
+camera. Neither is needed.
+
+### What the captures say
+
+`actor_on_update#lam2.script:271`, from the `hit` lines of every I-062 / I-063
+attended capture (floor 0.1 ms, buckets double):
+
+| event | when | ms | every later one |
+|---|---|---|---|
+| **A1** `backpack_open_<faction>` enter | ~1 s after the FIRST inventory open (FDDA holsters the weapon first), in **every** capture | 9.0 / 9.2 / 9.4 / 9.5 / 9.8 / 10.0 / 10.0 / 10.1 / 10.8 / 11.1 / 11.5 / 11.6 | 0.4-0.8 |
+| backpack idle / close enter | right after | 1.6-3.2 and 0.8-1.6 | 0.1-0.4 |
+| **A2** first consumable of the session | 2-3 s after a later open, only in captures where the player used an item | 13.5 / 25.6 / 30.4 (README's older 54 ms capture was the first launch of the sitting) | 3.2-6.4 (a different item) |
+
+The `frm` lines say these frames are the script: 14 ms frame / 9.8 ms script,
+19 / 14.4, 35 / 30.7, on a ~4 ms frame. **Here script ms is frame ms**, unlike
+the inventory open.
+
+So "the first animated item use" is two things, and the one that happens in
+every session is not an item - it is the backpack animation, and the player
+experiences it as the tail of the first inventory open.
+
+### The split, from the engine source
+
+The profiler has no scope below the listener, so the split is not measured. It
+is read off `xray-monolith` (`player_hud.cpp`, `level_script.cpp`,
+`ModelPool.cpp`, `Level.cpp`), which the GAMMA exe matches (`motion_exists`,
+`get_motion_length`, `prefetch_sound` are all in `AnomalyDX11AVX.exe`):
+
+| part of `enter()` | what is cold | prewarmable from Lua? |
+|---|---|---|
+| `game.get_motion_length` / `play_hud_motion` -> `player_hud::get_hand_motions(section)` | a `player_hud_motion_container` per hud SECTION: 9 motion-name lookups over every motion set of the hands model per `anm_` line, cached in `m_hand_motions` | **yes** - `get_motion_length` is a pure query and builds the very same cache entry. Small: 1-3 `anm_` lines per section, est. < 1 ms |
+| `play_hud_motion` -> `::Render->model_Create(item_visual)` under `hud_loading` | the `.ogf` read + its textures created. Almost certainly the biggest share | **yes** - `game.motion_exists(visual, motion)` is the same `model_Create` under the same `hud_loading` flag, then `model_Delete` WITHOUT discard, which parks the instance in the model pool where the real call finds it. Never touches `g_player_hud` |
+| `sound_object(snd)` + `:play` | the path-keyed sound source (ogg open + decode setup) | **yes** - same mechanism v1.1 proved on footsteps (3.5 -> 0.16 ms). Held, never played |
+| `level.add_cam_effector(cam)` | the `.anm` file read (`CObjectAnimator::Load`, not cached by the engine - every use re-reads it) | **OS file cache only** - `io.open():read("*a")`. Worth something only on the first launch after a reboot, which is where 25-54 ms lives |
+| the hud blend start, the cam effector object, sound playback start, first-draw texture upload | - | **no. Engine. Closed.** This is the 0.4-0.8 ms floor plus whatever the driver defers |
+
+The original FDDA shipped `ea_prefetcher.script`, which warmed every section by
+really calling `play_hud_motion` + `stop_hud_motion` at first update; FDDA Redone
+ships that file empty. v1.4 gets the same resources without ever starting a
+motion, and only for what the player can use.
+
+### What it does, and when
+
+1. `actor_on_first_update`, synchronous, behind the loading screen: backpack
+   open / idle / close for the player's faction (FDDA's own fallbacks, including
+   its close -> `backpack_open_stalker` one), plus every section in the ruck
+   that `animations_settings.ltx` animates. Four steps each, de-duplicated by the
+   key the engine caches on. Honours FDDA's two MCM toggles.
+2. `actor_on_item_take` for a section not seen before: its steps are queued and
+   drained **one step per frame** - a count, not a time budget (v1.0's lesson).
+   The `actor_on_update` listener exists only while the queue is non-empty.
+   This does not remove the cost of a new item, it splits one 10-30 ms frame at
+   use time into up to four smaller frames at pickup time, under a loot or trade
+   window. The model step is still one indivisible load. `FDDA_ON_TAKE = false`
+   turns it off on its own.
+
+Kill switches: `PREWARM_FDDA` (master), `FDDA_BACKPACK`, `FDDA_INVENTORY`,
+`FDDA_ON_TAKE` (target sets) and `FDDA_MOTIONS`, `FDDA_MODELS`, `FDDA_SOUNDS`,
+`FDDA_CAM_FILES` (steps).
+
+### The log
+
+```
+[alao_prewarm 1.4] fdda
+[alao_prewarm]   fdda: 3 backpack sections (faction stalker) + N animated item sections out of M items in the ruck, K steps
+[alao_prewarm]   fdda items: bandage, vodka, ...
+[alao_prewarm]   fdda motions: a hud sections warmed, b missing, c failed, X ms
+[alao_prewarm]   fdda models: a loaded, b missing, c failed, X ms
+[alao_prewarm]   fdda sounds: a built, c failed, X ms (held, never played)
+[alao_prewarm]   fdda cam files: a read, b not loose, c failed, X ms
+[alao_prewarm]   fdda: X ms total, synchronous at first update
+[alao_prewarm]   fdda on-take: armed, 1 step(s) per frame
+[alao_prewarm 1.4] fdda on-take: 4 steps over 4 frames, worst step X ms      (after a pickup)
+```
+
+and, when there is nothing to do, it says so: `fdda: nothing to warm`,
+`fdda: FDDA Redone (lam2 / liz_fdda_redone_consumables) not installed, nothing
+to do`, `fdda backpack: FDDA's backpack animation is off in MCM, skipped`,
+`fdda models: switched off`. The ms are `os.clock()` wall ms, 1 ms resolution -
+good for the totals, not for a single step. The `models ... X ms` line IS the
+measurement of the model share of the split: whatever it reads at load is what
+left the first-use frame.
+
+### Behavioural non-identities
+
+* Item models the player may never use sit in the model pool, and their sound
+  sources stay referenced, for the session: one model + one ogg per distinct
+  animated section in the ruck. No save-game effect.
+* `model_Create` on a missing `.ogf` is a hard engine error, so every visual is
+  checked with `getFS():exist("$game_meshes$", ...)` first and counted as
+  `missing` instead. The mod never becomes the reason an unused broken item
+  crashes a load.
+* A pickup of a new animated section costs up to four frames of one step each
+  that it did not cost before (see 2. above).
+
+### Target B - the first inventory open - nothing added, and why
+
+v1.2 measured the cell pool at ~2.5 ms (warm pair) and nothing resolvable cold;
+v1.3 made the grid structurally right and nobody expects ms from it. With the
+cells pre-built AND already `Set` (the prewarm's `Reinit` runs the real
+`ParseInventory`), the variant's first open still read 17.0 / 6.75 ms against
+4.1-4.7 for later opens, inside a 37 ms frame with 8.5 ms of script. Every
+script-side lazy structure is accounted for (the `snd_*` objects are file-level,
+the GUI is built, the pool is built), so the rest is `ShowDialog` and first
+draw: engine. **Under the 5 ms bar, left alone.** What v1.4 does do for the feel
+of that moment is A1: the ~10 ms frame one second after the first open is gone
+if the prewarm works, and the player cannot tell the two apart.
+
 ## Tests
 
 `lab/tests/test_i063_prewarm.py` (37), stub engine under `lupa.luajit20`
@@ -630,3 +747,12 @@ that headroom absorbs eight new stacks, and — for the tutorial — that the
 campfire walk-up pays the cold load without the mod and nothing with it, that
 `stop` follows `start` with nothing in between, that an unknown tutorial name is
 survivable and reported, and that an already-running tutorial is left alone.
+
+`lab/tests/test_i067_prewarm_fdda.py` (25), harness `lab/tests/i067_fdda_harness.py`: the engine is a
+ledger of resource touches keyed the way the engine keys its caches. With the GAMMA install present the
+REAL `lam2`, `liz_fdda_redone_consumables` and `liz_fdda_redone_backpack` run on top of it: without the
+mod >= 8 cold touches land in play over open -> idle -> close -> vodka, with it zero, and the list of
+things the player sees or hears is identical between the arms. Also: no hud motion / cam effector /
+`:play` anywhere in the file, one step per frame on pickup and the listener gone afterwards, a missing
+mesh never reaches `model_Create`, every kill switch, the MCM toggles, the level-change redo, and a
+`printf` stub that fails on any directive other than `%s` (Anomaly's does not format them).

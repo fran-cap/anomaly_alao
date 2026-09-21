@@ -47,6 +47,7 @@ def test_mod_adds_only_new_scripts_and_replaces_nothing():
         "README.md",
         "gamedata/scripts/modxml_zzz_alao_prewarm_tutorial.script",
         "gamedata/scripts/zzz_alao_prewarm.script",
+        "gamedata/scripts/zzz_alao_prewarm_fdda.script",      # v1.4, I-067
         "meta.ini",
     ]
 
