@@ -1,0 +1,185 @@
+-- ALAO: Stealth Overhaul's MCM reads, cached.  Idea I-066.
+-- No file in the game is replaced; this mod adds one script and swaps ONE
+-- function, stealth_mcm.get_config, at on_game_start.
+--
+-- WHAT IS SLOW
+--
+-- The engine calls visual_memory_manager.get_visible_value once per NPC
+-- visibility evaluation (CVisualMemoryManager::get_visible_value looks the
+-- functor up by name and calls it, every time).  Stealth Overhaul's version of
+-- that function asks for its MCM options on every call:
+--
+--   michiko_patch, memory, distance, velocity, weight, luminocity, debugx
+--   (always, 7)  +  crouch or low_crouch (while crouching, 1)
+--
+-- and each ask is stealth_mcm.get_config(key)
+--   -> "stealth/"..key                      a string built and interned per call
+--   -> ui_mcm.get(id)                       assert, #options, opt_val[id]
+--   -> axr_main.config:r_value("mcm", id, typ)
+--        -> line_exist + r_string           two engine crossings, a fresh string
+--        -> tonumber / four string compares
+--
+-- GAMMA runs Modded Exes, whose _g_patches.script swaps ini_file_ex for a class
+-- with NO cache, on purpose.  So that is 14-16 engine crossings and 7-8 string
+-- allocations per NPC per visibility check, to re-read numbers that change when
+-- the player presses Apply in the MCM menu.  light_gem_mcm asks for "icon" the
+-- same way once per frame.
+--
+-- WHAT THIS DOES
+--
+-- stealth_mcm.get_config(key) becomes one table lookup.  A miss calls the
+-- original and remembers the answer; nil is never remembered, so a bad key
+-- keeps printing MCM's "!MCM given bad path" every time, exactly like today.
+-- The table is dropped, and refilled lazily through the original, when:
+--
+--   on_option_change   MCM's Apply (and the vanilla options menu) sends it right
+--                      after writing axr_options.ltx, in the same call stack
+--   ui_mcm.set(id, v)  the only other writer of the mcm section; nobody in the
+--                      modlist calls it with a stealth/ id, but the MCM savefile
+--                      storage would if somebody registered "stealth" with it.
+--                      Wrapped only for ids that start with "stealth/".
+--   load_state         belt and braces; the script VM is new on every load
+--                      anyway, so the table starts empty.
+--
+-- So a changed option takes effect on the very next get_visible_value call,
+-- same as today.  What is NOT seen: a script writing the key straight into
+-- axr_main.config with w_value("mcm", "stealth/...").  Nothing in the modlist
+-- does; if yours does, send on_option_change afterwards like MCM does.
+-- (Hand-editing axr_options.ltx mid-session is not seen today either: the
+-- engine reads the ini into memory once.)
+--
+-- WHY NOT REWRITE get_visible_value ITSELF
+--
+-- It reads eight file-locals of visual_memory_manager.script (jacketmult,
+-- pewpewmult, get_camo_k, vision_memory, marked, actor_marked, summ, is_r1)
+-- that no other script can reach, and there are three different copies of that
+-- file in a GAMMA modlist.  Patching the accessor instead is the same saving
+-- for the MCM part, cannot go stale against any of the three, and the return
+-- value of get_visible_value is bit-identical by construction.
+--
+-- See the mod README and lab/tests/test_i066_vmm_cache.py in the ALAO repo.
+
+local VERSION = "1.0"
+
+-- Kill switch.  false = this script does nothing at all.
+local ENABLED = true
+-- Also drop the cache when a script calls ui_mcm.set("stealth/...").  false =
+-- leave ui_mcm alone and rely on on_option_change only.
+local HOOK_SET = true
+-- One line per value remembered.  At most ten per refresh, so it stays on.
+local LOG_FILLS = true
+
+local TAG = "[alao_vmm_cache " .. VERSION .. "]"
+local PREFIX = "stealth/"
+
+local cache = {}
+local cached_n = 0
+local orig_get_config = nil
+local orig_set = nil
+local hits, misses, refreshes = 0, 0, 0
+
+local function log(fmt, ...)
+	printf(TAG .. " " .. fmt, ...)
+end
+
+-- Hands the original's return list through untouched.  ui_mcm.get ends a bad
+-- path with a bare `return`, which is ZERO values, not one nil, and
+-- tostring(get_config("typo")) is an error today; it has to stay one.
+local function remember(key, ...)
+	local v = ...
+	misses = misses + 1
+	if v ~= nil then
+		cache[key] = v
+		cached_n = cached_n + 1
+		if LOG_FILLS then
+			log("cached %s%s = %s", PREFIX, tostring(key), tostring(v))
+		end
+	end
+	return ...
+end
+
+local function cached_get_config(key)
+	local v = cache[key]
+	if v ~= nil then
+		hits = hits + 1
+		return v
+	end
+	-- first ask for this key since the last refresh, or a key MCM has no value
+	-- for: the original decides, errors included
+	return remember(key, orig_get_config(key))
+end
+
+function refresh(why)
+	if not orig_get_config then return end
+	refreshes = refreshes + 1
+	log("cache refresh #%s (%s): dropped %s values after %s hits / %s misses, next reads go to ui_mcm.get",
+		refreshes, tostring(why), cached_n, hits, misses)
+	cache = {}
+	cached_n = 0
+	hits, misses = 0, 0
+end
+
+local function set_and_refresh(id, value)
+	orig_set(id, value)
+	if type(id) == "string" and id:sub(1, #PREFIX) == PREFIX then
+		refresh("ui_mcm.set " .. id)
+	end
+end
+
+local function on_option_change()
+	refresh("on_option_change")
+end
+
+local function load_state()
+	if cached_n > 0 then refresh("load_state") end
+end
+
+-- for the tests and for anybody poking at it from the debug console
+function stats()
+	return { version = VERSION, installed = orig_get_config ~= nil, cached = cached_n,
+	         hits = hits, misses = misses, refreshes = refreshes,
+	         set_hooked = orig_set ~= nil }
+end
+
+function install()
+	if not ENABLED then
+		log("kill switch is off, nothing patched")
+		return false
+	end
+	if orig_get_config then
+		return true     -- already in; never wrap our own wrapper
+	end
+	if not (stealth_mcm and type(rawget(stealth_mcm, "get_config")) == "function") then
+		log("stealth_mcm.get_config not found (no Stealth Overhaul?), nothing patched")
+		return false
+	end
+	-- rawget: a plain index on a script namespace falls through to _G, and an
+	-- unknown global makes the engine go looking for a script of that name
+	if rawget(stealth_mcm, "alao_vmm_cache") then
+		log("stealth_mcm.get_config already carries %s, nothing patched", tostring(rawget(stealth_mcm, "alao_vmm_cache")))
+		return false
+	end
+
+	orig_get_config = stealth_mcm.get_config
+	stealth_mcm.get_config = cached_get_config
+	rawset(stealth_mcm, "alao_vmm_cache", TAG)
+
+	local set_note = "ui_mcm.set left alone"
+	if HOOK_SET and ui_mcm and type(rawget(ui_mcm, "set")) == "function" then
+		orig_set = ui_mcm.set
+		ui_mcm.set = set_and_refresh
+		set_note = "ui_mcm.set wrapped for stealth/ ids"
+	end
+
+	RegisterScriptCallback("on_option_change", on_option_change)
+	RegisterScriptCallback("load_state", load_state)
+
+	log("patched stealth_mcm.get_config (read by visual_memory_manager.get_visible_value, which is %s, and light_gem_mcm); %s",
+		(visual_memory_manager and type(rawget(visual_memory_manager, "get_visible_value")) == "function") and "present" or "MISSING",
+		set_note)
+	return true
+end
+
+function on_game_start()
+	install()
+end

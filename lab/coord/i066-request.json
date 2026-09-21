@@ -1,0 +1,39 @@
+{
+  "label": "I-066-vmm-mcm-cache",
+  "baseline_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I063-b",
+  "variant_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I066-b",
+  "baseline_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "variant_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler-walkout",
+  "repeats": 4,
+  "duration_s": 120,
+  "warmup_s": 30,
+  "save": "gammabaseline",
+  "notes": "UNATTENDED, locked protocol (profiler, 4 x 120 s, warm-up 30, round 1 of each arm dropped, gammabaseline standing still, both bottoms ref3-vanilla-bottom). Arms differ by exactly ONE added file: variant = agent-I063-b plus gamedata/scripts/zzz_alao_vmm_cache.script (lab/mods/alao-vmm-cache v1.0, built by lab/coord/i066_build_overlay.py). Nothing is replaced. The mod swaps one function, stealth_mcm.get_config, for a cached one (and wraps ui_mcm.set to notice stealth/ writes); cache dropped on on_option_change / ui_mcm.set('stealth/..') / load_state. INSTRUMENT: visual_memory_manager.get_visible_value is called by the ENGINE, not through SendScriptCallback, so the plain I-048 build cannot see it. Use the SHARED gen6-I062 walkout build alao-profiler-walkout (WALKOUT_VER 4, non-listener mode) exactly as it sits on disk - do NOT rebuild it; it wraps that function on the `eng` axis, which is how the 34 us/frame (20.3 us/call x 1.68 calls/frame) was measured. The mod does not touch get_visible_value itself, so the profiler's wrapper and the mod do not stack on one function. THE DECIDING ROW is the axs line `axis=eng name=visual_memory_manager.get_visible_value`: us per call and us per frame, per arm, warm rounds. The top-line script ms/frame is NOT expected to show it cleanly (whether the runner's headline total includes eng-axis time at all depends on the build's union, and either way the predicted delta is ~3 % of ~320 us, inside arm drift I-061) - quote it, warm and all-rounds, but score on the eng row. PREDICTION, stated before the run: offline the 7 MCM reads per call (8 crouched) are 14 of 46 engine crossings; interpreted, crossings priced at 0.25 us, the call goes 12.8 -> 8.7 us (-4.1). The same model prices the stock call at 12.8 where the game measured 20.3, so crossings cost more than 0.25 in there; scaled, -6.5 us/call. Expect the eng row at 20.3 -> 14-16 us/call, i.e. 34 -> 23-27 us/frame, a saving of 7-11 us/frame STANDING, which is UNDER the 25 us bar on this save. calls/frame must be the same in both arms (it is the engine's count); if it differs by more than ~10 % compare us/call, not us/frame. The idea's case is the crowd: the saving is per NPC visibility evaluation and crosses 25 us/frame at about 4-6 evaluations per frame, so the number to carry forward is us/call. Also saves one read per frame in light_gem_mcm (stealth/icon), ~0.6 us, visible if anywhere on the lst row for light_gem_mcm in a listener-mode run, not here. READ IT BACK WITH: py -3.12 lab/tools/profile_report.py --queue <id> --axes   and grep the variant runs' xray log for '[alao_vmm_cache' BEFORE crediting anything.",
+  "pass_conditions": [
+    {
+      "row": "engine log sanity (variant captures only)",
+      "variant_expected": "one '[alao_vmm_cache 1.0] patched stealth_mcm.get_config (read by visual_memory_manager.get_visible_value, which is present, and light_gem_mcm); ui_mcm.set wrapped for stealth/ ids' per level load, followed within the first seconds by 'cached stealth/<key> = <value>' lines for michiko_patch, memory, distance, velocity, weight, luminocity, debugx and icon (8 keys standing; crouch / low_crouch never on this save). No 'cache refresh' line is expected in an unattended run.",
+      "passes_if": "the patched line is there and at least the 7 get_visible_value keys were cached",
+      "fails_if": "'nothing patched' in any form, or no 'cached' lines (then get_visible_value is not reaching the patched accessor and the eng row is an A/A)"
+    },
+    {
+      "row": "axs eng visual_memory_manager.get_visible_value - THE TARGET",
+      "baseline": "20.3 us/call x 1.68 calls/frame = 34 us/frame (runs 20260920-194429-I-063-d9e519 / 20260920-201819-I-062-a83793)",
+      "variant_expected": "14-16 us/call, 23-27 us/frame at the same calls/frame",
+      "passes_if": "us/call drops by >= 4 with no overlap between the arms' warm rounds",
+      "fails_if": "us/call within 2 of the baseline: then the MCM reads were never the expensive part of the 20 us and the rest of the function (weather vectors, slot lookups, IsStalker) is; say so and prune"
+    },
+    {
+      "row": "top-line script us/frame",
+      "baseline": "~320 (agent-I063-b under the walkout build: 0.320-0.347 ms/frame in earlier runs)",
+      "variant_expected": "no regression; any gain is inside arm drift",
+      "passes_if": "variant not worse than baseline by more than the arms' spread",
+      "fails_if": "a regression beyond the spread - nothing in this mod runs per frame, so that would be arm drift (I-061) or a broken install; check the log row first"
+    },
+    {
+      "row": "verdict against the bar",
+      "note": "25 us/frame standing is NOT expected and the request says so up front. Keep / prune is the organizer's call on us/call x the evaluations per frame of a busy scene (needs the I-053 busy-hub save for a locked number)."
+    }
+  ]
+}
