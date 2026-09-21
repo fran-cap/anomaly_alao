@@ -157,3 +157,4 @@ lab/coord/queue/
 lab/coord/status/
 lab/coord/overlays/
 lab/framework/experiments/aalo-rewrite-*.toml
+lab/data/corpus/*
