@@ -1,0 +1,359 @@
+-- ALAO squad first-update stagger (idea I-065).  One script, no game file
+-- replaced, no function patched.
+--
+-- WHAT IS SLOW (queue items 20260920-201819-I-062-a83793 and
+-- 20260920-194429-I-063-d9e519, v2/v3 walk-out profiler, 12 loads of the save
+-- `gammabaseline`, 523 squads)
+--
+-- Every squad's FIRST `sim_squad_scripted:update()` after a load is expensive:
+-- 0.8 ms on average, 2-4.7 ms for the ones that have to look for a target, and
+-- ~350 kB of garbage each.  Every later update of the same squad is 50-60 us.
+-- The reason is in the save format: STATE_Write keeps `current_target_id` but
+-- not `assigned_target_id`, and `init_squad_on_load` resets `current_action` to
+-- 0, so a squad that was on its way somewhere when you saved comes back with no
+-- target and `generic_update` falls through to `SIMBOARD:get_squad_target`,
+-- which walks the whole simulation_objects registry calling `evaluate_prior` /
+-- `target_precondition` on every smart terrain and squad.  That is Lua plus
+-- luabind crossings, not `alife_create` (the `item_on_all` item creation in the
+-- same block only applies to the handful of squads whose section sets it), and
+-- the `squad_on_first_update` / `squad_on_update` listeners are 5 + 11 us.
+--
+-- So the 523 first updates cost 410-540 ms per load in total, always.  What
+-- varies is WHERE the engine puts them, and it does one of two things:
+--
+--   mode A (7 of 12 loads)  the ALife scheduler's first sweep runs every
+--       squad in frame 8, the same frame as `actor_on_first_update`, behind the
+--       loading screen (the key prompt is frame ~63).  Nobody sees it.
+--   mode B (5 of 12 loads)  nothing happens for ~10 s, then the scheduler
+--       visits ~20 squads per ALife tick, one tick every ~455 ms, for 25-26
+--       ticks (t = 10..22 s after the load).  Each of those ticks is ONE frame
+--       of 12-40 ms, 87-88 % of it script, in the player's face: 25 frames
+--       over the 12 ms floor, 15-17 over 20 ms, 4-10 over 30 ms, worst 38-40.
+--
+-- WHAT THIS MOD DOES
+--
+-- It makes every load a mode-A load.  At `actor_on_first_update` it walks
+-- `SIMBOARD.squads` in id order (the order the engine's own sweep uses) and
+-- calls `squad:update()` on every squad whose `first_update` flag is still
+-- false.  That is the same function the scheduler calls, called the same way
+-- vanilla `bind_monster.script`, `xr_effects.script` and `squads_filler.script`
+-- already call it, in the same frame the engine itself picks in the majority of
+-- loads.  When the scheduler gets round to those squads later, it finds
+-- `first_update == true` and a target already assigned, and pays 50 us.
+--
+-- If the engine already swept (mode A, and its sweep ran before this
+-- listener), nothing is pending and the mod does nothing but log that.
+--
+-- THE STAGGER is the fallback, not the plan.  The load sweep has a wall-clock
+-- cap (LOAD_BUDGET_MS); whatever it did not get to is drained in play on
+-- `actor_on_update`, nearest squad to the actor first, stopping each frame as
+-- soon as FRAME_BUDGET_MS is spent.  One cold update is indivisible and can be
+-- 4.7 ms on its own, so the honest promise is "at most one expensive squad per
+-- frame", not "never over the budget".  Set SWEEP_AT_LOAD = false to get the
+-- pure stagger (that is what the unit tests exercise, and it is the escape
+-- hatch if calling update() that early ever turns out to be wrong for some
+-- squad class).  The callback unregisters itself when the backlog is empty, so
+-- the steady-state cost of this mod is zero.
+--
+-- BEHAVIOURAL NON-IDENTITIES, stated plainly
+--
+--   a) In a mode-B load, squads now pick their targets ~10-20 s of real time
+--      earlier than they would have.  They pick them with the same code, in id
+--      order, against the same board.  In a mode-A load nothing changes at all.
+--   b) Each squad gets one more `update()` per load than it otherwise would
+--      (ours, then the scheduler's first visit).  An update is what the engine
+--      does to every squad every ~25 s anyway.
+--   c) `squad:update()` is pcall'd here.  The engine's own call is not, so an
+--      erroring update that would have crashed the game from the scheduler is
+--      instead logged once and left to the scheduler.
+--   d) Nothing is saved, nothing is patched, no class is touched.  Remove the
+--      mod and the next load is a coin flip between mode A and mode B again.
+--
+-- LOG LINES (read them before crediting the mod with anything)
+--
+--   [alao_stagger 1.0] installed: enabled=true sweep_at_load=true ...
+--   [alao_stagger] load sweep: 523 known, 523 pending, 523 updated in 431 ms (...)
+--   [alao_stagger] 523 squads, 1 frames, max per frame 431.0 ms (in play 0.0 ms), ...
+
+local VERSION = "1.0"
+
+-- ---------------------------------------------------------------------------
+-- configuration
+-- ---------------------------------------------------------------------------
+
+-- KILL SWITCH.  false = the script loads, logs one line and registers nothing.
+local ENABLED          = true
+
+-- Do the pending first updates at actor_on_first_update, behind the loading
+-- screen.  false = leave all of them to the in-play drain below.
+local SWEEP_AT_LOAD    = true
+
+-- Wall-clock cap for the load sweep.  523 squads measured 410-540 ms; this is
+-- four times that.  What is left over goes to the in-play drain.
+local LOAD_BUDGET_MS   = 2000
+
+-- In-play drain: stop starting squads this frame once this much is spent.
+local FRAME_BUDGET_MS  = 3
+
+-- In-play drain: never more than this many squads in one frame, clock or no clock.
+local FRAME_MAX_SQUADS = 8
+
+-- In-play drain: squads per frame when there is no usable clock at all.
+local NO_CLOCK_BATCH   = 1
+
+-- In-play drain: give up (and say so) after this many frames.  At one squad a
+-- frame 523 squads need 523 frames, ~3-5 s; this is ~10x that.
+local MAX_DRAIN_FRAMES = 6000
+
+-- ---------------------------------------------------------------------------
+-- state (all of it per level load; nothing is saved)
+-- ---------------------------------------------------------------------------
+
+local backlog        = {}     -- array of {id=, d=} still to do, nearest LAST (we pop from the end)
+local backlog_n      = 0
+local draining       = false
+
+local st_known       = 0      -- squads on the board
+local st_pending     = 0      -- of those, first_update == false when we looked
+local st_done        = 0      -- updates we ran
+local st_skipped     = 0      -- pending when queued, already done by the engine when we got there
+local st_errors      = 0
+local st_first_error = nil
+local st_frames      = 0      -- frames in which we ran at least one update (the load sweep is one)
+local st_drain_frames = 0     -- frames the drain callback was alive
+local st_max_frame   = 0      -- ms, worst frame of ours, load sweep included
+local st_max_play    = 0      -- ms, worst IN-PLAY frame of ours
+local st_max_squad   = 0      -- ms, worst single update
+local st_load_n      = 0
+local st_load_ms     = 0
+
+local function log(fmt, ...)
+	local f = printf or print
+	if strformat then
+		f("[alao_stagger] " .. strformat(fmt, ...))
+	else
+		f("[alao_stagger] " .. string.format(fmt, ...))
+	end
+end
+
+-- os.clock() is wall time since process start on the MSVC runtime the engine
+-- uses, 1 ms resolution.  That is coarse for a 3 ms budget and exactly right
+-- for a 2000 ms one; a cold squad update is 2-5 ms, so one tick of error is
+-- one squad at most.  No calibration spin, unlike the prewarm mod: this runs
+-- in play and a 40 ms busy-wait would be the hitch.
+local function now_ms()
+	if os and os.clock then return os.clock() * 1000 end
+	return nil
+end
+
+-- ---------------------------------------------------------------------------
+-- the work
+-- ---------------------------------------------------------------------------
+
+local function board_squads()
+	local b = SIMBOARD or (sim_board and sim_board.get_sim_board and sim_board.get_sim_board())
+	return b and b.squads or nil
+end
+
+-- true only for a live squad object that has not had its first update.  The
+-- strict `== false` is on purpose: sim_squad_scripted:__init sets the field to
+-- false, so nil means "not that class" and we keep our hands off it.
+local function is_pending(se)
+	return se ~= nil and se.first_update == false
+end
+
+local function run_one(id)
+	local se = alife_object(id)
+	if not is_pending(se) then
+		st_skipped = st_skipped + 1
+		return 0
+	end
+	local t0 = now_ms()
+	local ok, err = pcall(se.update, se)
+	local dt = 0
+	if t0 then dt = now_ms() - t0 end
+	st_done = st_done + 1
+	if dt > st_max_squad then st_max_squad = dt end
+	if not ok then
+		st_errors = st_errors + 1
+		if not st_first_error then
+			st_first_error = tostring(err)
+			log("update() of squad %s failed, left to the engine: %s", tostring(id), st_first_error)
+		end
+	end
+	return dt
+end
+
+local function collect()
+	local squads = board_squads()
+	local ids, n = {}, 0
+	st_known, st_pending = 0, 0
+	if type(squads) ~= "table" then return ids, 0 end
+	for id in pairs(squads) do
+		st_known = st_known + 1
+		if is_pending(alife_object(id)) then
+			n = n + 1
+			ids[n] = id
+		end
+	end
+	st_pending = n
+	-- id order: what the scheduler's own sweep does, and deterministic where
+	-- pairs() is not
+	table.sort(ids)
+	return ids, n
+end
+
+local function summary(why)
+	log("%s squads, %s frames, max per frame %.1f ms (in play %.1f ms), max one squad %.1f ms, "
+	    .. "load sweep %s in %.0f ms, drain frames %s, skipped %s, errors %s, %s",
+	    st_done, st_frames, st_max_frame, st_max_play, st_max_squad,
+	    st_load_n, st_load_ms, st_drain_frames, st_skipped, st_errors, why)
+end
+
+-- nearest LAST, because the drain pops from the end of the array
+local function order_backlog_by_distance(ids, from, n)
+	local apos = db and db.actor and db.actor:position() or nil
+	backlog, backlog_n = {}, 0
+	for i = from, n do
+		local id = ids[i]
+		local d = 0
+		if apos then
+			local se = alife_object(id)
+			local ok, v = pcall(function() return se.position:distance_to_sqr(apos) end)
+			d = (ok and type(v) == "number") and v or math.huge
+		end
+		backlog_n = backlog_n + 1
+		backlog[backlog_n] = {id = id, d = d}
+	end
+	table.sort(backlog, function(a, b)
+		if a.d ~= b.d then return a.d > b.d end
+		return a.id > b.id
+	end)
+end
+
+local function stop_draining(why)
+	if draining then
+		draining = false
+		UnregisterScriptCallback("actor_on_update", actor_on_update)
+	end
+	backlog, backlog_n = {}, 0
+	summary(why)
+end
+
+function actor_on_update()
+	if not draining then return end
+	st_drain_frames = st_drain_frames + 1
+
+	local t0 = now_ms()
+	local spent, ran = 0, 0
+	local cap = t0 and FRAME_MAX_SQUADS or NO_CLOCK_BATCH
+	while backlog_n > 0 and ran < cap do
+		local e = backlog[backlog_n]
+		backlog[backlog_n] = nil
+		backlog_n = backlog_n - 1
+		local before = st_done
+		run_one(e.id)
+		if st_done > before then ran = ran + 1 end
+		if t0 then
+			spent = now_ms() - t0
+			if spent >= FRAME_BUDGET_MS then break end
+		end
+	end
+	if ran > 0 then
+		st_frames = st_frames + 1
+		if spent > st_max_frame then st_max_frame = spent end
+		if spent > st_max_play then st_max_play = spent end
+	end
+
+	if backlog_n == 0 then
+		stop_draining("drained")
+	elseif st_drain_frames >= MAX_DRAIN_FRAMES then
+		local left = backlog_n
+		stop_draining("GAVE UP with " .. tostring(left) .. " left for the engine")
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- entry point
+-- ---------------------------------------------------------------------------
+
+-- actor_on_first_update: frame 8 of the load in every capture, the loading
+-- screen still up, db.actor there, every server object registered - and the
+-- very frame the engine's own first sweep lands in when it does sweep.  Fires
+-- again after a level change; the squads are the same server objects then, so
+-- nothing is pending and this costs one walk over the board.
+function actor_on_first_update()
+	if draining then stop_draining("interrupted by a new first update") end
+	st_done, st_skipped, st_errors, st_first_error = 0, 0, 0, nil
+	st_frames, st_drain_frames = 0, 0
+	st_max_frame, st_max_play, st_max_squad = 0, 0, 0
+	st_load_n, st_load_ms = 0, 0
+
+	local ids, n = collect()
+	if n == 0 then
+		log("load sweep: %s known, 0 pending - the engine got there first (or no squads); nothing to do",
+		    st_known)
+		summary("nothing pending")
+		return
+	end
+
+	local i = 1
+	if SWEEP_AT_LOAD then
+		local t0 = now_ms()
+		local spent = 0
+		while i <= n do
+			run_one(ids[i])
+			i = i + 1
+			if t0 then
+				spent = now_ms() - t0
+				if spent >= LOAD_BUDGET_MS then break end
+			end
+		end
+		st_load_n, st_load_ms = st_done, spent
+		if st_done > 0 then st_frames = 1 end
+		st_max_frame = spent
+		log("load sweep: %s known, %s pending, %s updated in %.0f ms (max one squad %.1f ms), "
+		    .. "%s errors, %s left for the in-play drain",
+		    st_known, st_pending, st_done, spent, st_max_squad, st_errors, n - i + 1)
+	else
+		log("load sweep: OFF, %s known, %s pending, all left for the in-play drain",
+		    st_known, st_pending)
+	end
+
+	if i > n then
+		summary("drained at load")
+		return
+	end
+
+	order_backlog_by_distance(ids, i, n)
+	draining = true
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+end
+
+function on_game_start()
+	printf("[alao_stagger %s] installed: enabled=%s sweep_at_load=%s load_budget_ms=%s "
+	       .. "frame_budget_ms=%s frame_max_squads=%s clock=%s",
+	       VERSION, tostring(ENABLED), tostring(SWEEP_AT_LOAD), tostring(LOAD_BUDGET_MS),
+	       tostring(FRAME_BUDGET_MS), tostring(FRAME_MAX_SQUADS),
+	       (os and os.clock) and "os.clock" or "NONE")
+	if not ENABLED then return end
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+end
+
+-- Test hooks.  Nothing in the game calls these.
+function _alao_state()
+	return {backlog_n = backlog_n, draining = draining, known = st_known,
+	        pending = st_pending, done = st_done, skipped = st_skipped,
+	        errors = st_errors, frames = st_frames, drain_frames = st_drain_frames,
+	        max_frame = st_max_frame, max_play = st_max_play, max_squad = st_max_squad,
+	        load_n = st_load_n, load_ms = st_load_ms}
+end
+
+function _alao_config(t)
+	if t.enabled ~= nil then ENABLED = t.enabled end
+	if t.sweep_at_load ~= nil then SWEEP_AT_LOAD = t.sweep_at_load end
+	if t.load_budget_ms then LOAD_BUDGET_MS = t.load_budget_ms end
+	if t.frame_budget_ms then FRAME_BUDGET_MS = t.frame_budget_ms end
+	if t.frame_max_squads then FRAME_MAX_SQUADS = t.frame_max_squads end
+	if t.max_drain_frames then MAX_DRAIN_FRAMES = t.max_drain_frames end
+end
