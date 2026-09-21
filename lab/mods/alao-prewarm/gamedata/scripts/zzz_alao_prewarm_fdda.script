@@ -1,0 +1,436 @@
+-- ALAO prewarm bundle, v1.4 part (idea I-067): the FDDA first-use hitch.
+-- One new script, no game file replaced, no function patched or wrapped.
+--
+-- WHAT IS SLOW
+--
+-- `actor_on_update#lam2.script:271` (FDDA Redone's action queue) has exactly one
+-- call of 9-11.5 ms in EVERY capture of the I-062 / I-063 attended runs, about
+-- one second after the first inventory open, and a second one of 13.5 / 25.6 /
+-- 30.4 ms in the captures where the player went on to use an item.  Every later
+-- call of the same kind is 0.4-0.8 ms.  The frame lines say the frame is the
+-- script: 14 ms frame / 9.8 ms script, 35 ms frame / 30.7 ms script, on a ~4 ms
+-- frame budget.  So unlike the inventory open, here script ms IS frame ms.
+--
+-- The ~10 ms one is not an item at all.  It is `backpack_open_<faction>`: FDDA
+-- plays a backpack animation when the inventory opens, after ~1 s of holstering
+-- the weapon.  The player feels it as part of "the first inventory open".  The
+-- bigger one is the first consumable of the session.
+--
+-- Both are `enter()` of liz_fdda_redone_consumables.
+-- get_template_action_play_animation_fdda_config, which does, in one frame:
+--
+--     game.get_motion_length(hud_sec, "anm_ea_show", speed)
+--     game.play_hud_motion(2, hud_sec, "anm_ea_show", false, speed)
+--     level.add_cam_effector(cam, 2190, false, "", 0, false)
+--     lam2.snd_obj = sound_object(snd);  lam2.snd_obj:play(...)
+--
+-- and the engine source (xray-monolith, player_hud.cpp / level_script.cpp) says
+-- what is cold in each:
+--
+--   * get_motion_length -> player_hud::get_hand_motions(section): first use of a
+--     hud section builds a player_hud_motion_container (9 motion-name lookups
+--     across every motion set of the hands model per `anm_` line) and caches it
+--     by section.  play_hud_motion calls the same function, so whoever calls it
+--     first pays.  A QUERY - it plays nothing.
+--   * play_hud_motion -> ::Render->model_Create(item_visual) under
+--     Render->hud_loading: the first time, that reads the .ogf and creates its
+--     textures.  `game.motion_exists(visual, motion)` does the very same
+--     model_Create under the very same hud_loading flag, asks the model one
+--     question and hands it back to the model pool (model_Delete without
+--     discard), where the next model_Create finds it.  It draws nothing and
+--     never touches the player's hud.
+--   * sound_object(snd): the path-keyed engine sound source, the same cost the
+--     v1.1 footstep/jump prewarm already removed (3.5 -> 0.16 ms, measured).
+--   * add_cam_effector: reads the .anm file.  Nothing in Lua can load it without
+--     moving the camera, but Lua CAN read the file, which puts it in the OS file
+--     cache.  That only matters on the first launch after a reboot - which is
+--     exactly where the 25-54 ms outliers live.
+--
+-- NAMED AS ENGINE, not prewarmable from Lua, closed: the hud motion blend
+-- itself, the cam effector object, sound playback start, and whatever part of
+-- the texture upload the driver defers to first draw.
+--
+-- The original FDDA shipped `ea_prefetcher.script`, which did this by actually
+-- calling play_hud_motion + stop_hud_motion for every section at first update;
+-- FDDA Redone blanked that file.  This does the same job without ever starting
+-- a hud motion, and only for what the player can actually use.
+--
+-- WHEN
+--
+--   1. actor_on_first_update (frame ~7, loading screen up until frame ~62):
+--      the backpack open / idle / close sections for the player's faction, and
+--      every FDDA-animated item section in the actor's inventory.  Synchronous;
+--      a time budget cannot bound an indivisible cold load (v1.0's lesson).
+--   2. actor_on_item_take, for a section not seen before: its steps (motions,
+--      model, sound, cam file) are queued and drained ONE STEP PER FRAME - a
+--      count cap, not a ms budget.  That splits the one 10-30 ms frame at use
+--      time into up to four smaller ones at pickup time, while a loot or trade
+--      window is on screen.  The model step is still one indivisible load; if
+--      that is not wanted, FDDA_ON_TAKE = false leaves new items cold exactly
+--      as they are today.
+--
+-- Nothing is played, shown or started.  Sound objects are held and never
+-- played.  Every step is pcall'd and every group logs what it did.
+
+local VERSION = "1.4"
+
+-- ---------------------------------------------------------------------------
+-- kill switches, one per feature, so each can be A/B'd on its own
+-- ---------------------------------------------------------------------------
+
+local PREWARM_FDDA    = true    -- master
+local FDDA_BACKPACK   = true    -- target set: backpack open / idle / close
+local FDDA_INVENTORY  = true    -- target set: animated items in the ruck at load
+local FDDA_ON_TAKE    = true    -- target set: new sections as they are picked up
+
+local FDDA_MOTIONS    = true    -- step: game.get_motion_length
+local FDDA_MODELS     = true    -- step: game.motion_exists(item_visual, ...)
+local FDDA_SOUNDS     = true    -- step: sound_object(snd), held
+local FDDA_CAM_FILES  = true    -- step: read the cam .anm into the OS cache
+
+-- on-take drain: steps per frame.  A COUNT, deliberately not a time budget.
+local STEPS_PER_FRAME = 1
+-- never warm more than this many item sections at load, whatever the ruck holds
+local MAX_LOAD_TARGETS = 96
+
+local VERBOSE         = true
+
+local SETTINGS_LTX    = "items\\items\\animations_settings.ltx"
+local SHOW_ANM        = "anm_ea_show"
+local IDLE_ANM        = "anm_ea_idle"
+local PROBE_MOTION    = "idle"
+
+-- ---------------------------------------------------------------------------
+-- state
+-- ---------------------------------------------------------------------------
+
+local ini_eff     = nil
+local ready       = false     -- first update done; takes before that are the ruck
+local seen_sec    = {}        -- item section -> true, looked at once
+local done_motion = {}        -- hud section
+local done_model  = {}        -- visual path
+local done_cam    = {}        -- cam path
+local done_snd    = {}        -- snd path -> the held sound_object (or false)
+local held        = {}        -- the sound objects, never played
+
+local queue, qi   = {}, 1     -- on-take steps
+local draining    = false
+local drain_frames, drain_steps, drain_worst = 0, 0, 0
+
+-- per-kind tallies of the batch being run: {ok, missing, failed, ms}
+local tally = {}
+
+local function tally_reset()
+	tally = {
+		motion = {0, 0, 0, 0}, model = {0, 0, 0, 0},
+		sound  = {0, 0, 0, 0}, cam   = {0, 0, 0, 0},
+	}
+end
+tally_reset()
+
+local function say(fmt, ...)
+	if VERBOSE then printf("[alao_prewarm]   " .. fmt, ...) end
+end
+
+-- Anomaly's printf only knows %s, so numbers are rounded here, not in the format
+local function r(x)
+	return math.floor(x + 0.5)
+end
+
+local function now_ms()
+	return os.clock() * 1000
+end
+
+-- ---------------------------------------------------------------------------
+-- the four steps
+-- ---------------------------------------------------------------------------
+
+-- returns "ok" / "missing" / "failed"
+local function step_motion(s)
+	if not (game and game.get_motion_length) then return "missing" end
+	if not ini_sys:section_exist(s.hud) then return "missing" end
+	local ok = pcall(game.get_motion_length, s.hud, s.anm, 1)
+	return ok and "ok" or "failed"
+end
+
+local function step_model(s)
+	if not (game and game.motion_exists and getFS) then return "missing" end
+	local file = s.visual
+	if not string.find(file, "%.ogf$") then file = file .. ".ogf" end
+	-- model_Create on a file that is not there is a hard engine error, and this
+	-- mod must never be the one to trigger it for an item nobody ever uses
+	local ok, there = pcall(function() return getFS():exist("$game_meshes$", file) end)
+	if not (ok and there) then return "missing" end
+	local ok2 = pcall(game.motion_exists, s.visual, PROBE_MOTION)
+	return ok2 and "ok" or "failed"
+end
+
+local function step_sound(s)
+	local ok, snd = pcall(sound_object, s.path)
+	if ok and snd then
+		held[#held + 1] = snd
+		return "ok"
+	end
+	return "failed"
+end
+
+local function step_cam(s)
+	if not (io and io.open and getFS) then return "missing" end
+	local ok, path = pcall(function() return getFS():update_path("$game_anims$", s.path) end)
+	if not (ok and path) then return "missing" end
+	local f = io.open(path, "rb")
+	if not f then return "missing" end       -- packed in a .db, nothing to read
+	local ok2 = pcall(function() f:read("*a") end)
+	f:close()
+	return ok2 and "ok" or "failed"
+end
+
+local RUN = {motion = step_motion, model = step_model, sound = step_sound, cam = step_cam}
+
+local function run_step(s)
+	local t0 = now_ms()
+	local res = RUN[s.kind](s)
+	local ms = now_ms() - t0
+	local row = tally[s.kind]
+	if res == "ok" then row[1] = row[1] + 1
+	elseif res == "missing" then row[2] = row[2] + 1
+	else row[3] = row[3] + 1 end
+	row[4] = row[4] + ms
+	return ms
+end
+
+-- ---------------------------------------------------------------------------
+-- targets -> steps
+-- ---------------------------------------------------------------------------
+
+-- Append the not-yet-done steps for one hud section to `out`.
+local function steps_for(out, hud, anm, snd, cam)
+	if FDDA_MOTIONS and hud then
+		-- the engine caches the container per hud SECTION, not per motion, so
+		-- open + idle of the same section is one step
+		if not done_motion[hud] then
+			done_motion[hud] = true
+			out[#out + 1] = {kind = "motion", hud = hud, anm = anm}
+		end
+	end
+	if FDDA_MODELS and hud and ini_sys:section_exist(hud) then
+		local visual = ini_sys:r_string_ex(hud, "item_visual")
+		if visual and not done_model[visual] then
+			done_model[visual] = true
+			out[#out + 1] = {kind = "model", visual = visual}
+		end
+	end
+	if FDDA_SOUNDS and snd and done_snd[snd] == nil then
+		done_snd[snd] = true
+		out[#out + 1] = {kind = "sound", path = snd}
+	end
+	if FDDA_CAM_FILES and cam and not done_cam[cam] then
+		done_cam[cam] = true
+		out[#out + 1] = {kind = "cam", path = cam}
+	end
+end
+
+-- One section of animations_settings.ltx, read the way
+-- get_template_action_play_animation_fdda_config reads it.
+local function steps_for_setting(out, sec)
+	if not (ini_eff and ini_eff:section_exist(sec)) then return false end
+	local anm = ini_eff:r_string_ex(sec, "anm")
+	if not anm then return false end
+	steps_for(out, anm .. "_hud", SHOW_ANM,
+	          ini_eff:r_string_ex(sec, "snd"), ini_eff:r_string_ex(sec, "cam"))
+	return true
+end
+
+local function mcm_on(path)
+	local m = rawget(_G, "liz_fdda_redone_mcm") or liz_fdda_redone_mcm
+	if type(m) ~= "table" or type(m.get_config) ~= "function" then return true end
+	local ok, v = pcall(m.get_config, path)
+	if not ok then return true end
+	return v and true or false
+end
+
+-- The three sections liz_fdda_redone_backpack.script resolves, with its own
+-- fallbacks (note that its close falls back to backpack_OPEN_stalker).
+local function backpack_steps(out)
+	local faction = "stalker"
+	local ok, comm = pcall(function() return character_community(db.actor) end)
+	if ok and type(comm) == "string" and #comm > 6 then faction = string.sub(comm, 7) end
+
+	local n = 0
+	local open = ini_eff:section_exist("backpack_open_" .. faction)
+	             and ("backpack_open_" .. faction) or "backpack_open_stalker"
+	if steps_for_setting(out, open) then n = n + 1 end
+
+	local idle = "item_ea_backpack_open_" .. faction .. "_hud"
+	if not ini_sys:section_exist(idle) then idle = "item_ea_backpack_open_stalker_hud" end
+	if ini_sys:section_exist(idle) then
+		steps_for(out, idle, IDLE_ANM, nil, nil)
+		n = n + 1
+	end
+
+	local close = ini_eff:section_exist("backpack_close_" .. faction)
+	              and ("backpack_close_" .. faction) or "backpack_open_stalker"
+	if steps_for_setting(out, close) then n = n + 1 end
+	return n, faction
+end
+
+local function inventory_steps(out)
+	local items, targets = 0, 0
+	local function one(owner, obj)
+		items = items + 1
+		local sec = obj:section()
+		if seen_sec[sec] then return end
+		-- over the cap: leave it unseen, so a later pickup of it still warms it
+		if targets >= MAX_LOAD_TARGETS then return end
+		seen_sec[sec] = true
+		if steps_for_setting(out, sec) then targets = targets + 1 end
+	end
+	pcall(function() db.actor:iterate_inventory(one, db.actor) end)
+	return targets, items
+end
+
+-- ---------------------------------------------------------------------------
+-- reporting
+-- ---------------------------------------------------------------------------
+
+local function report_tally()
+	local m, v, s, c = tally.motion, tally.model, tally.sound, tally.cam
+	if FDDA_MOTIONS then
+		say("fdda motions: %s hud sections warmed, %s missing, %s failed, %s ms", m[1], m[2], m[3], r(m[4]))
+	else say("fdda motions: switched off") end
+	if FDDA_MODELS then
+		say("fdda models: %s loaded, %s missing, %s failed, %s ms", v[1], v[2], v[3], r(v[4]))
+	else say("fdda models: switched off") end
+	if FDDA_SOUNDS then
+		say("fdda sounds: %s built, %s failed, %s ms (held, never played)", s[1], s[3], r(s[4]))
+	else say("fdda sounds: switched off") end
+	if FDDA_CAM_FILES then
+		say("fdda cam files: %s read, %s not loose, %s failed, %s ms", c[1], c[2], c[3], r(c[4]))
+	else say("fdda cam files: switched off") end
+end
+
+-- ---------------------------------------------------------------------------
+-- on-take drain
+-- ---------------------------------------------------------------------------
+
+function actor_on_update()
+	if not draining then return end
+	drain_frames = drain_frames + 1
+	local n = 0
+	while qi <= #queue and n < STEPS_PER_FRAME do
+		local ms = run_step(queue[qi])
+		if ms > drain_worst then drain_worst = ms end
+		qi = qi + 1
+		n = n + 1
+		drain_steps = drain_steps + 1
+	end
+	if qi > #queue then
+		draining = false
+		UnregisterScriptCallback("actor_on_update", actor_on_update)
+		if VERBOSE then
+			printf("[alao_prewarm %s] fdda on-take: %s steps over %s frames, worst step %s ms",
+			       VERSION, drain_steps, drain_frames, r(drain_worst))
+			report_tally()
+		end
+		queue, qi = {}, 1
+	end
+end
+
+function actor_on_item_take(obj)
+	if not (ready and FDDA_ON_TAKE and obj) then return end
+	local ok, sec = pcall(function() return obj:section() end)
+	if not ok or not sec or seen_sec[sec] then return end
+	seen_sec[sec] = true
+	local before = #queue
+	steps_for_setting(queue, sec)
+	if #queue > before and not draining then
+		draining = true
+		drain_frames, drain_steps, drain_worst = 0, 0, 0
+		tally_reset()
+		RegisterScriptCallback("actor_on_update", actor_on_update)
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- entry point
+-- ---------------------------------------------------------------------------
+
+function actor_on_first_update()
+	if VERBOSE then printf("[alao_prewarm %s] fdda", VERSION) end
+	if not PREWARM_FDDA then return say("fdda: switched off, nothing done") end
+
+	local l2 = rawget(_G, "lam2") or lam2
+	local cons = rawget(_G, "liz_fdda_redone_consumables") or liz_fdda_redone_consumables
+	if type(l2) ~= "table" or type(cons) ~= "table" then
+		return say("fdda: FDDA Redone (lam2 / liz_fdda_redone_consumables) not installed, nothing to do")
+	end
+	if not (db and db.actor) then return say("fdda: no db.actor, nothing done") end
+
+	local ok, ini = pcall(ini_file, SETTINGS_LTX)
+	if not (ok and ini) then return say("fdda: cannot open %s, nothing done", SETTINGS_LTX) end
+	ini_eff = ini
+
+	-- A level change drops the player hud's motion containers and the model
+	-- pool, so those are redone; the sound objects are still held and the OS
+	-- cache does not care.
+	done_motion, done_model, seen_sec = {}, {}, {}
+	queue, qi = {}, 1
+	tally_reset()
+
+	local steps = {}
+	local nb, faction, ni, items = 0, "-", 0, 0
+	if FDDA_BACKPACK then
+		if mcm_on("backpack/enable") then
+			nb, faction = backpack_steps(steps)
+		else
+			say("fdda backpack: FDDA's backpack animation is off in MCM, skipped")
+		end
+	end
+	if FDDA_INVENTORY then
+		if mcm_on("consumables/enable") then
+			ni, items = inventory_steps(steps)
+		else
+			say("fdda inventory: FDDA's consumable animations are off in MCM, skipped")
+		end
+	end
+
+	say("fdda: %s backpack sections (faction %s) + %s animated item sections out of %s items in the ruck, %s steps",
+	    nb, faction, ni, items, #steps)
+	if #steps == 0 then
+		say("fdda: nothing to warm")
+	else
+		local t0 = now_ms()
+		for i = 1, #steps do run_step(steps[i]) end
+		report_tally()
+		say("fdda: %s ms total, synchronous at first update", r(now_ms() - t0))
+	end
+	say("fdda on-take: %s", FDDA_ON_TAKE and ("armed, " .. STEPS_PER_FRAME .. " step(s) per frame") or "switched off")
+	ready = true
+end
+
+-- Items re-enter the ruck while the next level spawns; those are the load
+-- scan's job, not the drain's.
+function actor_on_net_destroy()
+	ready = false
+	if draining then
+		draining = false
+		UnregisterScriptCallback("actor_on_update", actor_on_update)
+	end
+	queue, qi = {}, 1
+end
+
+function on_game_start()
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+	RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
+	if PREWARM_FDDA and FDDA_ON_TAKE then
+		RegisterScriptCallback("actor_on_item_take", actor_on_item_take)
+	end
+end
+
+-- Test hooks.  Nothing in the game calls these.
+function _alao_state()
+	return {ready = ready, queue = queue, qi = qi, draining = draining,
+	        held = held, tally = tally, seen = seen_sec,
+	        done_motion = done_motion, done_model = done_model,
+	        done_snd = done_snd, done_cam = done_cam}
+end
