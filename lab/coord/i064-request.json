@@ -1,0 +1,64 @@
+{
+  "label": "I-064-spawn-prewarm-v10",
+  "baseline_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I063-b",
+  "variant_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/agent-I064-b",
+  "baseline_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "variant_overlay_bottom": "C:/code/GIT/anomaly_alao/lab/coord/overlays/ref3-vanilla-bottom",
+  "profiler_overlay": "C:/code/GIT/anomaly_alao/lab/coord/overlays/alao-profiler-walkout-listeners-inv",
+  "repeats": 2,
+  "duration_s": 150,
+  "warmup_s": 30,
+  "save": "gammabaseline",
+  "notes": "ATTENDED. THE USER MUST BE AT THE KEYBOARD FOR ALL FOUR CAPTURES (2 repeats x 2 arms). Arms differ by exactly one added file: the variant overlay is agent-I063-b plus gamedata/scripts/zzz_alao_spawn_prewarm.script (lab/mods/alao-spawn-prewarm v1.0, built by lab/coord/i064_build_overlay.py). Nothing is replaced, no function is wrapped or patched. The profiler overlay is gen6-I062's walkout v4 build - use the path as given, do NOT rebuild it; the mod's work shows up on its own as lst actor_on_first_update#zzz_alao_spawn_prewarm.script and under acr alife_create, no extra wrapped name is needed. WHAT IS BEING TESTED: the 432-456 ms hamlet-arrival frame. The existing logs already answer engine-vs-Lua: in all 8 hitch captures (runs 20260920-194429-I-063-d9e519 and 20260920-201819-I-062-a83793) the 30 s window that holds the hitch has exactly 5251 on_specific_character_init callbacks, every other window has 0, the load window has 52. GAMMA ships ~5300 specific characters (Dux's kit alone is 5098); the first fresh class-profile stalker of a session makes the engine walk and cold-load all of them inside one alife():create, marshalling each to a Lua table for DXML (+7.7 MB Lua heap in that frame). Engine-bound, indivisible, once per session, independent of squad size and of which smart spawns. The variant creates one throwaway sim_default stalker at actor_on_first_update (frame ~8, loading screen up), pins it offline, releases it through safe_release_manager; the walk happens there. BASELINE ARM = the v4 diagnosis the I-062 request asked for (bnd -> sub -> spn -> mem -> acr): expect acr alife_create to carry ~all of try_respawn's 440 ms, on the FIRST member only. VARIANT ARM = the fix. ROUTINE, identical in all four captures, the hamlet walk of i062-smart-terrain-request: sit out the 30 s warm-up doing nothing, then walk STRAIGHT to the hamlet that triggers the fast-travel discovery by the usual route, stand there ~10 s, walk back, and stop moving ~20 s before the end. No inventory, no PDA. Do not avoid other smarts. Say in the run notes whether the big stutter on the way out was felt, per capture, before looking at which arm it was. READ IT BACK WITH: py -3.12 lab/tools/profile_report.py --queue <id> --frames --axes --hitch --listeners ; and grep the four xray.log files for '[alao_spawn' and for 'name=on_specific_character_init'.",
+  "pass_conditions": [
+    {
+      "row": "engine log sanity - READ THIS FIRST, before crediting anything",
+      "baseline": "no [alao_spawn lines at all",
+      "variant_expected": "'[alao_spawn 1.0] installed: prewarm=true report=true' once per load, then '[alao_spawn] prewarm: created and released sim_default_stalker_0 (id N) in ~400-500 ms behind the loading screen, 5251 cold character loads absorbed'",
+      "passes_if": "the prewarm line is there, its cold-load count is in the thousands (expected 5251) and its own ms is of the order of the hitch it replaces",
+      "fails_if": "'prewarm skipped: ...' or 'prewarm FAILED' (no candidate section / create refused), or the line ends in 'do NOT credit the prewarm' (cold loads < 500: the walk did not happen at create time, the theory is wrong, and any missing hitch in the variant is NOT this mod's doing)"
+    },
+    {
+      "row": "cb on_specific_character_init, calls per 30 s window",
+      "baseline": "52 in window 1, 5251 in the window holding the hitch, 0 elsewhere (8 of 8 captures so far)",
+      "variant_expected": "~5300 in window 1 (dropped from the per-frame tables, but the cb line is in the log), 0 in every later window",
+      "passes_if": "no in-play window of a variant capture has more than ~100 calls",
+      "fails_if": "a variant in-play window still shows thousands: the engine cache did not hold what the throwaway loaded"
+    },
+    {
+      "row": "bnd bind_smart_terrain.smart_terrain_binder.update / sub se_smart_terrain.try_respawn, max ms - THE TARGET",
+      "baseline": "one call of 432-456 ms per capture, 99.97% try_respawn",
+      "variant_expected": "the same squad still spawns on the way out (the '[alao_spawn] squad ... at smart ...: N npcs, M ms ..., 0 cold character loads' line proves it did) and try_respawn's max is whatever a WARM squad creation costs - not measured before, my estimate is 2-15 ms",
+      "passes_if": "try_respawn max in both variant captures is at least 5 ms (the hitch bar) below the baseline's - expected ~420+ ms below - AND a '[alao_spawn] squad' line exists in the variant captures. Without that line no squad spawned and the row says nothing.",
+      "fails_if": "a >= 100 ms try_respawn is still there in the variant with '0 cold character loads' on its squad line: then the cost is somewhere else in the create and the v4 mem/acr axes of that capture say where"
+    },
+    {
+      "row": "baseline arm only: the v4 diagnosis (spn / mem / acr axes under try_respawn)",
+      "baseline": "unknown until now",
+      "variant_expected": "n/a",
+      "passes_if": "acr alife_create max is within a few ms of try_respawn's max, i.e. one create call holds the hitch - that is the character walk",
+      "fails_if": "the time sits in mem (setup_squad_and_group, setup_civil_war_squad, adjust_squad_size ...) with a small acr: then it is Lua after all, the 5251 callbacks are a coincidence of the same frame, and this mod is the wrong fix"
+    },
+    {
+      "row": "where the cost went",
+      "baseline": "n/a",
+      "variant_expected": "lst actor_on_first_update#zzz_alao_spawn_prewarm.script ~440 ms at frame 7-8, on top of an actor_on_first_update that is already 1.24 s; the loading screen is up until frame ~62",
+      "passes_if": "first_frame of that row is 7 or 8 and there is no other zzz_alao_spawn_prewarm row above the 0.1 ms floor except on_try_respawn / squad_on_npc_creation noise",
+      "fails_if": "the row's first_frame is after the loading screen went (frame > 62)"
+    },
+    {
+      "row": "frame ms, the thing the player feels",
+      "baseline": "one 434-458 ms frame per capture",
+      "variant_expected": "no frame over 100 ms after the loading screen except the known ones (TickNews 26-29 ms at t~54 s is the game's)",
+      "passes_if": "no in-play frame >= 100 ms in either variant capture, and the user did not feel the walk-out stutter in the captures that turn out to be the variant",
+      "fails_if": "a several-hundred-ms frame remains in the variant"
+    },
+    {
+      "row": "gameplay regression check",
+      "baseline": "n/a",
+      "variant_expected": "no extra NPC visible anywhere near the load point; no '! ' error lines naming sim_default_stalker_0, safe_release_manager or zzz_alao_spawn_prewarm; saving and reloading works",
+      "passes_if": "nothing of the kind in the four logs",
+      "fails_if": "anything of the kind - disable the mod (ENABLED = false at the top of the script, or drop the file) and report"
+    }
+  ]
+}

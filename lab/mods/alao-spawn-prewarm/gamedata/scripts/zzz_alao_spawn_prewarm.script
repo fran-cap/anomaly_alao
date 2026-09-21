@@ -1,0 +1,246 @@
+-- zzz_alao_spawn_prewarm.script
+-- ALAO lab, I-064: the ~440 ms frame when the first squad of a session spawns.
+--
+-- WHAT THE 440 ms IS
+-- Eight of eight attended captures on `gammabaseline` have one 432-456 ms frame
+-- inside se_smart_terrain:try_respawn -> SIMBOARD:create_squad.  The profiler
+-- logs of those same captures already say what it is: the 30 s window holding
+-- the hitch has exactly 5251 `on_specific_character_init` callbacks, every other
+-- window of every capture has 0 (and 52 at load).  GAMMA ships ~5300
+-- <specific_character> entries (Dux's Innumerable Characters Kit is 5098 of
+-- them).  When the engine creates a stalker whose character_profile is a CLASS
+-- (every sim_default_* squad member), CSE_ALifeTraderAbstract picks a random
+-- matching character by walking ALL of them, and the first walk of a session
+-- loads each one cold: xml -> struct, plus with Modded Exes a Lua table per
+-- character for DXML's CSpecificCharacterInit / CSpecificCharacterDialogList
+-- (that is the +7.7 MB of Lua heap in the hitch frame, ~1.5 KB a character).
+-- The engine caches them, so it is paid ONCE PER SESSION, by whichever smart
+-- happens to spawn the first fresh stalker - on this save that is when the
+-- player walks out of the 150 m respawn_radius of the smart next to the load
+-- point, which is why it reads as "arriving at the hamlet".
+--
+-- So: engine-bound, indivisible (one loop inside one alife():create), and not
+-- proportional to squad size.  Spreading create_npc over frames would not touch
+-- it (the first member still pays all of it) and would leave half-built squads
+-- for the simulation to trip over.  The only lever is WHEN.
+--
+-- WHAT THIS DOES
+-- At actor_on_first_update - frame ~8, loading screen still up, the frame that
+-- already costs 1.3 s - create one throwaway sim_default stalker, which makes
+-- the engine do its cold walk there, then hand it to safe_release_manager, the
+-- same path ZCP's adjust_squad_size uses on about half of all squad members it
+-- creates (squad_size 0.55).  The stalker is pinned offline first
+-- (set_switch_online false) so it can never appear in the world.
+--
+-- WHAT THIS DOES NOT DO
+-- It replaces nothing and wraps nothing: no function of smart_terrain /
+-- sim_board / smr_* is touched, so which squads spawn, where, when and with
+-- whom is byte-for-byte the game's.  It does not delete the duplicated
+-- setup_squad_and_group / setup_civil_war_squad pass in try_respawn: with civil
+-- war disabled (GAMMA's setting) that pass is two MCM reads plus a few field
+-- writes per member, far under 0.1 ms, and removing it means wrapping functions
+-- the profiler also wraps.  It stores nothing in the save; remove the mod and
+-- the save loads as before.
+--
+-- It prints one line when it installs, one when the prewarm ran (with its own
+-- cost and the number of cold character loads it absorbed - if that number is
+-- not in the thousands the prewarm did nothing and must not be credited), and
+-- one line per squad spawned afterwards with the cold loads that squad still
+-- paid (should be ~0).
+
+local VERSION = "1.0"
+
+-- ---------------------------------------------------------------------------
+-- switches.  No MCM on purpose.
+-- ---------------------------------------------------------------------------
+local ENABLED            = true    -- false: the file loads and does nothing at all
+local PREWARM_CHARACTERS = true    -- the throwaway stalker behind the loading screen
+local REPORT_SPAWNS      = true    -- one log line per squad created later on
+local MAX_REPORTS        = 40      -- per session, so a new game's fill_start_position cannot flood the log
+
+-- Squad sections whose members are read to find a throwaway candidate, then
+-- plain fallbacks.  A candidate must exist and its character_profile must be a
+-- sim_default_* class profile (that is what makes the engine walk the list).
+local SQUAD_SOURCES = {
+	"stalker_sim_squad_novice", "stalker_sim_squad_advanced",
+	"bandit_sim_squad_novice", "army_sim_squad_novice",
+}
+local NPC_FALLBACKS = {
+	"sim_default_stalker_0", "sim_default_stalker_1", "sim_default_bandit_0",
+}
+
+-- ---------------------------------------------------------------------------
+-- state
+-- ---------------------------------------------------------------------------
+local cold_loads   = 0       -- on_specific_character_init calls since the last report
+local cold_total   = 0
+local try_clock    = nil     -- os.clock() at the latest on_try_respawn
+local try_smart_id = nil
+local pending      = nil     -- {squad=, smart=, n=, ms=, cold=}
+local reports      = 0
+local prewarm_runs = 0
+local last         = {}      -- test hook: what the last prewarm did
+
+local function say(fmt, ...)
+	printf("[alao_spawn] " .. fmt, ...)
+end
+
+-- ---------------------------------------------------------------------------
+-- counters (cheap listeners, no wrapping)
+-- ---------------------------------------------------------------------------
+
+-- DXML callback, fired by the engine once per character the first time that
+-- character is loaded.  52 at load, 0 per frame in play.
+local function on_specific_character_init()
+	cold_loads = cold_loads + 1
+	cold_total = cold_total + 1
+end
+
+local function flush_pending()
+	local p = pending
+	if not p then return end
+	pending = nil
+	if reports >= MAX_REPORTS then return end
+	reports = reports + 1
+	say("squad %s at smart %s: %s npcs, %s ms from try_respawn to the last member, %s cold character loads%s",
+	    p.squad, p.smart, p.n, p.ms and string.format("%.0f", p.ms) or "n/a", p.cold,
+	    p.cold > 500 and " (COLD: the prewarm did not cover this spawn)" or "")
+end
+
+-- Fires at the top of every se_smart_terrain:try_respawn, a few times a second
+-- over all smarts.  Never touches `flags`.
+local function on_try_respawn(smart, flags)
+	if pending then flush_pending() end
+	try_clock = os.clock()
+	try_smart_id = smart and smart.id
+end
+
+-- Fires once per member at the end of SIMBOARD:create_squad, i.e. only when a
+-- squad was really created.
+local function squad_on_npc_creation(squad, se_obj, smart)
+	if not db.actor then return end          -- new game fill_start_position
+	local sq_name = squad and squad.name and squad:name() or "?"
+	if pending and pending.squad ~= sq_name then flush_pending() end
+	if not pending then
+		pending = {squad = sq_name, smart = smart and smart.name and smart:name() or "?", n = 0, cold = 0}
+	end
+	pending.n = pending.n + 1
+	pending.cold = pending.cold + cold_loads
+	cold_loads = 0
+	if try_clock and smart and smart.id == try_smart_id then
+		pending.ms = (os.clock() - try_clock) * 1000
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- the prewarm
+-- ---------------------------------------------------------------------------
+
+local function usable(sec)
+	if not (sec and sec ~= "" and ini_sys:section_exist(sec)) then return false end
+	local prof = ini_sys:r_string_ex(sec, "character_profile")
+	if not (prof and string.find(prof, "sim_default_", 1, true) == 1) then return false end
+	local cd = ini_sys:r_string_ex(sec, "custom_data")
+	if cd and cd ~= "" and cd ~= "default_custom_data.ltx" then return false end
+	return true
+end
+
+local function pick_section()
+	for i = 1, #SQUAD_SOURCES do
+		local sq = SQUAD_SOURCES[i]
+		if ini_sys:section_exist(sq) then
+			local s = ini_sys:r_string_ex(sq, "npc_random") or ini_sys:r_string_ex(sq, "npc")
+			if s then
+				local names = parse_names(s)
+				for j = 1, #names do
+					if usable(names[j]) then return names[j] end
+				end
+			end
+		end
+	end
+	for i = 1, #NPC_FALLBACKS do
+		if usable(NPC_FALLBACKS[i]) then return NPC_FALLBACKS[i] end
+	end
+	return nil
+end
+
+local function prewarm_characters()
+	last = {ran = false}
+	local sim = alife()
+	local se_actor = sim and sim:actor()
+	if not (sim and se_actor and db.actor) then
+		say("prewarm skipped: no alife / actor")
+		return
+	end
+	if alife_on_limit and alife_on_limit() then
+		say("prewarm skipped: alife id storage is almost full")
+		return
+	end
+	local sec = pick_section()
+	if not sec then
+		say("prewarm skipped: no sim_default stalker section found")
+		return
+	end
+
+	local cold0 = cold_total
+	local c0 = os.clock()
+	local se = alife_create(sec, se_actor.position, se_actor.m_level_vertex_id, se_actor.m_game_vertex_id)
+	local ms = (os.clock() - c0) * 1000
+	if not se then
+		say("prewarm FAILED: alife_create(%s) returned nil after %.0f ms", sec, ms)
+		return
+	end
+	-- never online, not for one frame: pin it, then let the game's own release
+	-- path take it on its next tick.
+	local id = se.id
+	local ok, err = pcall(function()
+		sim:set_switch_online(id, false)
+		sim:set_switch_offline(id, true)
+		safe_release_manager.release(se)
+	end)
+	if not ok then
+		-- whatever went wrong, the throwaway must not outlive this call: it was
+		-- never online, so releasing it here is what safe_release_manager would
+		-- have done one tick later.
+		say("prewarm: deferred release failed (%s), releasing %s now", tostring(err), id)
+		alife_record(se, false)
+		sim:release(se, true)
+	end
+
+	local cold = cold_total - cold0
+	cold_loads = 0                      -- those were ours, not the next squad's
+	prewarm_runs = prewarm_runs + 1
+	last = {ran = true, section = sec, id = id, ms = ms, cold = cold}
+	say("prewarm: created and released %s (id %s) in %.0f ms behind the loading screen, %s cold character loads absorbed%s",
+	    sec, id, ms, cold,
+	    cold < 500 and " (already warm, or this is not where the cost is: do NOT credit the prewarm)" or "")
+end
+
+local function actor_on_first_update()
+	if PREWARM_CHARACTERS then
+		local ok, err = pcall(prewarm_characters)
+		if not ok then say("prewarm ERROR (contained): %s", tostring(err)) end
+	end
+end
+
+function on_game_start()
+	if not ENABLED then
+		printf("[alao_spawn %s] installed but DISABLED by its kill switch", VERSION)
+		return
+	end
+	RegisterScriptCallback("on_specific_character_init", on_specific_character_init)
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+	if REPORT_SPAWNS then
+		RegisterScriptCallback("on_try_respawn", on_try_respawn)
+		RegisterScriptCallback("squad_on_npc_creation", squad_on_npc_creation)
+	end
+	printf("[alao_spawn %s] installed: prewarm=%s report=%s", VERSION,
+	       tostring(PREWARM_CHARACTERS), tostring(REPORT_SPAWNS))
+end
+
+-- Test hooks.  Nothing in the game calls these.
+function _alao_state()
+	return {cold_loads = cold_loads, cold_total = cold_total, pending = pending,
+	        reports = reports, prewarm_runs = prewarm_runs, last = last}
+end
+function _alao_flush() flush_pending() end
