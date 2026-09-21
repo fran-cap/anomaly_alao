@@ -902,18 +902,18 @@
     },
     {
       "id": "I-062",
-      "title": "Engine-called globals the profiler cannot see (visual_memory_manager.get_visible_value)",
+      "title": "Walk-out profiler: binders, engine-called globals, time events, slow-frame and nested lines",
       "category": "instrument",
       "generation": 6,
       "parent": "I-048",
-      "status": "proposed",
-      "score": 7.5,
+      "status": "kept",
+      "score": 9.5,
       "risk": "medium",
       "expected_gain": "unknown",
       "hypothesis": "Stealth Overhaul's get_visible_value does 8 uncached MCM reads per NPC visibility evaluation and is invoked by the engine directly, not through SendScriptCallback, so the I-048 profiler never sees it. Zero standing still, potentially large in a crowd.",
       "change": "Wrap a short list of engine-called globals in the profiler; size it on the busy-hub save.",
       "measure": "us/frame in a crowd.",
-      "notes": "Found by agent-I056. Needs I-053. Related: SYS_GetParam is uncached on Modded Exes too, ~10-19 reads/frame (weapon_cover_tilt, fluid_aim, ssfx_weapons_dof, arti_jamming), est. 5-10 us."
+      "notes": "Found by agent-I056. Needs I-053. Related: SYS_GetParam is uncached on Modded Exes too, ~10-19 reads/frame (weapon_cover_tilt, fluid_aim, ssfx_weapons_dof, arti_jamming), est. 5-10 us. GEN-6 2026-09-20 agent/gen6-I062 cfa9984 (lab/profiler-walkout, WALKOUT_VER 4; overlays alao-profiler-walkout[-listeners-inv]; profile_report --frames --axes --trace). Luabind binder classes are USERDATA, not tables: the old WRAP_BINDERS mode never worked in game; v2 wraps 284 classes and shouts when bnd=0. frm line per frame >= 12 ms (frame ms, script split by axis, spawn/destroy, GC, top-3), nst line = top-5 regions inside any call >= 50 ms, one axis per nesting level. ANSWERS: the small walk-out stutter (35-40 ms frames) is 1-3 % script with binders visible = ENGINE; the ~26 ms frame at t~54 s in every capture since I-058 is the game's dynamic_news_manager TickNews time event, not ours; device().time_delta == time_global() delta exactly; visual_memory_manager.get_visible_value = 20.3 us/call x 1.68/frame = 34 us/frame standing (over the 25 us bar, scales with NPCs in view); Lua 5.1's 60-upvalue limit is a load-time failure in big overlay functions. Runs 20260920-185607-I-062-a1c78b (v1, bnd=0), 20260920-194429-I-063-d9e519 (v2), 20260920-201819-I-062-a83793 (v3)."
     },
     {
       "id": "I-063",
@@ -921,14 +921,59 @@
       "category": "structural",
       "generation": 6,
       "parent": "I-058",
-      "status": "proposed",
+      "status": "kept",
       "score": 9.0,
       "risk": "medium",
       "expected_gain": "high",
       "hypothesis": "First inventory open costs 8-18 ms against 3-6 for later opens; first jump / land / footstep 3-4.5 ms against under 1; these cold costs land in or near the same frame in real play.",
       "change": "One monkey-patch mod (lab/mods/alao-prewarm): construct UIInventory() behind the loading screen, pooled path-keyed sound_object cache prefilled for the movement sound set, encyclopedia unlock path, a sweep for other cold-signature listeners, lam2.script:271 diagnosis. Prewarm cost must land behind the loading screen or be sliced to <= 0.5 ms/frame.",
       "measure": "hitch profiler, attended run, per-call max and first-call cost per listener; summed cold cost moved out of play.",
-      "notes": "agent-I063 started 2026-09-20 off main a53b908, overlay on top of agent-I057-b."
+      "notes": "agent-I063 started 2026-09-20 off main a53b908, overlay on top of agent-I057-b. RESULTS 2026-09-20 agent/gen6-I063 a597544, mod lab/mods/alao-prewarm v1.3 (two scripts, replaces no file). CONFIRMED IN GAME: tutorial sequencer cold start - bind_campfire.script:176 game.start_tutorial costs 705-736 ms once (755-771 ms frame, user felt it) in every baseline capture that reached a campfire and is absent in every prewarm capture (injected DXML no-op tutorial, start+stop at first update; the 700 ms moves behind the loading screen, first_update 1.3 -> 2.0 s); held sound_objects make later constructions cheap (footstep_sounds:87 no call >= 0.1 ms, eft_jump_sounds 0.56 -> 0.16); encyclopedia singleton 8.8/7.7 -> 1.9/1.9 (first run only). RETRACTED: inventory object prewarm never ran (FDDA and SortingPlus already build ui_inventory.GUI at first update). Time-slicing cold loads is wrong in principle (one cold sound_object is 2-18 ms; v1.0 put a hundred of them after the loading screen; v1.1 builds everything at frame 7). Inventory first open: pool growth confirmed by trace (cells 0->19, 7.9-17.4 ms vs 3.5-4.9 later) but Grow() constructs nothing and the first-open FRAME is ~30 ms mostly engine; pool prewarm worth ~2.5 ms at best, low priority, decide by frame ms over >= 4 captures per arm."
+    },
+    {
+      "id": "I-064",
+      "title": "Squad spawn on the arrival frame: se_smart_terrain:try_respawn = 430-450 ms",
+      "category": "structural",
+      "generation": 6,
+      "parent": "I-062",
+      "status": "proposed",
+      "score": 9.5,
+      "risk": "medium",
+      "expected_gain": "high",
+      "hypothesis": "Walking to the hamlet near the gammabaseline start costs one 434-456 ms frame in EVERY capture (8 of 8), ~100 % script, +6.5-8 MB GC: bind_smart_terrain update -> try_respawn (99.97 %) -> smr_pop.smr_handle_spawn -> SIMBOARD:create_squad. The respawn gate returns while dist_to_actor < respawn_radius and dist is math.huge offline, and the 30 % first-spawn damper is commented out (ZCP smart_terrain.script:1646), so the first update after a smart comes online is the first that can pass: possibly every smart with respawn_params the player first approaches per session.",
+      "change": "Decide with the v4 axes whether it is N x alife_create (engine: only deferrable, spread members over frames or move the roll off the arrival frame) or Lua around it (fixable outright: try_respawn repeats setup_squad_and_group per member and setup_civil_war_squad that create_squad already did, 5-7 squad_members() passes).",
+      "measure": "walkout profiler nst/acr lines, attended hamlet walk; then per-call max before/after.",
+      "notes": "Live winner G.A.M.M.A. ZCP 1.4 Balanced Spawns. Request prepared: lab/coord/overlays/i062-smart-terrain-request.json. The user felt it ('larger stutter walking out to the hamlet that triggered the fast travel mod')."
+    },
+    {
+      "id": "I-065",
+      "title": "sim_squad_scripted first_update bursts after every load",
+      "category": "structural",
+      "generation": 6,
+      "parent": "I-062",
+      "status": "proposed",
+      "score": 7.5,
+      "risk": "medium",
+      "expected_gain": "medium",
+      "hypothesis": "10+ frames of 30-40 ms, ~90 % script, +3-5 MB GC each, at t=34-41 s in most captures: every squad's one-off first_update alife_create_item's its item_on_all list per member.",
+      "change": "Stagger or cheapen the first_update item creation.",
+      "measure": "walkout profiler frm lines in the first 30 s after load.",
+      "notes": "Sits mostly inside the harness warm-up window, which is why no earlier run saw it."
+    },
+    {
+      "id": "I-066",
+      "title": "visual_memory_manager.get_visible_value: 34 us/frame standing, 8 uncached MCM reads per evaluation",
+      "category": "structural",
+      "generation": 6,
+      "parent": "I-056",
+      "status": "proposed",
+      "score": 8.0,
+      "risk": "low",
+      "expected_gain": "medium",
+      "hypothesis": "Engine-called, invisible to the callback profiler until I-062: 20.3 us/call at 1.68 calls/frame standing still; scales with NPCs in view.",
+      "change": "Cache the stealth_mcm.get_config values with on_option_change invalidation (monkey patch).",
+      "measure": "eng axis us/frame, standing and in a crowd (needs I-053).",
+      "notes": "Live winner is a mod copy (290- Atmospherics Shaders...). Found by I-056, measured by I-062."
     }
   ]
 }

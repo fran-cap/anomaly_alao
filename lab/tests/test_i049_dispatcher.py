@@ -200,7 +200,16 @@ def test_mid_pass_destroy_and_spawn_match_hspairs(arms):
             rt.execute("CLOCK = %d" % (f * 40))
             rt.execute('make_callback("actor_on_update")')
         out.append(_trace(rt))
-    assert out[0] == out[1]
+    # WHO fires on each frame must match; the ORDER within a frame must not be
+    # compared. After a mid-pass register/unregister the shipped hspairs heap is
+    # reseeded from pairs() over function keys, so arm A's order is pointer order
+    # (I-051: 14 distinct orders in 30 replays). Asserting out[0] == out[1] here
+    # failed about 1 run in 8 for exactly that reason. Trace entries lead with the
+    # frame clock, so sorting compares the per-frame multisets.
+    assert sorted(out[0]) == sorted(out[1])
+    # arm B (the shared dispatcher) IS deterministic: registration order, every run
+    b_first = [x.split("|")[1] for x in out[1] if x.startswith("40|")]
+    assert b_first == ["anom_1", "anom_2", "anom_3", "anom_4", "anom_6", "anom_7", "anom_8"]
     first_frame = [x for x in out[0] if x.startswith("40|")]
     assert not any("anom_5" in x for x in first_frame), "destroyed mid-pass must be skipped"
     assert not any("anom_new" in x for x in first_frame), "spawned mid-pass waits a frame"

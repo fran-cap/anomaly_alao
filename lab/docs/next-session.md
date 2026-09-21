@@ -3,6 +3,28 @@
 Written 2026-09-20 at the end of the gen-5 run. Read this, `lab/coord/README.md`,
 `lab/framework/README.md` ("Measuring a rewrite in script-ms", "The tail, not the mean") and `beam-ideas.md` section 12 first.
 
+## UPDATE, same evening: generation 6 already ran (hitches). Start here.
+
+`beam-ideas.md` sections 12.1 and 13 have the numbers. The attended runs in the table further down (I-057 moving, I-058 hitch)
+are DONE; I-057 is kept (-37 us/frame moving), the hitch bar is adopted (>= 5 ms, read as what lands in one frame; cold costs stack).
+`integrate/gen6` = main + `agent/gen6-I063` (alao-prewarm v1.3) + `agent/gen6-I062` (walk-out profiler v4): 711p/7s/4xf, lab 357p.
+
+Open, in order:
+
+1. **I-064 hamlet squad spawn, 430-450 ms, 8 of 8 captures.** `try_respawn` is 99.97 % of it. The v4 profiler (`alao-profiler-walkout-listeners-inv`,
+   one axis per nesting level, `acr` = `alife_create`) decides engine-bound (defer / spread) vs Lua (delete the duplicated
+   `setup_squad_and_group` / `setup_civil_war_squad` passes). Request ready: `lab/coord/overlays/i062-smart-terrain-request.json`, attended,
+   walk straight to the hamlet and do NOT avoid other smarts (tests 'once per smart per session'). Then the fix as a patcher or monkey patch, then re-measure.
+2. **I-066 `get_visible_value`** 34 us/frame standing: cache the 8 MCM reads. Unattended profiler run can score it on the `eng` axis.
+3. **I-065 squad first_update bursts** in the first ~25 s after every load.
+4. **I-063 leftovers:** inventory first open by FRAME ms over >= 4 captures per arm (expect little); `lam2.script:271` first animated item use 9-26 ms.
+5. I-061 arm drift A/A, I-060 orphaned cache refs, I-053 locked moving save (still needs the user) - unchanged from below.
+
+Attended-run habits that worked: tell the user the capture count (repeats x 2 ARMS, even when both arms are the same overlay); the user
+cannot be pinged mid-run, they message when done; read `[alao_prewarm]` / `wdr` / `bnx` log lines BEFORE crediting a mod or an instrument
+with a result; run `profile_report.py` from the branch that has the parser (`--frames --axes --trace --hitch`).
+Publishing: the user said not now, they will clean up first. Do not raise it each round.
+
 ## Locked in (do not re-measure)
 
 All script us/frame, I-048 profiler in both arms, 4x120 s, round 1 of each arm dropped, `gammabaseline`, standing still.

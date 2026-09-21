@@ -999,3 +999,34 @@ script hitch recorded. Load-time cost for scale: `actor_on_first_update` 1.27-1.
 **The hitch bar, as adopted by the user:** >= 5 ms, read as what lands in one frame, not per event. Cold costs stack
 (first jump, land and footstep were within ~170 frames of each other: 3.5 + 3.0 + 4.5 ms), so everything cold is worth
 pre-loading, provided the prewarm lands behind the loading screen or is sliced. Follow-up: I-063 prewarm bundle.
+
+## 13. Generation-6 results (2026-09-20, hitches: two agents, six attended runs)
+
+Same day as section 12, the user at the keyboard. Two agents (`agent/gen6-I062`, `agent/gen6-I063`) iterated against attended
+captures; merged conflict-free on `integrate/gen6`, suite 711 passed / 7 skipped / 4 xfailed, lab 357 passed. The axis here is
+**ms per event, not us per frame**. The user adopted the hitch bar: >= 5 ms, read as what lands in one frame (cold costs stack).
+
+| Hitch | Size | Cause | State |
+|---|---:|---|---|
+| first tutorial of a session (campfire prompt) | 705-736 ms, 755-771 ms frame | `bind_campfire.script:176` -> `game.start_tutorial`, cold sequencer | **fixed**, confirmed by the user, `alao-prewarm` v1.2+ |
+| hamlet arrival | 432-456 ms, 8 of 8 captures | `se_smart_terrain:try_respawn` (99.97 %) -> squad creation (ZCP / SMR) | **diagnosed**, I-064 |
+| cold movement sounds | 3-4.5 ms each, stacking | fresh `sound_object` per call, cold path | **fixed**, footsteps under 0.1 ms with the mod |
+| encyclopedia unlock on leaving a dialog | 6.4-9.5 ms | UI singleton built on first unlock | fixed 8.8/7.7 -> 1.9/1.9 (one run) |
+| first inventory open | 8-17 ms script, ~30 ms frame | cell pool 0->19 plus engine UI show | mostly engine; pool prewarm ~2.5 ms, low priority |
+| squad first_update bursts after load | 10+ frames of 30-40 ms | `sim_squad_scripted.update` first_update item creation | new, I-065 |
+| small walk-out stutter | 35-40 ms frames | 1-3 % script with binders visible | **engine**, closed |
+| one frame at t~54 s, every capture | 26-29 ms | `dynamic_news_manager` TickNews time event | the game's; cancels in deltas, contaminates p99 / 1% low |
+| first animated item use | 9-26 ms | `lam2.script:271` hud motion + cam effector + cold sound | open |
+| PDA open | 40-46 ms frame, 3-4 ms script | engine UI construction | engine |
+
+Instrument lessons (I-062): luabind classes are userdata, so the gen-3 `WRAP_BINDERS` mode never wrapped anything in game and
+nobody noticed because it was always off - an instrument must shout when it wraps zero; two wrapped functions on one axis make
+the inner one `nested` and invisible, hence one axis per nesting level; a wrapper must never wrap its own wrappers (that invented
+an 'our own 26 ms job' finding for one round, retracted); Lua 5.1's 60-upvalue limit is a load-time failure. Prewarm lessons
+(I-063): a time budget cannot bound an indivisible cold load (v1.0 put ~110 cold sound loads of 2-18 ms after the loading screen and
+the user, blind to arm order, called that capture the worst); read the log line that says the prewarm ran before crediting it (the
+inventory row was credited for two rounds while the log said 'GUI already built'); script ms is not frame ms.
+
+Also measured: `visual_memory_manager.get_visible_value` 34 us/frame standing (I-066, over the per-frame bar);
+`smart_terrain.setup_gulag_and_logic_on_spawn` 16-19 ms per call at load; `actor_on_first_update` 1.3 s, of which
+`surge_manager.lua:146` 630-670 ms.
